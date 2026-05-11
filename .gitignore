@@ -1,0 +1,7 @@
+node_modules
+dist
+.playwright-mcp
+src/data/champions-data.generated.ts
+vite.err
+vite.log
+*-audit.png

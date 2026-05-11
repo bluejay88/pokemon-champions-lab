@@ -1,0 +1,1195 @@
+import {
+  bestAttackingStat,
+  buildStats,
+  effectiveTypes,
+  formatPercent,
+  grounded,
+  resolveAbility,
+  resolveHeldItem,
+  resolvePokemonForm,
+  resistBerryType,
+  stageMultiplier,
+  typeBoostItemMap,
+  typeEffectiveness,
+} from './champions';
+import type {
+  DamageResult,
+  EnvironmentState,
+  PokemonBuild,
+  PokemonEntry,
+  PokemonMove,
+  StatBlock,
+  StatKey,
+  StatusCondition,
+} from '../types';
+
+const slicingMoves = new Set([
+  'Air Cutter',
+  'Air Slash',
+  'Aerial Ace',
+  'Ceaseless Edge',
+  'Cross Poison',
+  'Cut',
+  'Leaf Blade',
+  'Night Slash',
+  'Psycho Cut',
+  'Razor Leaf',
+  'Sacred Sword',
+  'Solar Blade',
+  'Stone Axe',
+  'X-Scissor',
+]);
+
+const punchMoves = new Set([
+  'Bullet Punch',
+  'Drain Punch',
+  'Dynamic Punch',
+  'Fire Punch',
+  'Focus Punch',
+  'Hammer Arm',
+  'Ice Hammer',
+  'Ice Punch',
+  'Mach Punch',
+  'Meteor Mash',
+  'Shadow Punch',
+  'Sky Uppercut',
+  'Thunder Punch',
+]);
+
+const biteMoves = new Set([
+  'Bite',
+  'Crunch',
+  'Fire Fang',
+  'Fishious Rend',
+  'Hyper Fang',
+  'Ice Fang',
+  'Jaw Lock',
+  'Poison Fang',
+  'Psychic Fangs',
+  'Thunder Fang',
+]);
+
+const pulseMoves = new Set([
+  'Aura Sphere',
+  'Dark Pulse',
+  'Dragon Pulse',
+  'Heal Pulse',
+  'Origin Pulse',
+  'Terrain Pulse',
+  'Water Pulse',
+]);
+
+const soundMoves = new Set([
+  'Bug Buzz',
+  'Clanging Scales',
+  'Disarming Voice',
+  'Echoed Voice',
+  'Growl',
+  'Heal Bell',
+  'Howl',
+  'Hyper Voice',
+  'Metal Sound',
+  'Noble Roar',
+  'Overdrive',
+  'Parting Shot',
+  'Perish Song',
+  'Relic Song',
+  'Roar',
+  'Round',
+  'Screech',
+  'Sing',
+  'Snarl',
+  'Sparkling Aria',
+  'Supersonic',
+  'Torch Song',
+  'Uproar',
+]);
+
+const ballBombMoves = new Set([
+  'Aura Sphere',
+  'Bullet Seed',
+  'Electro Ball',
+  'Energy Ball',
+  'Focus Blast',
+  'Ice Ball',
+  'Magnet Bomb',
+  'Mist Ball',
+  'Octazooka',
+  'Pollen Puff',
+  'Pyro Ball',
+  'Rock Blast',
+  'Seed Bomb',
+  'Shadow Ball',
+  'Sludge Bomb',
+  'Weather Ball',
+  'Zap Cannon',
+]);
+
+const recoilMoves = new Set([
+  'Brave Bird',
+  'Double-Edge',
+  'Flare Blitz',
+  'Head Smash',
+  'Take Down',
+  'Volt Tackle',
+  'Wave Crash',
+  'Wood Hammer',
+]);
+
+const drainingMoves = new Set([
+  'Drain Punch',
+  'Giga Drain',
+  'Horn Leech',
+  'Leech Life',
+  'Matcha Gotcha',
+  'Oblivion Wing',
+  'Parabolic Charge',
+  'Draining Kiss',
+]);
+
+const highPriorityImmunityAbilities = new Set(['Bulletproof', 'Dry Skin', 'Earth Eater', 'Flash Fire', 'Levitate', 'Lightning Rod', 'Motor Drive', 'Sap Sipper', 'Soundproof', 'Storm Drain', 'Volt Absorb', 'Water Absorb', 'Well-Baked Body', 'Wonder Guard']);
+const moldBreakerAbilities = new Set(['Mold Breaker', 'Teravolt', 'Turboblaze']);
+const normalConversionAbilities = new Set(['Aerilate', 'Galvanize', 'Pixilate', 'Refrigerate']);
+const burnImmuneFacade = new Set(['Facade']);
+const multiHitWeights = [
+  { hits: 2, weight: 0.35 },
+  { hits: 3, weight: 0.35 },
+  { hits: 4, weight: 0.15 },
+  { hits: 5, weight: 0.15 },
+];
+const randomRollFactors = Array.from({ length: 16 }, (_, index) => 85 + index);
+const attackStageFields = {
+  attack: 'attackStage',
+  specialAttack: 'specialAttackStage',
+  defense: 'defenseStage',
+  specialDefense: 'specialDefenseStage',
+  speed: 'speedStage',
+} as const satisfies Record<'attack' | 'specialAttack' | 'defense' | 'specialDefense' | 'speed', keyof PokemonBuild>;
+
+type DamageDistribution = Map<number, number>;
+type MutableAttackStatKey = 'attack' | 'specialAttack' | 'defense';
+type MutableDefenseStatKey = 'defense' | 'specialDefense';
+
+type PowerContext = {
+  attacker: PokemonEntry;
+  defender: PokemonEntry;
+  attackerBuild: PokemonBuild;
+  defenderBuild: PokemonBuild;
+  attackerAbility: string | null;
+  defenderAbility: string | null;
+  attackerStats: StatBlock;
+  defenderStats: StatBlock;
+  attackerGrounded: boolean;
+  defenderGrounded: boolean;
+  environment: EnvironmentState;
+  moveType: string;
+  attackerSpeed: number;
+  defenderSpeed: number;
+  attackerItemName: string | null;
+  defenderItemName: string | null;
+  notes: string[];
+};
+
+type MoveProfile = {
+  attackStat: MutableAttackStatKey;
+  defenseStat: MutableDefenseStatKey;
+  useTargetAttack: boolean;
+};
+
+function currentStats(build: PokemonBuild, pokemon: PokemonEntry) {
+  return buildStats(pokemon.baseStats, build.evs, build.natureId);
+}
+
+function currentHp(stats: StatBlock, build: PokemonBuild) {
+  return Math.max(1, Math.round(stats.hp * Math.max(1, Math.min(100, build.currentHpPercent)) / 100));
+}
+
+function isSoundMove(move: PokemonMove) {
+  return soundMoves.has(move.name);
+}
+
+function isBallBombMove(move: PokemonMove) {
+  return ballBombMoves.has(move.name);
+}
+
+function moveMakesContact(move: PokemonMove) {
+  const name = move.name.toLowerCase();
+  return punchMoves.has(move.name) || biteMoves.has(move.name) || ['tackle', 'claw', 'fang', 'whip', 'kick', 'bash', 'headbutt', 'tail', 'slam', 'jab', 'jab'].some((keyword) => name.includes(keyword));
+}
+
+function moveHasSecondaryEffect(move: PokemonMove) {
+  return Boolean(move.effectChance) || /chance|lowers|boosts|flinch|burn|poison|paraly|freeze|confus/i.test(move.description);
+}
+
+function hitCountSummary(move: PokemonMove, attackerItemName: string | null) {
+  const text = move.description;
+  if (/attacks twice/i.test(text) || /used twice/i.test(text)) {
+    return { minHits: 2, maxHits: 2, label: '2 hits', weights: [{ hits: 2, weight: 1 }] };
+  }
+
+  if (/2 to 5 times/i.test(text)) {
+    if (attackerItemName === 'Loaded Dice') {
+      return {
+        minHits: 4,
+        maxHits: 5,
+        label: '4-5 hits',
+        weights: [{ hits: 4, weight: 0.5 }, { hits: 5, weight: 0.5 }],
+      };
+    }
+
+    return { minHits: 2, maxHits: 5, label: '2-5 hits', weights: multiHitWeights };
+  }
+
+  if (/3 times/i.test(text)) {
+    return { minHits: 3, maxHits: 3, label: '3 hits', weights: [{ hits: 3, weight: 1 }] };
+  }
+
+  return { minHits: 1, maxHits: 1, label: '1 hit', weights: [{ hits: 1, weight: 1 }] };
+}
+
+function positiveStageTotal(build: PokemonBuild) {
+  return [build.attackStage, build.defenseStage, build.specialAttackStage, build.specialDefenseStage, build.speedStage]
+    .filter((stage) => stage > 0)
+    .reduce((sum, stage) => sum + stage, 0);
+}
+
+function parseWeightKg(weight: string) {
+  const value = Number.parseFloat(weight.replace(/[^0-9.]/g, ''));
+  if (!Number.isFinite(value) || value <= 0) {
+    return 0;
+  }
+
+  if (/lb/i.test(weight)) {
+    return value * 0.45359237;
+  }
+
+  return value;
+}
+
+function speedStat(build: PokemonBuild, pokemon: PokemonEntry, environment: EnvironmentState, abilityName: string | null) {
+  let speed = currentStats(build, pokemon).speed * stageMultiplier(build.speedStage);
+
+  if (abilityName === 'Chlorophyll' && environment.weather === 'sun') speed *= 2;
+  if (abilityName === 'Swift Swim' && environment.weather === 'rain') speed *= 2;
+  if (abilityName === 'Sand Rush' && environment.weather === 'sand') speed *= 2;
+  if (abilityName === 'Slush Rush' && environment.weather === 'snow') speed *= 2;
+  if (build.status === 'paralysis') speed *= 0.5;
+
+  return Math.max(1, speed);
+}
+
+function adjustedMoveType(
+  move: PokemonMove,
+  attackerAbilityName: string | null,
+  environment: EnvironmentState,
+  attackerGrounded: boolean,
+  notes: string[],
+) {
+  if (move.name === 'Weather Ball' && environment.weather !== 'clear') {
+    const weatherTypeMap: Record<EnvironmentState['weather'], string> = {
+      clear: 'Normal',
+      sun: 'Fire',
+      rain: 'Water',
+      sand: 'Rock',
+      snow: 'Ice',
+    };
+    const nextType = weatherTypeMap[environment.weather];
+    notes.push(`Weather Ball becomes ${nextType} in ${environment.weather}.`);
+    return nextType;
+  }
+
+  if (move.name === 'Terrain Pulse' && attackerGrounded && environment.terrain !== 'none') {
+    const terrainTypeMap: Record<Exclude<EnvironmentState['terrain'], 'none'>, string> = {
+      electric: 'Electric',
+      grassy: 'Grass',
+      misty: 'Fairy',
+      psychic: 'Psychic',
+    };
+    const nextType = terrainTypeMap[environment.terrain];
+    notes.push(`Terrain Pulse becomes ${nextType} on ${environment.terrain} terrain.`);
+    return nextType;
+  }
+
+  if (move.type !== 'Normal') {
+    return move.type;
+  }
+
+  switch (attackerAbilityName) {
+    case 'Aerilate':
+      return 'Flying';
+    case 'Galvanize':
+      return 'Electric';
+    case 'Pixilate':
+      return 'Fairy';
+    case 'Refrigerate':
+      return 'Ice';
+    default:
+      return move.type;
+  }
+}
+
+function moveProfile(move: PokemonMove, attackerStats: StatBlock): MoveProfile {
+  if (move.name === 'Body Press') {
+    return { attackStat: 'defense', defenseStat: 'defense', useTargetAttack: false };
+  }
+
+  if (move.name === 'Foul Play') {
+    return { attackStat: 'attack', defenseStat: 'defense', useTargetAttack: true };
+  }
+
+  if (['Psyshock', 'Psystrike', 'Secret Sword'].includes(move.name)) {
+    return { attackStat: 'specialAttack', defenseStat: 'defense', useTargetAttack: false };
+  }
+
+  if (move.name === 'Photon Geyser') {
+    return attackerStats.attack >= attackerStats.specialAttack
+      ? { attackStat: 'attack', defenseStat: 'defense', useTargetAttack: false }
+      : { attackStat: 'specialAttack', defenseStat: 'specialDefense', useTargetAttack: false };
+  }
+
+  return move.category === 'Physical'
+    ? { attackStat: 'attack', defenseStat: 'defense', useTargetAttack: false }
+    : { attackStat: 'specialAttack', defenseStat: 'specialDefense', useTargetAttack: false };
+}
+
+function resolvedMovePower(move: PokemonMove, context: PowerContext) {
+  let power = move.power ?? 0;
+
+  switch (move.name) {
+    case 'Facade':
+      if (context.attackerBuild.status !== 'healthy') {
+        power *= 2;
+        context.notes.push('Facade doubles because the attacker has a status condition.');
+      }
+      break;
+    case 'Hex':
+      if (context.defenderBuild.status !== 'healthy') {
+        power *= 2;
+        context.notes.push('Hex doubles because the defender is statused.');
+      }
+      break;
+    case 'Venoshock':
+      if (context.defenderBuild.status === 'poison' || context.defenderBuild.status === 'toxic') {
+        power *= 2;
+        context.notes.push('Venoshock doubles because the defender is poisoned.');
+      }
+      break;
+    case 'Brine':
+      if (context.defenderBuild.currentHpPercent <= 50) {
+        power *= 2;
+        context.notes.push('Brine doubles because the defender is at or below half HP.');
+      }
+      break;
+    case 'Acrobatics':
+      if (!context.attackerItemName) {
+        power *= 2;
+        context.notes.push('Acrobatics doubles because the attacker has no item.');
+      }
+      break;
+    case 'Knock Off':
+      if (context.defenderItemName && resolveHeldItem(context.defenderBuild)?.category !== 'mega-stone') {
+        power *= 1.5;
+        context.notes.push('Knock Off gets its stronger first-hit damage because the defender is holding an item.');
+      }
+      break;
+    case 'Weather Ball':
+      if (context.environment.weather !== 'clear') {
+        power = 100;
+      }
+      break;
+    case 'Terrain Pulse':
+      if (context.attackerGrounded && context.environment.terrain !== 'none') {
+        power = 100;
+      }
+      break;
+    case 'Solar Beam':
+    case 'Solar Blade':
+      if (['rain', 'sand', 'snow'].includes(context.environment.weather)) {
+        power *= 0.5;
+        context.notes.push(`${move.name} is weakened outside sun because of the current weather.`);
+      }
+      break;
+    case 'Electro Ball': {
+      const ratio = context.attackerSpeed / Math.max(1, context.defenderSpeed);
+      power = ratio >= 4 ? 150 : ratio >= 3 ? 120 : ratio >= 2 ? 80 : ratio >= 1 ? 60 : 40;
+      context.notes.push(`Electro Ball resolves to ${power} power from the current speed ratio.`);
+      break;
+    }
+    case 'Gyro Ball':
+      power = Math.max(1, Math.min(150, Math.floor((25 * context.defenderSpeed) / Math.max(1, context.attackerSpeed))));
+      context.notes.push(`Gyro Ball resolves to ${power} power from the current speed ratio.`);
+      break;
+    case 'Eruption':
+    case 'Water Spout':
+      power = Math.max(1, Math.floor(150 * currentHp(context.attackerStats, context.attackerBuild) / context.attackerStats.hp));
+      context.notes.push(`${move.name} scales to ${power} power from the attacker's remaining HP.`);
+      break;
+    case 'Flail':
+    case 'Reversal': {
+      const hpRatio = currentHp(context.attackerStats, context.attackerBuild) / Math.max(1, context.attackerStats.hp);
+      power = hpRatio <= 0.0417 ? 200 :
+        hpRatio <= 0.1042 ? 150 :
+          hpRatio <= 0.2083 ? 100 :
+            hpRatio <= 0.3542 ? 80 :
+              hpRatio <= 0.6875 ? 40 : 20;
+      context.notes.push(`${move.name} scales to ${power} power from the attacker's remaining HP.`);
+      break;
+    }
+    case 'Low Kick':
+    case 'Grass Knot': {
+      const weightKg = parseWeightKg(context.defender.weight);
+      power = weightKg >= 200 ? 120 :
+        weightKg >= 100 ? 100 :
+          weightKg >= 50 ? 80 :
+            weightKg >= 25 ? 60 :
+              weightKg >= 10 ? 40 : 20;
+      context.notes.push(`${move.name} resolves to ${power} power from the defender's weight.`);
+      break;
+    }
+    case 'Stored Power':
+    case 'Power Trip':
+      power = 20 + positiveStageTotal(context.attackerBuild) * 20;
+      context.notes.push(`${move.name} scales to ${power} power from the attacker's boost count.`);
+      break;
+    default:
+      break;
+  }
+
+  return Math.max(1, power);
+}
+
+function offensiveItemModifier(
+  itemName: string | null,
+  move: PokemonMove,
+  moveType: string,
+  attacker: PokemonEntry,
+  attackerBuild: PokemonBuild,
+  effectiveness: number,
+) {
+  if (!itemName) {
+    return 1;
+  }
+
+  const typeBoost = typeBoostItemMap(itemName);
+  if (typeBoost && typeBoost === moveType) {
+    return 1.2;
+  }
+
+  if (itemName === 'Light Ball' && attacker.baseSpecies === 'Pikachu') {
+    return move.category === 'Physical' || move.category === 'Special' ? 2 : 1;
+  }
+
+  if (itemName === 'Scope Lens') {
+    return 1;
+  }
+
+  if (itemName === 'Shell Bell' || itemName === 'Focus Sash' || itemName === 'Focus Band' || itemName === 'Quick Claw' || itemName === 'White Herb' || itemName === 'Mental Herb' || itemName === 'Choice Scarf') {
+    return 1;
+  }
+
+  if (itemName === 'Bright Powder') {
+    return 1;
+  }
+
+  if (itemName === 'King\'s Rock') {
+    return 1;
+  }
+
+  if (itemName === 'Expert Belt' && effectiveness > 1) {
+    return 1.2;
+  }
+
+  if (itemName === 'Charcoal' && moveType === 'Fire') return 1.2;
+  if (itemName === 'Magnet' && moveType === 'Electric') return 1.2;
+  if (itemName === 'Mystic Water' && moveType === 'Water') return 1.2;
+  if (itemName === 'Black Glasses' && moveType === 'Dark') return 1.2;
+  if (itemName === 'Twisted Spoon' && moveType === 'Psychic') return 1.2;
+  if (itemName === 'Dragon Fang' && moveType === 'Dragon') return 1.2;
+  if (itemName === 'Sharp Beak' && moveType === 'Flying') return 1.2;
+  if (itemName === 'Metal Coat' && moveType === 'Steel') return 1.2;
+  if (itemName === 'Miracle Seed' && moveType === 'Grass') return 1.2;
+  if (itemName === 'Hard Stone' && moveType === 'Rock') return 1.2;
+  if (itemName === 'Fairy Feather' && moveType === 'Fairy') return 1.2;
+  if (itemName === 'Spell Tag' && moveType === 'Ghost') return 1.2;
+  if (itemName === 'Silk Scarf' && moveType === 'Normal') return 1.2;
+  if (itemName === 'Poison Barb' && moveType === 'Poison') return 1.2;
+  if (itemName === 'Never-Melt Ice' && moveType === 'Ice') return 1.2;
+  if (itemName === 'Silver Powder' && moveType === 'Bug') return 1.2;
+  if (itemName === 'Soft Sand' && moveType === 'Ground') return 1.2;
+  if (itemName === 'Black Belt' && moveType === 'Fighting') return 1.2;
+
+  if (itemName === 'Focus Band' || itemName === 'Focus Sash') {
+    return 1;
+  }
+
+  if (itemName === 'White Herb' && attackerBuild.attackStage < 0) {
+    return 1;
+  }
+
+  return 1;
+}
+
+function abilityAttackModifier(
+  attackerAbilityName: string | null,
+  move: PokemonMove,
+  moveType: string,
+  environment: EnvironmentState,
+  attackerBuild: PokemonBuild,
+  effectiveness: number,
+) {
+  if (!attackerAbilityName) {
+    return 1;
+  }
+
+  if (
+    (attackerAbilityName === 'Blaze' && moveType === 'Fire') ||
+    (attackerAbilityName === 'Overgrow' && moveType === 'Grass') ||
+    (attackerAbilityName === 'Torrent' && moveType === 'Water') ||
+    (attackerAbilityName === 'Swarm' && moveType === 'Bug')
+  ) {
+    return attackerBuild.currentHpPercent <= 33 ? 1.5 : 1;
+  }
+
+  if (attackerAbilityName === 'Huge Power' || attackerAbilityName === 'Pure Power') {
+    return move.category === 'Physical' ? 2 : 1;
+  }
+
+  if (attackerAbilityName === 'Guts') {
+    return move.category === 'Physical' && attackerBuild.status !== 'healthy' ? 1.5 : 1;
+  }
+
+  if (attackerAbilityName === 'Hustle') {
+    return move.category === 'Physical' ? 1.5 : 1;
+  }
+
+  if (attackerAbilityName === 'Technician') {
+    return (move.power ?? 0) <= 60 ? 1.5 : 1;
+  }
+
+  if (attackerAbilityName === 'Sheer Force') {
+    return moveHasSecondaryEffect(move) ? 1.3 : 1;
+  }
+
+  if (attackerAbilityName === 'Sharpness') {
+    return slicingMoves.has(move.name) ? 1.5 : 1;
+  }
+
+  if (attackerAbilityName === 'Iron Fist') {
+    return punchMoves.has(move.name) ? 1.2 : 1;
+  }
+
+  if (attackerAbilityName === 'Strong Jaw') {
+    return biteMoves.has(move.name) ? 1.5 : 1;
+  }
+
+  if (attackerAbilityName === 'Mega Launcher') {
+    return pulseMoves.has(move.name) ? 1.5 : 1;
+  }
+
+  if (attackerAbilityName === 'Solar Power') {
+    return environment.weather === 'sun' && move.category === 'Special' ? 1.5 : 1;
+  }
+
+  if (attackerAbilityName === 'Tough Claws') {
+    return moveMakesContact(move) ? 1.3 : 1;
+  }
+
+  if (attackerAbilityName === 'Tinted Lens') {
+    return effectiveness < 1 ? 2 : 1;
+  }
+
+  if (attackerAbilityName === 'Sand Force') {
+    return environment.weather === 'sand' && ['Rock', 'Ground', 'Steel'].includes(moveType) ? 1.3 : 1;
+  }
+
+  if (normalConversionAbilities.has(attackerAbilityName)) {
+    return move.type === 'Normal' ? 1.2 : 1;
+  }
+
+  if (attackerAbilityName === 'Punk Rock') {
+    return isSoundMove(move) ? 1.3 : 1;
+  }
+
+  if (attackerAbilityName === 'Flare Boost') {
+    return move.category === 'Special' && attackerBuild.status === 'burn' ? 1.5 : 1;
+  }
+
+  if (attackerAbilityName === 'Toxic Boost') {
+    return move.category === 'Physical' && (attackerBuild.status === 'poison' || attackerBuild.status === 'toxic') ? 1.5 : 1;
+  }
+
+  if (attackerAbilityName === 'Reckless') {
+    return recoilMoves.has(move.name) ? 1.2 : 1;
+  }
+
+  if (attackerAbilityName === 'Rocky Payload') {
+    return moveType === 'Rock' ? 1.5 : 1;
+  }
+
+  if (attackerAbilityName === 'Dragon\'s Maw') {
+    return moveType === 'Dragon' ? 1.5 : 1;
+  }
+
+  if (attackerAbilityName === 'Transistor') {
+    return moveType === 'Electric' ? 1.3 : 1;
+  }
+
+  if (attackerAbilityName === 'Steelworker' || attackerAbilityName === 'Steely Spirit') {
+    return moveType === 'Steel' ? 1.5 : 1;
+  }
+
+  if (attackerAbilityName === 'Neuroforce') {
+    return effectiveness > 1 ? 1.25 : 1;
+  }
+
+  return 1;
+}
+
+function defensiveAbilityModifier(
+  defenderAbilityName: string | null,
+  move: PokemonMove,
+  moveType: string,
+  effectiveness: number,
+  defenderBuild: PokemonBuild,
+) {
+  if (!defenderAbilityName) {
+    return 1;
+  }
+
+  if (defenderAbilityName === 'Thick Fat' && (moveType === 'Fire' || moveType === 'Ice')) {
+    return 0.5;
+  }
+
+  if (['Filter', 'Solid Rock', 'Prism Armor'].includes(defenderAbilityName) && effectiveness > 1) {
+    return 0.75;
+  }
+
+  if (['Multiscale', 'Shadow Shield'].includes(defenderAbilityName) && defenderBuild.currentHpPercent >= 100) {
+    return 0.5;
+  }
+
+  if (defenderAbilityName === 'Heatproof' && moveType === 'Fire') {
+    return 0.5;
+  }
+
+  if (defenderAbilityName === 'Water Bubble' && moveType === 'Fire') {
+    return 0.5;
+  }
+
+  if (defenderAbilityName === 'Dry Skin' && moveType === 'Fire') {
+    return 1.25;
+  }
+
+  if (defenderAbilityName === 'Punk Rock' && isSoundMove(move)) {
+    return 0.5;
+  }
+
+  if (defenderAbilityName === 'Purifying Salt' && moveType === 'Ghost') {
+    return 0.5;
+  }
+
+  if (defenderAbilityName === 'Fluffy') {
+    if (moveType === 'Fire') {
+      return 2;
+    }
+    return moveMakesContact(move) ? 0.5 : 1;
+  }
+
+  return 1;
+}
+
+function immunityFromAbility(defenderAbilityName: string | null, move: PokemonMove, moveType: string, effectiveness: number) {
+  if (!defenderAbilityName || !highPriorityImmunityAbilities.has(defenderAbilityName)) {
+    return false;
+  }
+
+  const map: Record<string, string[]> = {
+    'Dry Skin': ['Water'],
+    'Earth Eater': ['Ground'],
+    'Flash Fire': ['Fire'],
+    'Levitate': ['Ground'],
+    'Lightning Rod': ['Electric'],
+    'Motor Drive': ['Electric'],
+    'Sap Sipper': ['Grass'],
+    'Storm Drain': ['Water'],
+    'Volt Absorb': ['Electric'],
+    'Water Absorb': ['Water'],
+    'Well-Baked Body': ['Fire'],
+  };
+
+  if ((map[defenderAbilityName] ?? []).includes(moveType)) {
+    return true;
+  }
+
+  if (defenderAbilityName === 'Soundproof' && isSoundMove(move)) {
+    return true;
+  }
+
+  if (defenderAbilityName === 'Bulletproof' && isBallBombMove(move)) {
+    return true;
+  }
+
+  if (defenderAbilityName === 'Wonder Guard' && effectiveness <= 1) {
+    return true;
+  }
+
+  return false;
+}
+
+function abilityStatMultiplier(
+  abilityName: string | null,
+  stat: StatKey,
+  moveType: string,
+  category: PokemonMove['category'],
+  environment: EnvironmentState,
+  build: PokemonBuild,
+) {
+  if (!abilityName) {
+    return 1;
+  }
+
+  if (abilityName === 'Marvel Scale' && stat === 'defense' && build.status !== 'healthy') {
+    return 1.5;
+  }
+
+  if (abilityName === 'Fur Coat' && stat === 'defense') {
+    return 2;
+  }
+
+  if (abilityName === 'Ice Scales' && stat === 'specialDefense') {
+    return 2;
+  }
+
+  if (abilityName === 'Chlorophyll' && stat === 'speed' && environment.weather === 'sun') {
+    return 2;
+  }
+
+  if (abilityName === 'Swift Swim' && stat === 'speed' && environment.weather === 'rain') {
+    return 2;
+  }
+
+  if (abilityName === 'Sand Rush' && stat === 'speed' && environment.weather === 'sand') {
+    return 2;
+  }
+
+  if (abilityName === 'Slush Rush' && stat === 'speed' && environment.weather === 'snow') {
+    return 2;
+  }
+
+  if (abilityName === 'Water Bubble' && category !== 'Status' && moveType === 'Water' && (stat === 'attack' || stat === 'specialAttack')) {
+    return 2;
+  }
+
+  return 1;
+}
+
+function defensiveItemModifier(itemName: string | null, moveType: string, effectiveness: number, environment: EnvironmentState) {
+  if (!itemName || !environment.defenderProtectedByBerry) {
+    return 1;
+  }
+
+  const resistType = resistBerryType(itemName);
+  if (resistType && resistType === moveType && effectiveness > 1) {
+    return 0.5;
+  }
+
+  return 1;
+}
+
+function terrainModifier(move: PokemonMove, moveType: string, environment: EnvironmentState, attackerGrounded: boolean, defenderGrounded: boolean) {
+  if (environment.terrain === 'electric' && moveType === 'Electric' && attackerGrounded) {
+    return 1.3;
+  }
+
+  if (environment.terrain === 'grassy' && moveType === 'Grass' && attackerGrounded) {
+    return 1.3;
+  }
+
+  if (environment.terrain === 'psychic' && moveType === 'Psychic' && attackerGrounded) {
+    return 1.3;
+  }
+
+  if (environment.terrain === 'misty' && moveType === 'Dragon' && defenderGrounded) {
+    return 0.5;
+  }
+
+  if (environment.terrain === 'grassy' && defenderGrounded && ['Earthquake', 'Bulldoze', 'Magnitude'].includes(move.name)) {
+    return 0.5;
+  }
+
+  return 1;
+}
+
+function weatherModifier(moveType: string, environment: EnvironmentState) {
+  if (environment.weather === 'sun') {
+    if (moveType === 'Fire') {
+      return 1.5;
+    }
+    if (moveType === 'Water') {
+      return 0.5;
+    }
+  }
+
+  if (environment.weather === 'rain') {
+    if (moveType === 'Water') {
+      return 1.5;
+    }
+    if (moveType === 'Fire') {
+      return 0.5;
+    }
+  }
+
+  return 1;
+}
+
+function screenModifier(move: PokemonMove, environment: EnvironmentState, attackerAbilityName: string | null) {
+  if (environment.criticalHit || attackerAbilityName === 'Infiltrator') {
+    return 1;
+  }
+
+  if (move.category === 'Physical' && environment.reflect) {
+    return 0.5;
+  }
+
+  if (move.category === 'Special' && environment.lightScreen) {
+    return 0.5;
+  }
+
+  return 1;
+}
+
+function critModifier(environment: EnvironmentState, attackerAbilityName: string | null) {
+  if (!environment.criticalHit) {
+    return 1;
+  }
+
+  return attackerAbilityName === 'Sniper' ? 2.25 : 1.5;
+}
+
+function stageValue(build: PokemonBuild, stat: keyof typeof attackStageFields) {
+  return build[attackStageFields[stat]];
+}
+
+function effectiveStageMultiplier(
+  side: 'attacker' | 'defender',
+  stat: keyof typeof attackStageFields,
+  build: PokemonBuild,
+  environment: EnvironmentState,
+  ignoreStages: boolean,
+) {
+  if (ignoreStages) {
+    return 1;
+  }
+
+  let stage = stageValue(build, stat);
+  if (environment.criticalHit) {
+    if (side === 'attacker' && stage < 0) {
+      stage = 0;
+    }
+    if (side === 'defender' && stage > 0) {
+      stage = 0;
+    }
+  }
+
+  return stageMultiplier(stage);
+}
+
+function hitDistribution(perHitRolls: number[], hits: number) {
+  let distribution: DamageDistribution = new Map([[0, 1]]);
+
+  for (let hit = 0; hit < hits; hit += 1) {
+    const next: DamageDistribution = new Map();
+    for (const [runningDamage, runningProbability] of distribution.entries()) {
+      for (const roll of perHitRolls) {
+        const total = runningDamage + roll;
+        next.set(total, (next.get(total) ?? 0) + runningProbability * (1 / perHitRolls.length));
+      }
+    }
+    distribution = next;
+  }
+
+  return distribution;
+}
+
+function mergeDistributions(distributions: Array<{ distribution: DamageDistribution; weight: number }>) {
+  const merged: DamageDistribution = new Map();
+
+  for (const entry of distributions) {
+    for (const [damage, probability] of entry.distribution.entries()) {
+      merged.set(damage, (merged.get(damage) ?? 0) + probability * entry.weight);
+    }
+  }
+
+  return merged;
+}
+
+function convolveDistributions(left: DamageDistribution, right: DamageDistribution) {
+  const next: DamageDistribution = new Map();
+
+  for (const [leftDamage, leftProbability] of left.entries()) {
+    for (const [rightDamage, rightProbability] of right.entries()) {
+      const total = leftDamage + rightDamage;
+      next.set(total, (next.get(total) ?? 0) + leftProbability * rightProbability);
+    }
+  }
+
+  return next;
+}
+
+function koChance(distribution: DamageDistribution, defenderHp: number, turns: number) {
+  let combined: DamageDistribution = new Map(distribution);
+  for (let turn = 1; turn < turns; turn += 1) {
+    combined = convolveDistributions(combined, distribution);
+  }
+
+  let chance = 0;
+  for (const [damage, probability] of combined.entries()) {
+    if (damage >= defenderHp) {
+      chance += probability;
+    }
+  }
+
+  return Math.max(0, Math.min(1, chance));
+}
+
+function chanceText(chance: number) {
+  return `${(chance * 100).toFixed(chance > 0 && chance < 0.01 ? 2 : chance < 0.1 ? 1 : 0)}%`;
+}
+
+function koSummary(distribution: DamageDistribution, defenderHp: number) {
+  const oneHit = koChance(distribution, defenderHp, 1);
+  const twoHit = koChance(distribution, defenderHp, 2);
+  const threeHit = koChance(distribution, defenderHp, 3);
+
+  if (oneHit >= 0.9999) return { label: 'Guaranteed 1HKO', oneHit, twoHit, threeHit };
+  if (oneHit > 0) return { label: `${chanceText(oneHit)} to 1HKO`, oneHit, twoHit, threeHit };
+  if (twoHit >= 0.9999) return { label: 'Guaranteed 2HKO', oneHit, twoHit, threeHit };
+  if (twoHit > 0) return { label: `${chanceText(twoHit)} to 2HKO`, oneHit, twoHit, threeHit };
+  if (threeHit >= 0.9999) return { label: 'Guaranteed 3HKO', oneHit, twoHit, threeHit };
+  if (threeHit > 0) return { label: `${chanceText(threeHit)} to 3HKO`, oneHit, twoHit, threeHit };
+
+  const highestRoll = Math.max(...distribution.keys(), 1);
+  return { label: `Needs ${Math.ceil(defenderHp / Math.max(highestRoll, 1))}+ turns`, oneHit, twoHit, threeHit };
+}
+
+function distributionStats(distribution: DamageDistribution) {
+  const rolls = [...distribution.keys()].sort((left, right) => left - right);
+  const average = [...distribution.entries()].reduce((sum, [damage, probability]) => sum + damage * probability, 0);
+
+  return {
+    rolls,
+    min: rolls[0] ?? 0,
+    max: rolls[rolls.length - 1] ?? 0,
+    average,
+  };
+}
+
+export function calculateDamage(
+  attackerBuild: PokemonBuild,
+  defenderBuild: PokemonBuild,
+  move: PokemonMove,
+  environment: EnvironmentState,
+) {
+  const attacker = resolvePokemonForm(attackerBuild);
+  const defender = resolvePokemonForm(defenderBuild);
+
+  if (!attacker || !defender || move.category === 'Status' || !move.power) {
+    return null;
+  }
+
+  const attackerAbility = resolveAbility(attackerBuild, attacker)?.name ?? null;
+  const rawDefenderAbility = resolveAbility(defenderBuild, defender)?.name ?? null;
+  const defenderAbility = moldBreakerAbilities.has(attackerAbility ?? '') ? null : rawDefenderAbility;
+  const attackerStats = currentStats(attackerBuild, attacker);
+  const defenderStats = currentStats(defenderBuild, defender);
+  const attackerGrounded = grounded(attacker, attackerBuild);
+  const defenderGrounded = grounded(defender, defenderBuild);
+  const notes: string[] = [];
+  const attackerItemName = resolveHeldItem(attackerBuild)?.name ?? null;
+  const defenderItemName = resolveHeldItem(defenderBuild)?.name ?? null;
+  const moveType = adjustedMoveType(move, attackerAbility, environment, attackerGrounded, notes);
+  const attackerTypes = effectiveTypes(attacker, attackerBuild, environment.weather);
+  const defenderTypes = effectiveTypes(defender, defenderBuild, environment.weather);
+  const attackerSpeed = speedStat(attackerBuild, attacker, environment, attackerAbility);
+  const defenderSpeed = speedStat(defenderBuild, defender, environment, defenderAbility);
+  const effectiveness = typeEffectiveness(moveType, defenderTypes);
+
+  if (immunityFromAbility(defenderAbility, move, moveType, effectiveness)) {
+    return {
+      move,
+      appliedType: moveType,
+      minDamage: 0,
+      maxDamage: 0,
+      averageDamage: 0,
+      minPercent: 0,
+      maxPercent: 0,
+      averagePercent: 0,
+      attackStat: 0,
+      defenseStat: 0,
+      stab: 0,
+      effectiveness: 0,
+      hitSummary: 'No damage',
+      koSummary: 'Immune',
+      rollRange: [0],
+      modifierSummary: [`${defender.displayName}'s ${rawDefenderAbility ?? 'ability'} blanks this line.`],
+      koChances: {
+        oneHit: 0,
+        twoHit: 0,
+        threeHit: 0,
+      },
+      notes: [`${defender.displayName}'s ${rawDefenderAbility ?? 'ability'} blanks ${moveType}-type damage.`],
+    } satisfies DamageResult;
+  }
+
+  const stab = attackerTypes.includes(moveType) ? (attackerAbility === 'Adaptability' ? 2 : 1.5) : 1;
+  const profile = moveProfile(move, attackerStats);
+  const power = resolvedMovePower(move, {
+    attacker,
+    defender,
+    attackerBuild,
+    defenderBuild,
+    attackerAbility,
+    defenderAbility,
+    attackerStats,
+    defenderStats,
+    attackerGrounded,
+    defenderGrounded,
+    environment,
+    moveType,
+    attackerSpeed,
+    defenderSpeed,
+    attackerItemName,
+    defenderItemName,
+    notes,
+  });
+  const ignoreAttackStages = defenderAbility === 'Unaware';
+  const ignoreDefenseStages = attackerAbility === 'Unaware';
+
+  let attackStatBase =
+    profile.useTargetAttack
+      ? defenderStats.attack
+      : attackerStats[profile.attackStat];
+  let defenseStatBase = defenderStats[profile.defenseStat];
+
+  let attackStat = attackStatBase * effectiveStageMultiplier(
+    'attacker',
+    profile.attackStat === 'defense' ? 'defense' : profile.attackStat,
+    profile.useTargetAttack ? defenderBuild : attackerBuild,
+    environment,
+    profile.useTargetAttack ? false : ignoreAttackStages,
+  );
+
+  let defenseStat = defenseStatBase * effectiveStageMultiplier(
+    'defender',
+    profile.defenseStat,
+    defenderBuild,
+    environment,
+    ignoreDefenseStages,
+  );
+
+  attackStat *= abilityStatMultiplier(attackerAbility, profile.attackStat, moveType, move.category, environment, attackerBuild);
+  defenseStat *= abilityStatMultiplier(defenderAbility, profile.defenseStat, moveType, move.category, environment, defenderBuild);
+
+  if (move.category === 'Special' && environment.weather === 'sand' && defenderTypes.includes('Rock')) {
+    defenseStat *= 1.5;
+    notes.push('Rock-types gain a sand-boosted special bulk bonus.');
+  }
+
+  if (move.category === 'Physical' && environment.weather === 'snow' && defenderTypes.includes('Ice')) {
+    defenseStat *= 1.5;
+    notes.push('Ice-types gain a snow-boosted physical bulk bonus.');
+  }
+
+  if (attackerBuild.status === 'burn' && move.category === 'Physical' && attackerAbility !== 'Guts' && !burnImmuneFacade.has(move.name)) {
+    attackStat *= 0.5;
+    notes.push('Burn cuts physical damage on this line.');
+  }
+
+  const itemModifier = offensiveItemModifier(attackerItemName, move, moveType, attacker, attackerBuild, effectiveness);
+  const abilityAttackBoost = abilityAttackModifier(attackerAbility, move, moveType, environment, attackerBuild, effectiveness);
+  const abilityDefenseBoost = defensiveAbilityModifier(defenderAbility, move, moveType, effectiveness, defenderBuild);
+  const berryModifier = defensiveItemModifier(defenderItemName, moveType, effectiveness, environment);
+  const terrainBoost = terrainModifier(move, moveType, environment, attackerGrounded, defenderGrounded);
+  const weatherBoost = weatherModifier(moveType, environment);
+  const screenBoost = screenModifier(move, environment, attackerAbility);
+  const critBoost = critModifier(environment, attackerAbility);
+  const hitProfile = hitCountSummary(move, attackerItemName);
+
+  const baseDamage = Math.floor(
+    Math.floor((Math.floor((2 * 50) / 5 + 2) * power * Math.max(attackStat, 1)) / Math.max(defenseStat, 1)) / 50 + 2,
+  );
+
+  const modifier = stab * effectiveness * itemModifier * abilityAttackBoost * abilityDefenseBoost * berryModifier * terrainBoost * weatherBoost * screenBoost * critBoost;
+  const perHitRolls = randomRollFactors.map((factor) => Math.max(1, Math.floor(baseDamage * modifier * factor / 100)));
+  const distribution = mergeDistributions(hitProfile.weights.map((entry) => ({
+    distribution: hitDistribution(perHitRolls, entry.hits),
+    weight: entry.weight,
+  })));
+  const stats = distributionStats(distribution);
+  const defenderHp = defenderStats.hp;
+  const ko = koSummary(distribution, defenderHp);
+  const modifierSummary = [
+    `Resolved power ${power}`,
+    `STAB ${stab.toFixed(2)}x`,
+    `Effectiveness ${effectiveness.toFixed(2)}x`,
+    `Item ${itemModifier.toFixed(2)}x`,
+    `Ability ${abilityAttackBoost.toFixed(2)}x / ${abilityDefenseBoost.toFixed(2)}x`,
+    `Terrain ${terrainBoost.toFixed(2)}x`,
+    `Weather ${weatherBoost.toFixed(2)}x`,
+    `Screens ${screenBoost.toFixed(2)}x`,
+    `Crit ${critBoost.toFixed(2)}x`,
+  ];
+
+  if (defenderItemName === 'Focus Sash' && defenderBuild.currentHpPercent >= 100 && hitProfile.maxHits === 1) {
+    notes.push('Focus Sash can let the defender survive from full HP.');
+  }
+
+  if (defenderItemName === 'Focus Band') {
+    notes.push('Focus Band survival rolls are not folded into KO odds.');
+  }
+
+  if (attackerItemName === 'Choice Scarf') {
+    notes.push('Choice Scarf affects speed order, not raw move damage.');
+  }
+
+  if (attackerAbility === 'Stance Change' && attacker.baseSpecies === 'Aegislash') {
+    notes.push('Aegislash attack calcs assume Blade Forme offenses for attacking moves.');
+  }
+
+  if (moldBreakerAbilities.has(attackerAbility ?? '') && rawDefenderAbility) {
+    notes.push(`${attackerAbility} suppresses ${rawDefenderAbility} for this damage line.`);
+  }
+
+  return {
+    move,
+    appliedType: moveType,
+    minDamage: stats.min,
+    maxDamage: stats.max,
+    averageDamage: Number(stats.average.toFixed(1)),
+    minPercent: (stats.min / defenderHp) * 100,
+    maxPercent: (stats.max / defenderHp) * 100,
+    averagePercent: (stats.average / defenderHp) * 100,
+    attackStat: Math.round(attackStat),
+    defenseStat: Math.round(defenseStat),
+    stab,
+    effectiveness,
+    hitSummary: hitProfile.label,
+    koSummary: ko.label,
+    rollRange: stats.rolls,
+    modifierSummary,
+    koChances: {
+      oneHit: ko.oneHit,
+      twoHit: ko.twoHit,
+      threeHit: ko.threeHit,
+    },
+    notes,
+  } satisfies DamageResult;
+}
+
+export function summaryForResult(result: DamageResult | null) {
+  if (!result) {
+    return 'Select an attacking move to generate a damage line.';
+  }
+
+  return `${result.minDamage}-${result.maxDamage} (${formatPercent(result.minPercent)}-${formatPercent(result.maxPercent)})`;
+}
