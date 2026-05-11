@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Pokemon Champions Lab favicon">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0a2540" />
+      <stop offset="100%" stop-color="#153e75" />
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="url(#bg)" />
+  <circle cx="32" cy="32" r="19" fill="#f8fafc" />
+  <path d="M13 32a19 19 0 0 1 38 0Z" fill="#ef4444" />
+  <path d="M13 32h38" stroke="#0f172a" stroke-width="4" stroke-linecap="round" />
+  <circle cx="32" cy="32" r="7.5" fill="#f8fafc" stroke="#0f172a" stroke-width="4" />
+</svg>
