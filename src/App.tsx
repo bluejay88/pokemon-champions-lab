@@ -1,7 +1,9 @@
 import { startTransition, useDeferredValue, useEffect, useMemo, useState } from 'react';
 import { analyzeTeam, archetypeLibrary, describeBuildRole, generateTeamPlans, recommendMoveIds, suggestArchetypesForCore } from './lib/ai';
 import {
+  applyEffortValue,
   battleFormats,
+  bestAttackingStat,
   buildLabel,
   buildStats,
   createDefaultState,
@@ -9,20 +11,30 @@ import {
   dataset,
   defaultEnvironment,
   displaySpriteForPokemon,
+  fillEffortSpreadRemainder,
   findMegaForm,
   findMegaStoneItem,
+  fixedIvValue,
   getItemById,
+  getNatureById,
   getNinetalesBiasLabel,
   getPokemonById,
+  maxEffortValue,
   makeId,
   natures,
+  normalizeBuildForChampions,
+  normalizeEffortSpread,
   normalizeMoveSelection,
+  remainingEffortPoints,
   resolvePokemonForm,
+  sanitizeTeamForChampions,
   selectedPokemon,
   statLabels,
   statOrder,
   statusOptions,
   terrainOptions,
+  totalEffortBudget,
+  totalEffortPoints,
   usesMegaSpriteFallback,
   weatherOptions,
 } from './lib/champions';
@@ -129,6 +141,10 @@ function prepareBuildForPokemon(build: PokemonBuild, pokemonId: string | null, f
   nextBuild.pokemonId = chosenPokemon?.id ?? null;
   nextBuild.useMega = false;
   nextBuild.abilityName = defaultAbilityName(chosenPokemon);
+  const presetPriority =
+    chosenPokemon && bestAttackingStat(chosenPokemon.baseStats) === 'attack'
+      ? (['attack', 'speed', 'hp', 'defense', 'specialDefense', 'specialAttack'] as const)
+      : (['specialAttack', 'speed', 'hp', 'defense', 'specialDefense', 'attack'] as const);
 
   if (nextBuild.itemId && getItemById(nextBuild.itemId)?.category === 'mega-stone') {
     nextBuild.itemId = null;
@@ -139,7 +155,7 @@ function prepareBuildForPokemon(build: PokemonBuild, pokemonId: string | null, f
     nextBuild.abilityName = presetPatch.abilityName ?? nextBuild.abilityName;
     nextBuild.natureId = presetPatch.natureId ?? nextBuild.natureId;
     nextBuild.moveIds = [...(presetPatch.moveIds ?? [])];
-    nextBuild.evs = presetPatch.evs ? { ...presetPatch.evs } : nextBuild.evs;
+    nextBuild.evs = presetPatch.evs ? fillEffortSpreadRemainder(normalizeEffortSpread({ ...presetPatch.evs }), [...presetPriority]) : nextBuild.evs;
     nextBuild.itemId = presetPatch.itemId ?? nextBuild.itemId;
     nextBuild.useMega = Boolean(presetPatch.useMega && chosenPokemon?.megaStone);
   } else {
@@ -158,6 +174,26 @@ function prepareBuildForPokemon(build: PokemonBuild, pokemonId: string | null, f
 
 function profileSummary(teamCount: number) {
   return `${teamCount}/10 saved teams`;
+}
+
+function isMoveEntry(move: PokemonEntry['movePool'][number] | undefined | null): move is PokemonEntry['movePool'][number] {
+  return Boolean(move);
+}
+
+function natureBenefitLabel(natureId: string) {
+  const nature = getNatureById(natureId);
+  if (!nature.plus && !nature.minus) {
+    return 'Nature: Neutral';
+  }
+
+  const labels: string[] = [];
+  if (nature.plus) {
+    labels.push(`Plus (+) ${statLabels[nature.plus]}`);
+  }
+  if (nature.minus) {
+    labels.push(`Minus (-) ${statLabels[nature.minus]}`);
+  }
+  return labels.join(' | ');
 }
 
 function buildTeamFromPlan(plan: GeneratedTeamPlan) {
@@ -202,6 +238,14 @@ function roleSummary(team: Team) {
     .filter((entry): entry is string => Boolean(entry));
 }
 
+function teammateItemIds(team: Team, slotIndex: number) {
+  return new Set(
+    team.slots
+      .map((slot, index) => (index !== slotIndex ? slot.itemId : null))
+      .filter((itemId): itemId is string => Boolean(itemId)),
+  );
+}
+
 function App() {
   const [state, setState] = useState(() => loadState());
   const [activeTab, setActiveTab] = useState<BattleTab>('team-builder');
@@ -225,6 +269,8 @@ function App() {
   const [simBattle, setSimBattle] = useState<SimulatorBattleState | null>(null);
   const [simChoiceDrafts, setSimChoiceDrafts] = useState<Record<number, ChoiceDraft>>({});
   const [simCountdown, setSimCountdown] = useState(0);
+  const [lastSavedAt, setLastSavedAt] = useState<string | null>(null);
+  const [saveMessage, setSaveMessage] = useState('Autosave ready');
 
   const team = activeTeamFromState(state);
   const analysis = analyzeTeam(team);
@@ -239,8 +285,8 @@ function App() {
   const defenderPokemon = resolvePokemonForm(calcDefender);
   const attackerBuild = attackerPokemon ? { ...calcAttacker, moveIds: normalizeMoveSelection(calcAttacker, attackerPokemon) } : calcAttacker;
   const defenderBuild = defenderPokemon ? { ...calcDefender, moveIds: normalizeMoveSelection(calcDefender, defenderPokemon) } : calcDefender;
-  const attackerMoves = attackerPokemon ? attackerBuild.moveIds.map((id) => attackerPokemon.movePool.find((move) => move.id === id)).filter(Boolean) : [];
-  const defenderMoves = defenderPokemon ? defenderBuild.moveIds.map((id) => defenderPokemon.movePool.find((move) => move.id === id)).filter(Boolean) : [];
+  const attackerMoves = attackerPokemon ? attackerBuild.moveIds.map((id) => attackerPokemon.movePool.find((move) => move.id === id)).filter(isMoveEntry) : [];
+  const defenderMoves = defenderPokemon ? defenderBuild.moveIds.map((id) => defenderPokemon.movePool.find((move) => move.id === id)).filter(isMoveEntry) : [];
   const attackerMoveResults = useMemo(
     () => attackerMoves.map((move) => ({ move, result: calculateDamage(attackerBuild, defenderBuild, move, environment) })),
     [attackerBuild, attackerMoves, defenderBuild, environment],
@@ -251,11 +297,19 @@ function App() {
   );
   const selectedGeneratedPlan = generatedPlans.find((plan) => plan.id === selectedGeneratedPlanId) ?? generatedPlans[0] ?? null;
   const coreArchetypeSuggestions = suggestArchetypesForCore(aiLockedNames.filter(Boolean), aiFormat);
+  const selectedSlotBlockedItemIds = useMemo(() => teammateItemIds(team, selectedSlotIndex), [team, selectedSlotIndex]);
+  const saveStatusLabel = lastSavedAt ? `${saveMessage} at ${new Date(lastSavedAt).toLocaleTimeString()}` : 'Local autosave is ready.';
 
   const selectedResult = attackerMoveResults.find(({ move }) => move.id === selectedDamageMoveId)?.result ?? null;
 
   useEffect(() => {
-    saveState(state);
+    const handle = window.setTimeout(() => {
+      saveState(state);
+      setLastSavedAt(new Date().toISOString());
+      setSaveMessage('Auto-saved locally');
+    }, 180);
+
+    return () => window.clearTimeout(handle);
   }, [state]);
 
   useEffect(() => {
@@ -280,20 +334,53 @@ function App() {
     setState((current) => mutator(current));
   }
 
-  function updateTeam(mutator: (nextTeam: Team) => Team) {
+  function persistNow(message: string) {
+    saveState(state);
+    setLastSavedAt(new Date().toISOString());
+    setSaveMessage(message);
+  }
+
+  function enforceManualItemClause(nextTeam: Team, preferredSlotIndex?: number) {
+    if (typeof preferredSlotIndex !== 'number') {
+      return sanitizeTeamForChampions(nextTeam);
+    }
+
+    const draft = {
+      ...nextTeam,
+      slots: nextTeam.slots.map((slot) => normalizeBuildForChampions(slot)),
+    };
+    const preferredBuild = draft.slots[preferredSlotIndex];
+    if (preferredBuild?.itemId) {
+      const duplicateExists = draft.slots.some((slot, index) => index !== preferredSlotIndex && slot.itemId === preferredBuild.itemId);
+      if (duplicateExists) {
+        draft.slots[preferredSlotIndex] = {
+          ...preferredBuild,
+          itemId: null,
+        };
+      }
+    }
+
+    return sanitizeTeamForChampions(draft);
+  }
+
+  function updateTeam(mutator: (nextTeam: Team) => Team, preferredSlotIndex?: number) {
     updateState((current) => ({
       ...current,
-      teams: current.teams.map((entry) => (entry.id === team.id ? mutator(cloneTeam(entry)) : entry)),
+      teams: current.teams.map((entry) => (
+        entry.id === team.id
+          ? enforceManualItemClause(mutator(cloneTeam(entry)), preferredSlotIndex)
+          : sanitizeTeamForChampions(entry)
+      )),
     }));
   }
 
   function updateSlot(index: number, nextBuild: PokemonBuild) {
     updateTeam((currentTeam) => {
       const nextTeam = cloneTeam(currentTeam);
-      nextTeam.slots[index] = nextBuild;
+      nextTeam.slots[index] = normalizeBuildForChampions(nextBuild);
       nextTeam.updatedAt = new Date().toISOString();
       return nextTeam;
-    });
+    }, index);
   }
 
   function createNewTeam() {
@@ -459,13 +546,14 @@ function App() {
     setSimChoiceDrafts((current) => ({
       ...current,
       [actor]: {
-        type: 'move',
-        moveId: simBattle?.player.units[simBattle.player.active[actor]]?.build.moveIds[0] ?? '',
-        target: 0,
-        switchTarget: simBattle?.player.bench[0] ?? 0,
-        ...(current[actor] ?? {}),
+        ...(current[actor] ?? {
+          type: 'move' as const,
+          moveId: simBattle?.player.units[simBattle.player.active[actor]]?.build.moveIds[0] ?? '',
+          target: 0,
+          switchTarget: simBattle?.player.bench[0] ?? 0,
+        }),
         ...partial,
-      },
+      } satisfies ChoiceDraft,
     }));
   }
 
@@ -653,11 +741,17 @@ function App() {
                   <input value={team.notes} onChange={(event) => updateTeam((currentTeam) => ({ ...currentTeam, notes: event.target.value, updatedAt: new Date().toISOString() }))} placeholder="Matchup notes, Mega plan, ladder pocket..." />
                 </label>
               </div>
+              <div className="save-status-row">
+                <span>{saveStatusLabel}</span>
+                <button className="action-button" onClick={() => persistNow('Team saved locally')}>Save Team</button>
+              </div>
 
               <div className="slot-grid">
                 {team.slots.map((slot, index) => {
                   const pokemon = resolvePokemonForm(slot);
                   const usage = getPokemonUsageInsight(pokemon, team.format);
+                  const slotStats = pokemon ? buildStats(pokemon.baseStats, slot.evs, slot.natureId) : null;
+                  const effortSummary = `${totalEffortPoints(slot.evs)} / ${totalEffortBudget}`;
                   return (
                     <button key={slot.id} className={index === selectedSlotIndex ? 'slot-card active' : 'slot-card'} onClick={() => setSelectedSlotIndex(index)}>
                       <div className="slot-card-top">
@@ -673,6 +767,22 @@ function App() {
                         <span>{pokemon ? describeBuildRole(slot, team.format) : 'Open slot'}</span>
                         <span>{pokemon ? describeMegaState(slot, selectedPokemon(slot)) : 'No Mega'}</span>
                       </div>
+                      {pokemon ? (
+                        <div className="slot-nature-row">
+                          <span>{natureBenefitLabel(slot.natureId)}</span>
+                          <span>{`EV Pts ${effortSummary}`}</span>
+                        </div>
+                      ) : null}
+                      {slotStats ? (
+                        <div className="slot-stat-grid">
+                          {statOrder.map((stat) => (
+                            <div key={stat} className="slot-stat-pill">
+                              <small>{statLabels[stat]}</small>
+                              <strong>{slotStats[stat]}</strong>
+                            </div>
+                          ))}
+                        </div>
+                      ) : null}
                       <div className="move-chip-row">
                         {slot.moveIds.slice(0, 4).map((moveId) => {
                           const move = pokemon?.movePool.find((entry) => entry.id === moveId);
@@ -687,7 +797,13 @@ function App() {
 
             <div className="panel tall inspector-summary-panel">
               <SectionHeader title="Inspector + Summary" subtitle="This editor updates the live team and the summary panel beneath it." />
-              <BuildEditor build={selectedTeamSlot} onChange={(next) => updateSlot(selectedSlotIndex, next)} title={`Slot ${selectedSlotIndex + 1}`} format={team.format} />
+              <BuildEditor
+                build={selectedTeamSlot}
+                onChange={(next) => updateSlot(selectedSlotIndex, next)}
+                title={`Slot ${selectedSlotIndex + 1}`}
+                format={team.format}
+                blockedItemIds={selectedSlotBlockedItemIds}
+              />
               <div className="subpanel team-summary-subpanel">
                 <SectionHeader title="Team Summary" subtitle="The same AI labels and survivability notes are reflected live inside Team Builder." compact />
                 <div className="result-grid">
@@ -1289,6 +1405,10 @@ function App() {
                 <span>Player Notes</span>
                 <textarea rows={6} value={state.profile.playerNote} onChange={(event) => setState((current) => ({ ...current, profile: { ...current.profile, playerNote: event.target.value } }))} placeholder="Personal metagame reads, comfort picks, anti-meta angles..." />
               </label>
+              <div className="save-status-row">
+                <span>{saveStatusLabel}</span>
+                <button className="action-button primary" onClick={() => persistNow('Profile saved locally')}>Save Profile</button>
+              </div>
             </div>
 
             <div className="panel tall">
@@ -1296,20 +1416,22 @@ function App() {
               <div className="notes-list scroll-stack">
                 <div className="note-row">Profile saved: {state.profile.trainerName || 'Not yet named'}</div>
                 <div className="note-row">Teams saved: {state.teams.length}</div>
+                <div className="note-row">Last local save: {lastSavedAt ? new Date(lastSavedAt).toLocaleString() : 'Waiting for first autosave'}</div>
                 <div className="note-row">Current roster source pages: {dataset.sourcePages.length}</div>
                 <div className="note-row">Layout mode: {state.profile.layoutMode}</div>
                 <div className="note-row">Resizable panels: {state.profile.resizablePanels ? 'On' : 'Off'}</div>
                 <div className="note-row">Community usage labels currently blend April-May 2026 Game8 usage and tier snapshots with local fallback scoring where public data is thin.</div>
               </div>
+              <button className="action-button" onClick={() => persistNow('Full local save updated')}>Save Everything</button>
               <button className="action-button danger" onClick={resetEverything}>Clear Local Save</button>
             </div>
 
             <div className="panel tall">
               <SectionHeader title="What Still Needs Depth" subtitle="Current implementation opinion on the next layers worth adding." />
               <div className="notes-list scroll-stack">
-                <div className="note-row">The battle sandbox already handles preview, bringing four, switching, targeting, setup, healing, Protect, Tailwind, Trick Room, and AI turn choice, but edge-case abilities still need deeper per-ability scripting.</div>
-                <div className="note-row">Some simulator interactions still use matchup-weighted approximations rather than a full one-to-one cartridge rules engine.</div>
-                <div className="note-row">The next best upgrade after this pass is a larger move-effect table and ability-specific simulator hooks for rare edge cases.</div>
+                <div className="note-row">The battle sandbox now covers preview, bringing four, switching, hazards, Protect, Tailwind, Trick Room, redirection, Encore, Taunt, Reflect, Light Screen, and major switch-in abilities like Intimidate and weather setters.</div>
+                <div className="note-row">Rare abilities and highly bespoke move text still need deeper one-off scripting before this can honestly claim full cartridge parity.</div>
+                <div className="note-row">The next best upgrade after this pass is still a broader rare-effect table for niche abilities, delayed effects, and edge-case end-of-turn interactions.</div>
               </div>
             </div>
           </section>
@@ -1416,40 +1538,43 @@ function BuildEditor({
   title,
   format,
   condensed = false,
+  blockedItemIds = new Set<string>(),
 }: {
   build: PokemonBuild;
   onChange: (next: PokemonBuild) => void;
   title: string;
   format: BattleFormat;
   condensed?: boolean;
+  blockedItemIds?: Set<string>;
 }) {
   const [search, setSearch] = useState('');
   const deferredSearch = useDeferredValue(search);
-  const basePokemon = selectedPokemon(build);
-  const activePokemon = resolvePokemonForm(build);
+  const normalizedBuild = normalizeBuildForChampions(build);
+  const basePokemon = selectedPokemon(normalizedBuild);
+  const activePokemon = resolvePokemonForm(normalizedBuild);
   const megaForm = basePokemon ? findMegaForm(basePokemon) : null;
   const filteredPokemon = dataset.pokemon.filter((entry) => pickerLabel(entry).toLowerCase().includes(deferredSearch.toLowerCase()));
-  const effectiveBuild = activePokemon ? { ...build, moveIds: normalizeMoveSelection(build, activePokemon) } : build;
+  const effectiveBuild = activePokemon ? { ...normalizedBuild, moveIds: normalizeMoveSelection(normalizedBuild, activePokemon) } : normalizedBuild;
   const stats = activePokemon ? buildStats(activePokemon.baseStats, effectiveBuild.evs, effectiveBuild.natureId) : null;
   const availableItems = availableItemsForPokemon(basePokemon ?? activePokemon);
   const usage = getPokemonUsageInsight(activePokemon ?? basePokemon, format);
   const presetSummary = getPopularPresetSummary(activePokemon ?? basePokemon, format);
+  const effortUsed = totalEffortPoints(effectiveBuild.evs);
+  const effortRemaining = Math.max(0, totalEffortBudget - effortUsed);
+  const blockedItemNames = [...blockedItemIds].map((itemId) => getItemById(itemId)?.name).filter((name): name is string => Boolean(name));
 
   function patch(partial: Partial<PokemonBuild>) {
-    onChange({
+    onChange(normalizeBuildForChampions({
       ...effectiveBuild,
       ...partial,
-      evs: partial.evs ? { ...partial.evs } : { ...effectiveBuild.evs },
+      evs: partial.evs ? { ...normalizeEffortSpread(partial.evs) } : { ...effectiveBuild.evs },
       moveIds: partial.moveIds ? [...partial.moveIds] : [...effectiveBuild.moveIds],
-    });
+    }));
   }
 
   function updateEv(stat: keyof PokemonBuild['evs'], value: number) {
     patch({
-      evs: {
-        ...effectiveBuild.evs,
-        [stat]: Math.max(0, Math.min(252, Math.round(value / 4) * 4)),
-      },
+      evs: applyEffortValue(effectiveBuild.evs, stat, value),
     });
   }
 
@@ -1466,6 +1591,9 @@ function BuildEditor({
       <div className="result-grid">
         <InfoStat label="Role" value={activePokemon ? describeBuildRole(effectiveBuild, format) : 'Open'} />
         <InfoStat label="Meta" value={usage.label} />
+        <InfoStat label="EV Pts" value={`${effortUsed} / ${totalEffortBudget}`} />
+        <InfoStat label="Remaining" value={`${effortRemaining}`} />
+        <InfoStat label="IVs" value={`${fixedIvValue} fixed`} />
       </div>
 
       <label className="field">
@@ -1512,7 +1640,9 @@ function BuildEditor({
           <select value={effectiveBuild.itemId ?? ''} onChange={(event) => patch({ itemId: event.target.value || null })}>
             <option value="">No item</option>
             {availableItems.map((item) => (
-              <option key={item.id} value={item.id}>{item.name}</option>
+              <option key={item.id} value={item.id} disabled={blockedItemIds.has(item.id) && item.id !== effectiveBuild.itemId}>
+                {blockedItemIds.has(item.id) && item.id !== effectiveBuild.itemId ? `${item.name} - In use` : item.name}
+              </option>
             ))}
           </select>
         </label>
@@ -1569,8 +1699,15 @@ function BuildEditor({
       <div className="ev-grid">
         {statOrder.map((stat) => (
           <label key={stat} className="field small">
-            <span>{statLabels[stat]} EV</span>
-            <input type="number" min={0} max={252} step={4} value={effectiveBuild.evs[stat]} onChange={(event) => updateEv(stat, Number(event.target.value))} />
+            <span>{statLabels[stat]} EV Pts</span>
+            <input
+              type="number"
+              min={0}
+              max={Math.min(maxEffortValue, remainingEffortPoints(effectiveBuild.evs, stat))}
+              step={1}
+              value={effectiveBuild.evs[stat]}
+              onChange={(event) => updateEv(stat, Number(event.target.value))}
+            />
           </label>
         ))}
       </div>
@@ -1614,6 +1751,8 @@ function BuildEditor({
 
       {activePokemon ? (
         <div className="notes-list compact-scroll">
+          <div className="note-row">Champions stat setup uses a 66-point effort budget with a {maxEffortValue}-point cap per stat, and IVs are fixed at {fixedIvValue}.</div>
+          {blockedItemNames.length ? <div className="note-row">Item clause active. Teammates already use: {blockedItemNames.join(', ')}.</div> : null}
           <div className="note-row">{activePokemon.classification || 'Current battle form'} - {describeMegaState(effectiveBuild, basePokemon)}</div>
           {presetSummary ? <div className="note-row">Popular {format} set: {presetSummary.moveNames.join(', ')}</div> : null}
           <div className="note-row">{usage.reason}</div>

@@ -1,4 +1,4 @@
-import { blankStats, dataset } from './champions';
+import { blankStats, dataset, normalizeEffortSpread } from './champions';
 import type { BattleFormat, PokemonBuild, PokemonEntry, StatBlock, Team, UsageInsight, UsageLabel } from '../types';
 
 type FormatPreset = {
@@ -28,10 +28,10 @@ function formatKey(format: BattleFormat): FormatKey {
 }
 
 function makeSpread(partial: Partial<StatBlock>): StatBlock {
-  return {
+  return normalizeEffortSpread({
     ...blankStats(),
     ...partial,
-  };
+  });
 }
 
 function normalizeSpeciesName(name: string) {

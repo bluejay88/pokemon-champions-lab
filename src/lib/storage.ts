@@ -1,4 +1,4 @@
-import { createDefaultState } from './champions';
+import { createDefaultState, sanitizeAppState } from './champions';
 import type { AppState } from '../types';
 
 const STORAGE_KEY = 'pokemon-champions-lab-v1';
@@ -15,24 +15,14 @@ export function loadState() {
       return createDefaultState();
     }
 
-    const defaults = createDefaultState();
-    return {
-      ...defaults,
-      ...parsed,
-      profile: {
-        ...defaults.profile,
-        ...parsed.profile,
-      },
-      teams: parsed.teams,
-      activeTeamId: parsed.activeTeamId || parsed.teams[0].id,
-    };
+    return sanitizeAppState(parsed);
   } catch {
     return createDefaultState();
   }
 }
 
 export function saveState(state: AppState) {
-  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(sanitizeAppState(state)));
 }
 
 export function clearState() {

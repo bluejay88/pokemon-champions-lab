@@ -404,6 +404,16 @@ button {
   margin-top: 0;
 }
 
+.save-status-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 8px 0 2px;
+  color: var(--muted);
+  flex-wrap: wrap;
+}
+
 .saved-team-card,
 .dex-row,
 .picker-row,
@@ -472,6 +482,40 @@ button {
   gap: 6px;
   margin: 12px 0;
   font-size: 0.9rem;
+}
+
+.slot-nature-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0 0 12px;
+  font-size: 0.82rem;
+  color: var(--muted);
+  flex-wrap: wrap;
+}
+
+.slot-stat-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin: 0 0 14px;
+}
+
+.slot-stat-pill {
+  border: 1px solid rgba(162, 201, 255, 0.14);
+  border-radius: 14px;
+  padding: 9px 10px;
+  background: rgba(255, 255, 255, 0.03);
+  display: grid;
+  gap: 4px;
+}
+
+.slot-stat-pill small {
+  color: var(--muted);
+}
+
+.slot-stat-pill strong {
+  font-size: 1rem;
 }
 
 .move-chip {

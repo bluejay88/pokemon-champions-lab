@@ -5,12 +5,16 @@ import {
   createTeam,
   dataset,
   effectiveTypes,
+  fillEffortSpreadRemainder,
   findMegaForm,
   findMegaStoneItem,
   findPokemonByName,
+  maxEffortValue,
   makeEmptyBuild,
   makeId,
+  normalizeEffortSpread,
   resolvePokemonForm,
+  sanitizeTeamForChampions,
   typeEffectiveness,
 } from './champions';
 import {
@@ -248,13 +252,22 @@ function assignedMoves(build: PokemonBuild, pokemon: PokemonEntry) {
     .filter((move): move is PokemonMove => Boolean(move));
 }
 
-function fallbackGeneratedItemId(pokemon: PokemonEntry, build: PokemonBuild, format: BattleFormat) {
+function candidateGeneratedItemIds(pokemon: PokemonEntry, build: PokemonBuild, format: BattleFormat) {
+  const candidates: (string | null)[] = [];
+  const addCandidate = (itemId: string | null) => {
+    if (itemId && !candidates.includes(itemId)) {
+      candidates.push(itemId);
+    }
+  };
+
   if (build.useMega) {
-    return build.itemId ?? findMegaStoneItem(pokemon, findMegaForm(pokemon))?.id ?? null;
+    addCandidate(build.itemId ?? findMegaStoneItem(pokemon, findMegaForm(pokemon))?.id ?? null);
+    return candidates.filter((itemId): itemId is string => Boolean(itemId));
   }
 
   if (pokemon.baseSpecies === 'Pikachu') {
-    return itemIdByName('Light Ball');
+    addCandidate(itemIdByName('Light Ball'));
+    return candidates.filter((itemId): itemId is string => Boolean(itemId));
   }
 
   const moves = assignedMoves(build, pokemon);
@@ -264,22 +277,61 @@ function fallbackGeneratedItemId(pokemon: PokemonEntry, build: PokemonBuild, for
     .sort((left, right) => (right.power ?? 0) - (left.power ?? 0))[0] ?? null;
 
   if (roles.has('fake-out') || roles.has('redirection') || roles.has('support')) {
-    return itemIdByName(format === 'Doubles' ? 'Sitrus Berry' : 'Leftovers') ?? itemIdByName('Focus Sash');
+    addCandidate(itemIdByName(format === 'Doubles' ? 'Sitrus Berry' : 'Leftovers'));
+    addCandidate(itemIdByName('Focus Sash'));
   }
 
   if (roles.has('hazards') || roles.has('screens')) {
-    return itemIdByName('Focus Sash') ?? itemIdByName('Leftovers');
+    addCandidate(itemIdByName('Focus Sash'));
+    addCandidate(itemIdByName('Leftovers'));
   }
 
   if (roles.has('recovery') || pokemon.baseStats.hp + pokemon.baseStats.defense + pokemon.baseStats.specialDefense >= 280) {
-    return itemIdByName(format === 'Doubles' ? 'Sitrus Berry' : 'Leftovers') ?? itemIdByName('Leftovers');
+    addCandidate(itemIdByName(format === 'Doubles' ? 'Sitrus Berry' : 'Leftovers'));
+    addCandidate(itemIdByName('Leftovers'));
   }
 
   if (strongest) {
-    return typeBoostItemId(strongest.type) ?? itemIdByName(pokemon.baseStats.speed >= 95 ? 'Focus Sash' : 'Sitrus Berry');
+    addCandidate(typeBoostItemId(strongest.type));
+    addCandidate(itemIdByName(pokemon.baseStats.speed >= 95 ? 'Focus Sash' : 'Sitrus Berry'));
   }
 
-  return itemIdByName(format === 'Doubles' ? 'Sitrus Berry' : 'Focus Sash') ?? itemIdByName('Leftovers');
+  addCandidate(itemIdByName(format === 'Doubles' ? 'Sitrus Berry' : 'Focus Sash'));
+  addCandidate(itemIdByName('Leftovers'));
+  addCandidate(itemIdByName('Clear Amulet'));
+  addCandidate(itemIdByName('Assault Vest'));
+
+  return candidates.filter((itemId): itemId is string => Boolean(itemId));
+}
+
+function fallbackGeneratedItemId(pokemon: PokemonEntry, build: PokemonBuild, format: BattleFormat, blockedItemIds = new Set<string>()) {
+  return candidateGeneratedItemIds(pokemon, build, format).find((itemId) => !blockedItemIds.has(itemId)) ?? null;
+}
+
+function enforceUniqueGeneratedItems(team: Team) {
+  const usedItemIds = new Set<string>();
+  const nextTeam = sanitizeTeamForChampions(team);
+
+  nextTeam.slots = nextTeam.slots.map((slot) => {
+    const pokemon = resolvePokemonForm(slot);
+    if (!pokemon) {
+      return slot;
+    }
+
+    const preferredItemId = slot.itemId && !usedItemIds.has(slot.itemId) ? slot.itemId : null;
+    const uniqueItemId = preferredItemId ?? fallbackGeneratedItemId(pokemon, slot, nextTeam.format, usedItemIds);
+    if (uniqueItemId) {
+      usedItemIds.add(uniqueItemId);
+    }
+
+    return {
+      ...slot,
+      itemId: uniqueItemId,
+      evs: normalizeEffortSpread(slot.evs),
+    };
+  });
+
+  return nextTeam;
 }
 
 export function recommendMoveIds(pokemon: PokemonEntry, format: BattleFormat) {
@@ -376,13 +428,17 @@ function buildForPokemon(pokemon: PokemonEntry, format: BattleFormat, preferMega
   build.pokemonId = pokemon.id;
   build.abilityName = pokemon.abilities[0]?.name ?? null;
   build.natureId = bestAttackingStat(pokemon.baseStats) === 'attack' ? 'jolly' : 'timid';
+  const offensivePriority =
+    bestAttackingStat(pokemon.baseStats) === 'attack'
+      ? ['attack', 'speed', 'hp', 'defense', 'specialDefense', 'specialAttack'] as const
+      : ['specialAttack', 'speed', 'hp', 'defense', 'specialDefense', 'attack'] as const;
 
   const communityPatch = getPopularPresetPatch(pokemon, format);
   if (communityPatch) {
     build.abilityName = communityPatch.abilityName ?? build.abilityName;
     build.natureId = communityPatch.natureId ?? build.natureId;
     build.moveIds = [...(communityPatch.moveIds ?? [])];
-    build.evs = communityPatch.evs ? { ...communityPatch.evs } : build.evs;
+    build.evs = communityPatch.evs ? fillEffortSpreadRemainder(normalizeEffortSpread({ ...communityPatch.evs }), [...offensivePriority]) : build.evs;
     build.itemId = communityPatch.itemId ?? build.itemId;
     build.useMega = Boolean(preferMega && communityPatch.useMega);
 
@@ -393,17 +449,11 @@ function buildForPokemon(pokemon: PokemonEntry, format: BattleFormat, preferMega
   } else {
     build.moveIds = recommendMoveIds(pokemon, format);
     if (pokemon.baseStats.hp + pokemon.baseStats.defense + pokemon.baseStats.specialDefense >= 300) {
-      build.evs.hp = 252;
-      build.evs.defense = 124;
-      build.evs.specialDefense = 132;
+      build.evs = fillEffortSpreadRemainder(normalizeEffortSpread({ hp: maxEffortValue, defense: 16, specialDefense: 18 }), ['hp', 'defense', 'specialDefense', 'speed', 'attack', 'specialAttack']);
     } else if (bestAttackingStat(pokemon.baseStats) === 'attack') {
-      build.evs.attack = 252;
-      build.evs.speed = 252;
-      build.evs.hp = 4;
+      build.evs = fillEffortSpreadRemainder(normalizeEffortSpread({ attack: maxEffortValue, speed: maxEffortValue, hp: 2 }), [...offensivePriority]);
     } else {
-      build.evs.specialAttack = 252;
-      build.evs.speed = 252;
-      build.evs.hp = 4;
+      build.evs = fillEffortSpreadRemainder(normalizeEffortSpread({ specialAttack: maxEffortValue, speed: maxEffortValue, hp: 2 }), [...offensivePriority]);
     }
   }
 
@@ -437,7 +487,7 @@ function coverageTypes(team: Team) {
 
     for (const moveId of slot.moveIds) {
       const move = pokemon.movePool.find((entry) => entry.id === moveId);
-      if (move?.category !== 'Status') {
+      if (move && move.category !== 'Status') {
         types.add(move.type);
       }
     }
@@ -943,7 +993,7 @@ function buildTeamFromSelection(selection: PokemonEntry[], format: BattleFormat,
     return buildForPokemon(pokemon, format, primaryMega?.baseSpecies === pokemon.baseSpecies);
   });
 
-  return { team, megaCandidates };
+  return { team: enforceUniqueGeneratedItems(team), megaCandidates };
 }
 
 function teamSignature(selection: PokemonEntry[]) {

@@ -159,7 +159,11 @@ export const blankStats = (): StatBlock => ({
   speed: 0,
 });
 
-export const maxEffortValue = 252;
+const legacyEffortCap = 252;
+const legacyEffortStep = 4;
+export const fixedIvValue = 31;
+export const maxEffortValue = 32;
+export const totalEffortBudget = 66;
 export const level = dataset.mechanics.battleLevel;
 
 export const typeChart: Record<string, Record<string, number>> = {
@@ -228,15 +232,180 @@ export function natureMultiplier(natureId: string, stat: StatKey) {
   return 1;
 }
 
-export function clampEffortValue(value: number) {
-  return Math.max(0, Math.min(maxEffortValue, Math.round(value / 4) * 4));
+export function normalizeEffortValue(value: number) {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+
+  return Math.max(0, Math.min(maxEffortValue, Math.round(value)));
+}
+
+export function legacyEvToEffortPoint(value: number) {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+
+  const clamped = Math.max(0, Math.min(legacyEffortCap, value));
+  return normalizeEffortValue(Math.round((clamped / legacyEffortCap) * maxEffortValue));
+}
+
+export function effortPointToLegacyEv(value: number) {
+  const normalized = normalizeEffortValue(value);
+  return Math.min(
+    legacyEffortCap,
+    Math.round(((normalized / maxEffortValue) * legacyEffortCap) / legacyEffortStep) * legacyEffortStep,
+  );
+}
+
+export function totalEffortPoints(stats: StatBlock) {
+  return statOrder.reduce((total, stat) => total + normalizeEffortValue(stats[stat]), 0);
+}
+
+function trimEffortSpread(spread: StatBlock, protectedStat?: StatKey) {
+  const next = { ...spread };
+  let overflow = Math.max(0, totalEffortPoints(next) - totalEffortBudget);
+
+  if (!overflow) {
+    return next;
+  }
+
+  const reductionOrder = [...statOrder]
+    .filter((stat) => stat !== protectedStat)
+    .sort((left, right) => next[right] - next[left]);
+
+  for (const stat of reductionOrder) {
+    if (!overflow) {
+      break;
+    }
+
+    const reducible = Math.min(next[stat], overflow);
+    next[stat] -= reducible;
+    overflow -= reducible;
+  }
+
+  if (overflow && protectedStat) {
+    next[protectedStat] = Math.max(0, next[protectedStat] - overflow);
+  }
+
+  return next;
+}
+
+export function normalizeEffortSpread(partial: Partial<StatBlock>, protectedStat?: StatKey): StatBlock {
+  const containsLegacyValues = statOrder.some((stat) => Number(partial[stat] ?? 0) > maxEffortValue);
+  const next = statOrder.reduce((result, stat) => {
+    const value = Number(partial[stat] ?? 0);
+    result[stat] = containsLegacyValues ? legacyEvToEffortPoint(value) : normalizeEffortValue(value);
+    return result;
+  }, blankStats());
+
+  return trimEffortSpread(next, protectedStat);
+}
+
+export function remainingEffortPoints(spread: StatBlock, stat?: StatKey) {
+  const normalized = normalizeEffortSpread(spread);
+  if (!stat) {
+    return Math.max(0, totalEffortBudget - totalEffortPoints(normalized));
+  }
+
+  const available = totalEffortBudget - (totalEffortPoints(normalized) - normalized[stat]);
+  return Math.max(0, Math.min(maxEffortValue, available));
+}
+
+export function applyEffortValue(spread: StatBlock, stat: StatKey, value: number) {
+  const normalized = normalizeEffortSpread(spread);
+  const nextValue = Math.min(normalizeEffortValue(value), remainingEffortPoints(normalized, stat));
+  return normalizeEffortSpread(
+    {
+      ...normalized,
+      [stat]: nextValue,
+    },
+    stat,
+  );
+}
+
+export function fillEffortSpreadRemainder(spread: StatBlock, priority: StatKey[] = ['hp', 'speed', 'attack', 'specialAttack', 'defense', 'specialDefense']) {
+  const next = normalizeEffortSpread(spread);
+  let remaining = totalEffortBudget - totalEffortPoints(next);
+  if (remaining <= 0) {
+    return next;
+  }
+
+  const orderedPriority = [...new Set(priority.filter((stat) => statOrder.includes(stat)).concat(statOrder))];
+  while (remaining > 0) {
+    const targetStat = orderedPriority.find((stat) => next[stat] < maxEffortValue);
+    if (!targetStat) {
+      break;
+    }
+    next[targetStat] += 1;
+    remaining -= 1;
+  }
+
+  return next;
+}
+
+export function normalizeBuildForChampions(build: PokemonBuild) {
+  return {
+    ...build,
+    moveIds: [...new Set(build.moveIds)].slice(0, 4),
+    evs: normalizeEffortSpread(build.evs),
+    currentHpPercent: Math.max(1, Math.min(100, Math.round(build.currentHpPercent || 100))),
+    attackStage: Math.max(-6, Math.min(6, Math.round(build.attackStage || 0))),
+    defenseStage: Math.max(-6, Math.min(6, Math.round(build.defenseStage || 0))),
+    specialAttackStage: Math.max(-6, Math.min(6, Math.round(build.specialAttackStage || 0))),
+    specialDefenseStage: Math.max(-6, Math.min(6, Math.round(build.specialDefenseStage || 0))),
+    speedStage: Math.max(-6, Math.min(6, Math.round(build.speedStage || 0))),
+  };
+}
+
+export function sanitizeTeamForChampions(team: Team) {
+  const nextTeam = {
+    ...team,
+    slots: team.slots.map((slot) => normalizeBuildForChampions(slot)),
+  };
+  const usedItems = new Set<string>();
+
+  nextTeam.slots = nextTeam.slots.map((slot) => {
+    if (!slot.itemId) {
+      return slot;
+    }
+
+    if (usedItems.has(slot.itemId)) {
+      return {
+        ...slot,
+        itemId: null,
+      };
+    }
+
+    usedItems.add(slot.itemId);
+    return slot;
+  });
+
+  return nextTeam;
+}
+
+export function sanitizeAppState(state: AppState) {
+  const defaults = createDefaultState();
+  const teams = (state.teams?.length ? state.teams : defaults.teams).map((team) => sanitizeTeamForChampions(team));
+  const activeTeamId = teams.some((team) => team.id === state.activeTeamId) ? state.activeTeamId : teams[0].id;
+
+  return {
+    ...defaults,
+    ...state,
+    profile: {
+      ...defaults.profile,
+      ...state.profile,
+    },
+    teams,
+    activeTeamId,
+  } satisfies AppState;
 }
 
 export function buildStats(baseStats: StatBlock, evs: StatBlock, natureId: string) {
-  const hp = Math.floor(((2 * baseStats.hp + 31 + Math.floor(clampEffortValue(evs.hp) / 4)) * level) / 100) + level + 10;
+  const hpEffort = effortPointToLegacyEv(evs.hp);
+  const hp = Math.floor(((2 * baseStats.hp + fixedIvValue + Math.floor(hpEffort / 4)) * level) / 100) + level + 10;
   const nonHp = (stat: Exclude<StatKey, 'hp'>) =>
     Math.floor(
-      (Math.floor(((2 * baseStats[stat] + 31 + Math.floor(clampEffortValue(evs[stat]) / 4)) * level) / 100) + 5) *
+      (Math.floor(((2 * baseStats[stat] + fixedIvValue + Math.floor(effortPointToLegacyEv(evs[stat]) / 4)) * level) / 100) + 5) *
         natureMultiplier(natureId, stat),
     );
 
@@ -267,7 +436,7 @@ export function makeEmptyBuild(seed: string): PokemonBuild {
     itemId: null,
     abilityName: null,
     moveIds: [],
-    evs: blankStats(),
+    evs: normalizeEffortSpread(blankStats()),
     useMega: false,
     currentHpPercent: 100,
     status: 'healthy',

@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "data:build": "node ./scripts/build-champions-data.mjs",
+    "audit:backend": "node ./scripts/audit-backend.mjs",
     "dev": "vite",
     "build": "vite build",
     "build:fresh": "npm run data:build && vite build",
