@@ -212,7 +212,7 @@ function isBallBombMove(move: PokemonMove) {
   return ballBombMoves.has(move.name);
 }
 
-function moveMakesContact(move: PokemonMove) {
+export function moveMakesContact(move: PokemonMove) {
   const name = move.name.toLowerCase();
   return punchMoves.has(move.name) || biteMoves.has(move.name) || ['tackle', 'claw', 'fang', 'whip', 'kick', 'bash', 'headbutt', 'tail', 'slam', 'jab', 'jab'].some((keyword) => name.includes(keyword));
 }

@@ -715,8 +715,14 @@ export function analyzeTeam(team: Team): TeamAnalysis {
       format: team.format,
       synergyScore: 0,
       estimatedWinRate: 0,
+      estimatedWinRateLow: 0,
+      estimatedWinRateHigh: 0,
       survivabilityScore: 0,
       survivabilityGrade: 'D',
+      survivabilityTurns: 0,
+      winRateSummary: 'Add a few Pokemon before the app can project a useful win-rate band.',
+      survivabilitySummary: 'Add a few Pokemon before the app can estimate how many stable turns the shell can absorb.',
+      metricNotes: [],
       overview: 'Add a few Pokemon to start the analyzer.',
       strengths: [],
       weaknesses: [],
@@ -865,13 +871,50 @@ export function analyzeTeam(team: Team): TeamAnalysis {
     ),
   );
 
-  let estimatedWinRate = Math.max(28, Math.min(82, Math.round(synergyScore * 0.73 + survivability.score * 0.08)));
+  const averageThreatScore = threatPool.length
+    ? threatPool.reduce((sum, threat) => sum + threat.score, 0) / threatPool.length
+    : 0;
+  const threatPenalty = Math.max(0, Math.round((averageThreatScore - 165) / 18));
+  const structureBonus = team.format === 'Doubles'
+    ? Math.min(12, protectCount * 1.5 + speedControlCount * 2 + fakeOutCount * 2 + redirectionCount * 2)
+    : Math.min(12, hazardCount * 1.5 + hazardControlCount * 1.5 + pivotCount * 1.25 + recoveryCount);
+  const easyTargetBonus = Math.min(6, easyTargets.length * 1.5);
+  let estimatedWinRate = Math.max(
+    28,
+    Math.min(
+      82,
+      Math.round(26 + synergyScore * 0.4 + survivability.score * 0.2 + structureBonus + easyTargetBonus - threatPenalty),
+    ),
+  );
   if (team.format === 'Doubles' && protectCount >= 3 && speedControlCount >= 2) {
     estimatedWinRate += 2;
   }
-  if (teamUsage.label === 'NU' && team.format === 'Singles') {
+  if (teamUsage.label === 'NU' && team.format === 'Singles' && synergyScore >= 72) {
     estimatedWinRate = Math.max(estimatedWinRate, 60);
   }
+  estimatedWinRate = Math.max(30, Math.min(84, estimatedWinRate));
+
+  const volatility = Math.max(
+    4,
+    Math.min(
+      12,
+      11 -
+        Math.round(synergyScore / 18) -
+        Math.round(survivability.score / 24) +
+        repeatedWeaknesses.length * 2 +
+        Math.max(0, 2 - Math.min(2, speedControlCount)),
+    ),
+  );
+  const estimatedWinRateLow = Math.max(18, estimatedWinRate - volatility);
+  const estimatedWinRateHigh = Math.min(92, estimatedWinRate + volatility);
+
+  const survivabilitySummary = `Survivability projects about ${survivability.turns} stable turns before the shell starts forcing sacks, based on HP, defenses, sustain, and protective utility.`;
+  const winRateSummary = `Win Rate is an estimate, not a promise: this team currently projects around ${estimatedWinRateLow}-${estimatedWinRateHigh}% in a normal ${team.format.toLowerCase()} ranked pocket.`;
+  const metricNotes = [
+    `Win Rate blends synergy, threat pressure, role compression, speed control, sustain, and format-specific structure into one estimate.`,
+    `Survivability uses team bulk, recovery access, Protect density, and defensive role support to grade how long the shell can keep trading cleanly.`,
+    `${survivability.grade} / ${survivability.score} is the survivability grade, and ${survivability.turns} turns is the projected stable battle window before repeated pressure should start collapsing the board.`,
+  ];
 
   const overview = repeatedWeaknesses.length
     ? `The ${team.format} shell has a real game plan, but a few matchup clusters can still overload it in preview.`
@@ -885,8 +928,14 @@ export function analyzeTeam(team: Team): TeamAnalysis {
     format: team.format,
     synergyScore,
     estimatedWinRate,
+    estimatedWinRateLow,
+    estimatedWinRateHigh,
     survivabilityScore: survivability.score,
     survivabilityGrade: survivability.grade,
+    survivabilityTurns: survivability.turns,
+    winRateSummary,
+    survivabilitySummary,
+    metricNotes,
     overview,
     strengths,
     weaknesses,

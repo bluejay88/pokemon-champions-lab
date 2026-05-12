@@ -50,6 +50,7 @@ import type {
   LayoutMode,
   PokemonBuild,
   PokemonEntry,
+  TeamAnalysis,
   Team,
 } from './types';
 import type { SimulatorBattleState, SimulatorChoice } from './lib/simulator';
@@ -62,7 +63,7 @@ type SimulatorPreviewState = {
 };
 
 type ChoiceDraft = {
-  type: 'move' | 'switch';
+  type: 'move' | 'mega' | 'switch';
   moveId: string;
   target: number;
   switchTarget: number;
@@ -591,7 +592,7 @@ function App() {
       }
 
       return {
-        type: 'move',
+        type: draft.type,
         actor,
         moveId: draft.moveId,
         target: draft.target,
@@ -658,10 +659,13 @@ function App() {
               <InfoStat label="Format" value={team.format} />
               <InfoStat label="Synergy" value={`${analysis.synergyScore}`} />
               <InfoStat label="Survivability" value={`${analysis.survivabilityGrade} / ${analysis.survivabilityScore}`} />
-              <InfoStat label="Win Rate" value={`${analysis.estimatedWinRate}%`} />
+              <InfoStat label="Stable Turns" value={`${analysis.survivabilityTurns}`} />
+              <InfoStat label="Est. Win Rate" value={`${analysis.estimatedWinRate}%`} />
+              <InfoStat label="Win Range" value={`${analysis.estimatedWinRateLow}-${analysis.estimatedWinRateHigh}%`} />
               <InfoStat label="Meta Label" value={analysis.teamUsage.label} />
               <InfoStat label="Off-Meta Bias" value={getNinetalesBiasLabel(state.profile.offMetaBias)} />
             </div>
+            <MetricNotes analysis={analysis} compact />
             <div className="layout-toolbar">
               <label className="field toolbar-field">
                 <span>Layout Width</span>
@@ -808,11 +812,14 @@ function App() {
                 <SectionHeader title="Team Summary" subtitle="The same AI labels and survivability notes are reflected live inside Team Builder." compact />
                 <div className="result-grid">
                   <InfoStat label="Meta" value={analysis.teamUsage.label} />
-                  <InfoStat label="Survive" value={`${analysis.survivabilityGrade} / ${analysis.survivabilityScore}`} />
+                  <InfoStat label="Survivability" value={`${analysis.survivabilityGrade} / ${analysis.survivabilityScore}`} />
+                  <InfoStat label="Turns" value={`${analysis.survivabilityTurns}`} />
+                  <InfoStat label="Win Rate" value={`${analysis.estimatedWinRate}%`} />
                   <InfoStat label="Roles" value={`${roleSummary(team).length}`} />
                   <InfoStat label="Easy Wins" value={`${analysis.easyTargets.length}`} />
                 </div>
                 <div className="notes-list team-summary-list">
+                  <MetricNotes analysis={analysis} compact />
                   {roleSummary(team).map((note) => (
                     <div key={note} className="note-row">{note}</div>
                   ))}
@@ -1070,7 +1077,7 @@ function App() {
                 ))}
                 <div className="note-row">Locked core Pokemon are always included, then the AI rounds the team out with items, abilities, spreads, and role coverage.</div>
                 <div className="note-row">Random generator mode keeps your locked core intact while sampling different high-value support, Mega, and matchup branches, and it now refreshes the active team with the first new random result.</div>
-                <div className="note-row">Every generated team comes back with synergy, survivability, meta label, estimated win rate, preview lines, and threat notes.</div>
+                <div className="note-row">Every generated team comes back with synergy, survivability, stable-turn projections, an estimated win-rate band, preview lines, and threat notes.</div>
               </div>
             </div>
 
@@ -1110,12 +1117,15 @@ function App() {
                         <InfoStat label="Mega" value={getPokemonById(selectedGeneratedPlan.megaPokemonId)?.displayName ?? 'Flexible'} />
                         <InfoStat label="Archetype" value={selectedGeneratedPlan.archetype} />
                         <InfoStat label="Synergy" value={`${selectedGeneratedPlan.analysis.synergyScore}`} />
-                        <InfoStat label="Survive" value={`${selectedGeneratedPlan.analysis.survivabilityGrade} / ${selectedGeneratedPlan.analysis.survivabilityScore}`} />
-                        <InfoStat label="Win Rate" value={`${selectedGeneratedPlan.analysis.estimatedWinRate}%`} />
+                        <InfoStat label="Survivability" value={`${selectedGeneratedPlan.analysis.survivabilityGrade} / ${selectedGeneratedPlan.analysis.survivabilityScore}`} />
+                        <InfoStat label="Stable Turns" value={`${selectedGeneratedPlan.analysis.survivabilityTurns}`} />
+                        <InfoStat label="Est. Win Rate" value={`${selectedGeneratedPlan.analysis.estimatedWinRate}%`} />
+                        <InfoStat label="Win Range" value={`${selectedGeneratedPlan.analysis.estimatedWinRateLow}-${selectedGeneratedPlan.analysis.estimatedWinRateHigh}%`} />
                         <InfoStat label="Meta" value={selectedGeneratedPlan.analysis.teamUsage.label} />
                       </div>
 
                       <div className="notes-list scroll-stack">
+                        <MetricNotes analysis={selectedGeneratedPlan.analysis} compact />
                         {selectedGeneratedPlan.reasons.map((reason) => (
                           <div key={reason} className="note-row">{reason}</div>
                         ))}
@@ -1161,11 +1171,14 @@ function App() {
               <SectionHeader title="Overview" subtitle="A quick read on synergy, survivability, easy wins, and overall team identity." />
               <div className="result-grid">
                 <InfoStat label="Synergy" value={`${analysis.synergyScore}/100`} />
-                <InfoStat label="Win Rate" value={`${analysis.estimatedWinRate}%`} />
+                <InfoStat label="Est. Win Rate" value={`${analysis.estimatedWinRate}%`} />
+                <InfoStat label="Win Range" value={`${analysis.estimatedWinRateLow}-${analysis.estimatedWinRateHigh}%`} />
                 <InfoStat label="Survivability" value={`${analysis.survivabilityGrade} / ${analysis.survivabilityScore}`} />
+                <InfoStat label="Stable Turns" value={`${analysis.survivabilityTurns}`} />
                 <InfoStat label="Meta Label" value={analysis.teamUsage.label} />
               </div>
               <div className="notes-list scroll-stack">
+                <MetricNotes analysis={analysis} />
                 {[...analysis.strengths, ...analysis.coverageHighlights, ...analysis.easyTargets].map((note) => (
                   <div key={note} className="note-row">{note}</div>
                 ))}
@@ -1230,6 +1243,7 @@ function App() {
               <button className="action-button primary" onClick={startSimulatorPreview}>Generate Viable Opponent</button>
               <div className="notes-list compact-scroll">
                 <div className="note-row">The simulator uses the live roster, your saved spreads, the current damage engine, and a battle sandbox with targeting, switching, preview order, and AI decisions.</div>
+                <div className="note-row">Mega-capable Pokemon can now choose a dedicated Mega Evolve action, trigger their Mega ability before moving, and only one Mega can be used per side in each battle.</div>
                 <div className="note-row">Preview stays visible for 60 seconds so you can plan your four before the battle opens.</div>
               </div>
             </div>
@@ -1289,6 +1303,8 @@ function App() {
                     <BattleSideView side={simBattle.opponent} format={simBattle.format} />
                     <div className="sim-center-column">
                       <div className="result-grid">
+                        <InfoStat label="Weather" value={simBattle.environment.weather} />
+                        <InfoStat label="Terrain" value={simBattle.environment.terrain} />
                         <InfoStat label="Trick Room" value={simBattle.trickRoomTurns ? `${simBattle.trickRoomTurns} turns` : 'Off'} />
                         <InfoStat label="Your Tailwind" value={simBattle.player.tailwindTurns ? `${simBattle.player.tailwindTurns}` : 'Off'} />
                         <InfoStat label="AI Tailwind" value={simBattle.opponent.tailwindTurns ? `${simBattle.opponent.tailwindTurns}` : 'Off'} />
@@ -1317,6 +1333,9 @@ function App() {
                             target: 0,
                             switchTarget: simBattle.player.bench[0] ?? 0,
                           };
+                          const canMegaEvolve = Boolean(unit.megaPokemon && !unit.megaEvolved && !simBattle.player.megaUsed);
+                          const otherMegaReserved = Object.entries(simChoiceDrafts).some(([draftActor, entry]) => Number(draftActor) !== actor && entry.type === 'mega');
+                          const allowMegaOption = canMegaEvolve && (!otherMegaReserved || draft.type === 'mega');
 
                           return (
                             <div key={`${unit.pokemon.id}-${actor}`} className="subpanel sim-action-card">
@@ -1325,13 +1344,14 @@ function App() {
                                 <span>Action</span>
                                 <select value={draft.type} onChange={(event) => updateChoiceDraft(actor, { type: event.target.value as ChoiceDraft['type'] })}>
                                   <option value="move">Move</option>
+                                  {allowMegaOption ? <option value="mega">Mega Evolve</option> : null}
                                   <option value="switch">Switch</option>
                                 </select>
                               </label>
-                              {draft.type === 'move' ? (
+                              {draft.type !== 'switch' ? (
                                 <>
                                   <label className="field">
-                                    <span>Move</span>
+                                    <span>{draft.type === 'mega' ? 'Move After Mega' : 'Move'}</span>
                                     <select value={draft.moveId} onChange={(event) => updateChoiceDraft(actor, { moveId: event.target.value })}>
                                       {unit.build.moveIds.map((moveId) => {
                                         const move = unit.pokemon.movePool.find((entry) => entry.id === moveId);
@@ -1348,6 +1368,11 @@ function App() {
                                       })}
                                     </select>
                                   </label>
+                                  {draft.type === 'mega' && unit.megaPokemon ? (
+                                    <div className="note-row compact-note">
+                                      {unit.basePokemon.displayName} will Mega Evolve into {unit.megaPokemon.displayName} before acting this turn.
+                                    </div>
+                                  ) : null}
                                 </>
                               ) : (
                                 <label className="field">
@@ -1359,6 +1384,7 @@ function App() {
                                   </select>
                                 </label>
                               )}
+                              {unit.megaEvolved ? <div className="note-row compact-note">Mega active. The Mega ability now applies on the field and on re-entry.</div> : null}
                             </div>
                           );
                         })}
@@ -1429,9 +1455,9 @@ function App() {
             <div className="panel tall">
               <SectionHeader title="What Still Needs Depth" subtitle="Current implementation opinion on the next layers worth adding." />
               <div className="notes-list scroll-stack">
-                <div className="note-row">The battle sandbox now covers preview, bringing four, switching, hazards, Protect, Tailwind, Trick Room, redirection, Encore, Taunt, Reflect, Light Screen, and major switch-in abilities like Intimidate and weather setters.</div>
-                <div className="note-row">Rare abilities and highly bespoke move text still need deeper one-off scripting before this can honestly claim full cartridge parity.</div>
-                <div className="note-row">The next best upgrade after this pass is still a broader rare-effect table for niche abilities, delayed effects, and edge-case end-of-turn interactions.</div>
+                  <div className="note-row">The battle sandbox now covers preview, bringing four, switching, hazards, chained Protect rules, Quick Guard, Wide Guard, spread-target damage, live Mega Evolution turns, Tailwind, Trick Room, redirection, Encore, Disable, Taunt, Reflect, Light Screen, Safeguard, Gravity, and major switch-in abilities like Intimidate and weather setters.</div>
+                <div className="note-row">Status timing now follows the current Champions-style rules in the app: freeze can thaw at 25% per move attempt and always by the third turn, paralysis uses a 12.5% full-paralysis rate, and sleep can wake on turn two and always clears by turn three.</div>
+                <div className="note-row">Rare abilities and truly bespoke move scripts still exist at the edge of the roster, so the next best upgrade after this pass is a broader rare-effect table for one-off abilities, delayed effects, and niche end-of-turn interactions.</div>
               </div>
             </div>
           </section>
@@ -1457,6 +1483,19 @@ function InfoStat({ label, value }: { label: string; value: string }) {
     <div className="info-card">
       <span>{label}</span>
       <strong>{value}</strong>
+    </div>
+  );
+}
+
+function MetricNotes({ analysis, compact = false }: { analysis: TeamAnalysis; compact?: boolean }) {
+  const className = compact ? 'note-row compact-note metric-note' : 'note-row metric-note';
+  return (
+    <div className="notes-list metric-note-stack">
+      <div className={className}><strong>Est. Win Rate:</strong> {analysis.winRateSummary}</div>
+      <div className={className}><strong>Survivability:</strong> {analysis.survivabilitySummary}</div>
+      {analysis.metricNotes.map((note) => (
+        <div key={note} className={className}>{note}</div>
+      ))}
     </div>
   );
 }
@@ -1688,9 +1727,25 @@ function BuildEditor({
       ) : null}
 
       <div className="control-grid five">
-        {(['attackStage', 'defenseStage', 'specialAttackStage', 'specialDefenseStage', 'speedStage'] as const).map((field) => (
+        {([
+          'attackStage',
+          'defenseStage',
+          'specialAttackStage',
+          'specialDefenseStage',
+          'speedStage',
+          'accuracyStage',
+          'evasionStage',
+        ] as const).map((field) => (
           <label key={field} className="field small">
-            <span>{field.replace('Stage', '').replace('special', 'Sp').replace('Attack', 'A').replace('Defense', 'D')}</span>
+            <span>{
+              field === 'attackStage' ? 'Atk' :
+              field === 'defenseStage' ? 'Def' :
+              field === 'specialAttackStage' ? 'SpA' :
+              field === 'specialDefenseStage' ? 'SpD' :
+              field === 'speedStage' ? 'Spe' :
+              field === 'accuracyStage' ? 'Acc' :
+              'Eva'
+            }</span>
             <input type="number" min={-6} max={6} value={effectiveBuild[field]} onChange={(event) => patch({ [field]: Math.max(-6, Math.min(6, Number(event.target.value))) } as Partial<PokemonBuild>)} />
           </label>
         ))}

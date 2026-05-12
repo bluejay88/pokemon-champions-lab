@@ -400,6 +400,14 @@ button {
   gap: 16px;
 }
 
+.metric-note-stack {
+  margin-top: 14px;
+}
+
+.metric-note strong {
+  color: #f4fbff;
+}
+
 .saved-team-list {
   margin-top: 0;
 }
@@ -1361,5 +1369,65 @@ button {
   .toolbar-field,
   .toggle-field {
     width: 100%;
+  }
+}
+
+@media (max-width: 640px) {
+  .sidebar,
+  .main-shell {
+    padding: 14px;
+  }
+
+  .brand-panel,
+  .profile-chip,
+  .panel,
+  .subpanel,
+  .battle-side,
+  .sim-center-column,
+  .sim-action-card {
+    padding: 16px;
+    border-radius: 18px;
+  }
+
+  .section-header h2 {
+    font-size: 1.08rem;
+  }
+
+  .section-header p {
+    font-size: 0.92rem;
+  }
+
+  .team-actions,
+  .topbar-actions,
+  .layout-toolbar {
+    gap: 12px;
+  }
+
+  .team-actions .action-button,
+  .topbar-actions .action-button,
+  .sim-action-card .action-button,
+  .sim-action-card .mini-button {
+    width: 100%;
+    justify-content: center;
+  }
+
+  .sim-team-preview,
+  .battle-active-row,
+  .sim-action-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .battle-bench-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .battle-bench-card,
+  .sim-team-card {
+    min-width: 0;
+  }
+
+  .note-row {
+    padding: 14px 15px;
   }
 }

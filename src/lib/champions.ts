@@ -354,6 +354,8 @@ export function normalizeBuildForChampions(build: PokemonBuild) {
     specialAttackStage: Math.max(-6, Math.min(6, Math.round(build.specialAttackStage || 0))),
     specialDefenseStage: Math.max(-6, Math.min(6, Math.round(build.specialDefenseStage || 0))),
     speedStage: Math.max(-6, Math.min(6, Math.round(build.speedStage || 0))),
+    accuracyStage: Math.max(-6, Math.min(6, Math.round(build.accuracyStage || 0))),
+    evasionStage: Math.max(-6, Math.min(6, Math.round(build.evasionStage || 0))),
   };
 }
 
@@ -445,6 +447,8 @@ export function makeEmptyBuild(seed: string): PokemonBuild {
     specialAttackStage: 0,
     specialDefenseStage: 0,
     speedStage: 0,
+    accuracyStage: 0,
+    evasionStage: 0,
     notes: '',
   };
 }

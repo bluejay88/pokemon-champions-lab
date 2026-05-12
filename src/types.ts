@@ -129,6 +129,8 @@ export interface PokemonBuild {
   specialAttackStage: number;
   specialDefenseStage: number;
   speedStage: number;
+  accuracyStage: number;
+  evasionStage: number;
   notes: string;
 }
 
@@ -205,8 +207,14 @@ export interface TeamAnalysis {
   format: BattleFormat;
   synergyScore: number;
   estimatedWinRate: number;
+  estimatedWinRateLow: number;
+  estimatedWinRateHigh: number;
   survivabilityScore: number;
   survivabilityGrade: string;
+  survivabilityTurns: number;
+  winRateSummary: string;
+  survivabilitySummary: string;
+  metricNotes: string[];
   overview: string;
   strengths: string[];
   weaknesses: string[];

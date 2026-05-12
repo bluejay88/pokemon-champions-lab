@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
 import { copyFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { createRequire } from 'node:module';
@@ -7,7 +6,7 @@ import { createRequire } from 'node:module';
 const workspaceRoot = resolve('.');
 const auditDir = resolve(workspaceRoot, '.tmp-audit');
 const skipCompile = process.env.AUDIT_SKIP_COMPILE === '1';
-const run = (command, args) => execFileSync(command, args, { cwd: workspaceRoot, stdio: 'pipe' });
+const rootRequire = createRequire(import.meta.url);
 
 function parseRange(text) {
   const [low, high] = text.split('-').map((value) => Number.parseInt(value.trim(), 10));
@@ -18,55 +17,120 @@ function statSummary(spread) {
   return Object.values(spread).reduce((sum, value) => sum + Number(value || 0), 0);
 }
 
+function withMockRandom(values, task) {
+  const originalRandom = Math.random;
+  let index = 0;
+  Math.random = () => values[Math.min(index++, values.length - 1)] ?? values[values.length - 1] ?? 0.5;
+  try {
+    return task();
+  } finally {
+    Math.random = originalRandom;
+  }
+}
+
+function findPokemonWithMoves(moveNames, preferredDisplayNames = []) {
+  for (const preferredName of preferredDisplayNames) {
+    const preferred = dataset.pokemon.find((pokemon) => pokemon.displayName === preferredName && moveNames.every((moveName) => pokemon.movePool.some((move) => move.name === moveName)));
+    if (preferred) {
+      return preferred;
+    }
+  }
+
+  return dataset.pokemon.find((pokemon) => moveNames.every((moveName) => pokemon.movePool.some((move) => move.name === moveName))) ?? null;
+}
+
+function moveIdFor(pokemon, moveName) {
+  return pokemon.movePool.find((move) => move.name === moveName)?.id ?? null;
+}
+
+function itemIdByName(itemName) {
+  return dataset.items.find((item) => item.name === itemName)?.id ?? null;
+}
+
+function buildSlot(seed, pokemon, moveNames, overrides = {}) {
+  const moveIds = moveNames.map((moveName) => moveIdFor(pokemon, moveName)).filter(Boolean);
+  return {
+    ...makeEmptyBuild(seed),
+    ...overrides,
+    pokemonId: pokemon.id,
+    natureId: overrides.natureId ?? 'hardy',
+    itemId: overrides.itemId ?? null,
+    abilityName: overrides.abilityName ?? pokemon.abilities[0]?.name ?? null,
+    moveIds,
+    evs: normalizeEffortSpread(overrides.evs ?? blankStats()),
+    status: overrides.status ?? 'healthy',
+  };
+}
+
+function buildBattle(format, playerSlots, opponentSlots) {
+  const playerTeam = createTeam('Player Audit', format);
+  const opponentTeam = createTeam('Opponent Audit', format);
+  playerSlots.forEach((slot, index) => {
+    playerTeam.slots[index] = slot;
+  });
+  opponentSlots.forEach((slot, index) => {
+    opponentTeam.slots[index] = slot;
+  });
+  const playerOrder = playerSlots.map((_, index) => index);
+  const opponentOrder = opponentSlots.map((_, index) => index);
+  return advancePreviewToBattle(createSimulatorBattle(format, playerTeam, playerOrder, opponentTeam, opponentOrder, null));
+}
+
 if (!skipCompile) {
   rmSync(auditDir, { recursive: true, force: true });
   mkdirSync(auditDir, { recursive: true });
 }
 
 if (!skipCompile) {
-  const tscEntrypoint = resolve(workspaceRoot, 'node_modules/typescript/bin/tsc');
-  run(process.execPath, [
-    tscEntrypoint,
-    'src/lib/champions.ts',
-    'src/lib/damage.ts',
-    'src/lib/usage.ts',
-    'src/lib/ai.ts',
-    'src/lib/simulator.ts',
-    'src/types.ts',
-    '--outDir',
-    auditDir,
-    '--rootDir',
-    'src',
-    '--module',
-    'CommonJS',
-    '--moduleResolution',
-    'Node',
-    '--target',
-    'ES2022',
-    '--lib',
-    'ES2022,DOM,DOM.Iterable',
-    '--resolveJsonModule',
-    '--esModuleInterop',
-    '--allowSyntheticDefaultImports',
-    '--strict',
-    'true',
-    '--skipLibCheck',
-    '--ignoreDeprecations',
-    '6.0',
-    '--noEmit',
-    'false',
-    '--ignoreConfig',
-  ]);
+  const ts = rootRequire(resolve(workspaceRoot, 'node_modules/typescript/lib/typescript.js'));
+  const compilerOptions = {
+    outDir: auditDir,
+    rootDir: resolve(workspaceRoot, 'src'),
+    module: ts.ModuleKind.CommonJS,
+    moduleResolution: ts.ModuleResolutionKind.Node10,
+    target: ts.ScriptTarget.ES2022,
+    lib: ['lib.es2022.d.ts', 'lib.dom.d.ts', 'lib.dom.iterable.d.ts'],
+    resolveJsonModule: true,
+    esModuleInterop: true,
+    allowSyntheticDefaultImports: true,
+    strict: true,
+    skipLibCheck: true,
+    ignoreDeprecations: '6.0',
+  };
+  const program = ts.createProgram([
+    resolve(workspaceRoot, 'src/lib/champions.ts'),
+    resolve(workspaceRoot, 'src/lib/damage.ts'),
+    resolve(workspaceRoot, 'src/lib/usage.ts'),
+    resolve(workspaceRoot, 'src/lib/ai.ts'),
+    resolve(workspaceRoot, 'src/lib/simulator.ts'),
+    resolve(workspaceRoot, 'src/types.ts'),
+  ], compilerOptions);
+  const emitResult = program.emit();
+  const diagnostics = ts
+    .getPreEmitDiagnostics(program)
+    .concat(emitResult.diagnostics)
+    .map((diagnostic) => {
+      const message = ts.flattenDiagnosticMessageText(diagnostic.messageText, '\n');
+      if (!diagnostic.file || typeof diagnostic.start !== 'number') {
+        return message;
+      }
+      const { line, character } = diagnostic.file.getLineAndCharacterOfPosition(diagnostic.start);
+      return `${diagnostic.file.fileName}:${line + 1}:${character + 1} ${message}`;
+    });
+  if (emitResult.emitSkipped || diagnostics.length) {
+    throw new Error(`Audit compile failed.\n${diagnostics.slice(0, 40).join('\n')}`);
+  }
 }
 
 writeFileSync(resolve(auditDir, 'package.json'), JSON.stringify({ type: 'commonjs' }, null, 2));
 mkdirSync(resolve(auditDir, 'data'), { recursive: true });
 copyFileSync(resolve(workspaceRoot, 'src/data/champions-data.json'), resolve(auditDir, 'data/champions-data.json'));
 
-const auditRequire = createRequire(import.meta.url);
+const auditRequire = rootRequire;
 const champions = auditRequire(resolve(auditDir, 'lib/champions.js'));
 const damage = auditRequire(resolve(auditDir, 'lib/damage.js'));
 const ai = auditRequire(resolve(auditDir, 'lib/ai.js'));
+const simulator = auditRequire(resolve(auditDir, 'lib/simulator.js'));
 const dataset = JSON.parse(readFileSync(resolve(workspaceRoot, 'src/data/champions-data.json'), 'utf8'));
 
 const {
@@ -78,12 +142,14 @@ const {
   applyEffortValue,
   createTeam,
   makeEmptyBuild,
+  normalizeEffortSpread,
   sanitizeTeamForChampions,
   getPokemonById,
 } = champions;
 
 const { calculateDamage } = damage;
 const { generateTeamPlans } = ai;
+const { advancePreviewToBattle, createSimulatorBattle, resolveTurn } = simulator;
 
 const statKeys = ['hp', 'attack', 'defense', 'specialAttack', 'specialDefense', 'speed'];
 const failures = [];
@@ -190,6 +256,287 @@ const damageResult = calculateDamage(attacker, defender, earthquake, champions.d
 assert(damageResult, 'Damage calculation should return a result for damaging moves.');
 assert.ok(damageResult.maxDamage > damageResult.minDamage || damageResult.maxDamage > 0, 'Damage result should contain positive damage output.');
 
+const protectUser = findPokemonWithMoves(['Protect'], ['Amoonguss', 'Umbreon', 'Clefable']);
+const earthquakeUser = findPokemonWithMoves(['Earthquake'], ['Garchomp']);
+const thunderUser = findPokemonWithMoves(['Thunder'], ['Zapdos', 'Jolteon']);
+const snarlUser = findPokemonWithMoves(['Snarl'], ['Incineroar', 'Arcanine']);
+const shadowBallUser = findPokemonWithMoves(['Shadow Ball'], ['Froslass', 'Gengar', 'Alakazam']);
+const specialTargetA = findPokemonWithMoves(['Shadow Ball'], ['Gengar', 'Alakazam', 'Flutter Mane']);
+const specialTargetB = findPokemonWithMoves(['Thunderbolt'], ['Jolteon', 'Zapdos', 'Raikou']);
+const wishUser = findPokemonWithMoves(['Wish'], ['Clefable', 'Sylveon', 'Umbreon']);
+const pivotUser = findPokemonWithMoves(['Volt Switch'], ['Jolteon', 'Zapdos', 'Rotom']);
+const brickBreakUser = findPokemonWithMoves(['Brick Break'], ['Garchomp', 'Dragonite', 'Lucario']);
+const iceSpinnerUser = findPokemonWithMoves(['Ice Spinner'], ['Sneasler', 'Weavile', 'Pawmot']);
+const leechSeedUser = findPokemonWithMoves(['Leech Seed'], ['Venusaur', 'Abomasnow', 'Ferrothorn']);
+const restUser = findPokemonWithMoves(['Rest'], ['Snorlax', 'Suicune', 'Milotic']);
+const disableUser = findPokemonWithMoves(['Disable', 'Protect'], ['Gengar', 'Sableye', 'Mismagius']);
+const trickRoomUser = findPokemonWithMoves(['Trick Room', 'Shadow Ball'], ['Mimikyu', 'Bronzong', 'Flutter Mane']);
+const calmMindUser = findPokemonWithMoves(['Calm Mind'], ['Alakazam', 'Suicune', 'Clefable']);
+const nastyPlotUser = findPokemonWithMoves(['Nasty Plot'], ['Gengar', 'Hydreigon', 'Mismagius']);
+const charizardBase = dataset.pokemon.find((pokemon) => pokemon.displayName === 'Charizard' && !pokemon.isMega) ?? null;
+const abomasnowBase = dataset.pokemon.find((pokemon) => pokemon.displayName === 'Abomasnow' && !pokemon.isMega) ?? null;
+assert(
+  protectUser &&
+    earthquakeUser &&
+    thunderUser &&
+    snarlUser &&
+    shadowBallUser &&
+    specialTargetA &&
+    specialTargetB &&
+    wishUser &&
+    pivotUser &&
+    brickBreakUser &&
+    iceSpinnerUser &&
+    leechSeedUser &&
+    restUser &&
+    disableUser &&
+    trickRoomUser &&
+    calmMindUser &&
+    nastyPlotUser &&
+    charizardBase &&
+    abomasnowBase,
+  'Expected simulator audit Pokemon to exist in the Champions roster.',
+);
+
+const protectChoiceId = moveIdFor(protectUser, 'Protect');
+const earthquakeChoiceId = moveIdFor(earthquakeUser, 'Earthquake');
+const thunderChoiceId = moveIdFor(thunderUser, 'Thunder');
+const snarlChoiceId = moveIdFor(snarlUser, 'Snarl');
+const shadowBallChoiceId = moveIdFor(shadowBallUser, 'Shadow Ball');
+const wishChoiceId = moveIdFor(wishUser, 'Wish');
+const voltSwitchChoiceId = moveIdFor(pivotUser, 'Volt Switch');
+const brickBreakChoiceId = moveIdFor(brickBreakUser, 'Brick Break');
+const iceSpinnerChoiceId = moveIdFor(iceSpinnerUser, 'Ice Spinner');
+const leechSeedChoiceId = moveIdFor(leechSeedUser, 'Leech Seed');
+const restChoiceId = moveIdFor(restUser, 'Rest');
+const disableChoiceId = moveIdFor(disableUser, 'Disable');
+const trickRoomChoiceId = moveIdFor(trickRoomUser, 'Trick Room');
+const calmMindChoiceId = moveIdFor(calmMindUser, 'Calm Mind');
+const nastyPlotChoiceId = moveIdFor(nastyPlotUser, 'Nasty Plot');
+const megaCharizardMoveId = moveIdFor(charizardBase, 'Flamethrower') ?? moveIdFor(charizardBase, 'Heat Wave') ?? charizardBase.movePool[0]?.id ?? null;
+const megaAbomasnowMoveId = moveIdFor(abomasnowBase, 'Blizzard') ?? moveIdFor(abomasnowBase, 'Ice Shard') ?? abomasnowBase.movePool[0]?.id ?? null;
+const charizarditeYId = itemIdByName('Charizardite Y');
+const abomasiteId = itemIdByName('Abomasite');
+assert(
+  protectChoiceId &&
+    earthquakeChoiceId &&
+    thunderChoiceId &&
+    snarlChoiceId &&
+    shadowBallChoiceId &&
+    wishChoiceId &&
+    voltSwitchChoiceId &&
+    brickBreakChoiceId &&
+    iceSpinnerChoiceId &&
+    leechSeedChoiceId &&
+    restChoiceId &&
+    disableChoiceId &&
+    trickRoomChoiceId &&
+    calmMindChoiceId &&
+    nastyPlotChoiceId &&
+    megaCharizardMoveId &&
+    megaAbomasnowMoveId &&
+    charizarditeYId &&
+    abomasiteId,
+  'Expected simulator audit moves and Mega Stones to exist on selected Pokemon.',
+);
+
+let protectBattle = buildBattle(
+  'Singles',
+  [buildSlot('protect-user', protectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } })],
+  [buildSlot('protect-foe', earthquakeUser, ['Earthquake'], { natureId: 'jolly', evs: { ...blankStats(), attack: 32, speed: 32, hp: 2 } })],
+);
+
+protectBattle = withMockRandom([0.2, 0.2, 0.2], () => resolveTurn(protectBattle, [{ type: 'move', actor: 0, moveId: protectChoiceId, target: 0 }]));
+assert.equal(protectBattle.player.units[0].currentHp, protectBattle.player.units[0].maxHp, 'First Protect should always succeed.');
+protectBattle = withMockRandom([0.2, 0.2, 0.2], () => resolveTurn(protectBattle, [{ type: 'move', actor: 0, moveId: protectChoiceId, target: 0 }]));
+assert.equal(protectBattle.player.units[0].currentHp, protectBattle.player.units[0].maxHp, 'Second consecutive Protect should succeed at the 1/3 rate with a 0.2 roll.');
+protectBattle = withMockRandom([0.2, 0.2, 0.2], () => resolveTurn(protectBattle, [{ type: 'move', actor: 0, moveId: protectChoiceId, target: 0 }]));
+assert.ok(protectBattle.player.units[0].currentHp < protectBattle.player.units[0].maxHp, 'Third consecutive Protect should fail at the 1/9 rate with a 0.2 roll.');
+
+let rainBattle = buildBattle(
+  'Singles',
+  [buildSlot('rain-thunder', thunderUser, ['Thunder'], { natureId: 'timid', evs: { ...blankStats(), specialAttack: 32, speed: 32, hp: 2 } })],
+  [buildSlot('rain-target', protectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, specialDefense: 20, defense: 14 } })],
+);
+rainBattle.environment.weather = 'rain';
+rainBattle = withMockRandom([0.99, 0.99, 0.99], () => resolveTurn(rainBattle, [{ type: 'move', actor: 0, moveId: thunderChoiceId, target: 0 }]));
+assert.ok(rainBattle.opponent.units[0].currentHp < rainBattle.opponent.units[0].maxHp, 'Thunder should connect in rain even on a 0.99 roll.');
+
+let dryBattle = buildBattle(
+  'Singles',
+  [buildSlot('dry-thunder', thunderUser, ['Thunder'], { natureId: 'timid', evs: { ...blankStats(), specialAttack: 32, speed: 32, hp: 2 } })],
+  [buildSlot('dry-target', protectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, specialDefense: 20, defense: 14 } })],
+);
+dryBattle.environment.weather = 'clear';
+dryBattle = withMockRandom([0.99, 0.99, 0.99], () => resolveTurn(dryBattle, [{ type: 'move', actor: 0, moveId: thunderChoiceId, target: 0 }]));
+assert.equal(dryBattle.opponent.units[0].currentHp, dryBattle.opponent.units[0].maxHp, 'Thunder should miss outside rain on a 0.99 roll.');
+
+let snarlBattle = buildBattle(
+  'Doubles',
+  [
+    buildSlot('snarl-user', snarlUser, ['Snarl'], { evs: { ...blankStats(), hp: 24, specialAttack: 24, speed: 18 } }),
+    buildSlot('snarl-ally', protectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } }),
+  ],
+  [
+    buildSlot('snarl-target-a', specialTargetA, [specialTargetA.movePool[0].name], { evs: { ...blankStats(), hp: 20, specialAttack: 24, speed: 22 } }),
+    buildSlot('snarl-target-b', specialTargetB, [specialTargetB.movePool[0].name], { evs: { ...blankStats(), hp: 20, specialAttack: 24, speed: 22 } }),
+  ],
+);
+snarlBattle = withMockRandom([0.1, 0.1, 0.1, 0.1, 0.1, 0.1], () => resolveTurn(snarlBattle, [
+  { type: 'move', actor: 0, moveId: snarlChoiceId, target: 0 },
+  { type: 'move', actor: 1, moveId: protectChoiceId, target: 0 },
+]));
+assert.equal(snarlBattle.opponent.units[0].build.specialAttackStage, -1, 'Snarl should drop the first target\'s Sp. Atk.');
+assert.equal(snarlBattle.opponent.units[1].build.specialAttackStage, -1, 'Snarl should drop the second target\'s Sp. Atk.');
+assert.ok(snarlBattle.opponent.units[0].currentHp < snarlBattle.opponent.units[0].maxHp, 'Snarl should damage the first opposing target.');
+assert.ok(snarlBattle.opponent.units[1].currentHp < snarlBattle.opponent.units[1].maxHp, 'Snarl should damage the second opposing target.');
+
+let earthquakeBattle = buildBattle(
+  'Doubles',
+  [
+    buildSlot('eq-user', earthquakeUser, ['Earthquake'], { natureId: 'jolly', evs: { ...blankStats(), attack: 32, speed: 32, hp: 2 } }),
+    buildSlot('eq-ally', snarlUser, ['Snarl'], { evs: { ...blankStats(), hp: 24, defense: 20, specialDefense: 22 } }),
+  ],
+  [
+    buildSlot('eq-target-a', protectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } }),
+    buildSlot('eq-target-b', specialTargetB, [specialTargetB.movePool[0].name], { evs: { ...blankStats(), hp: 20, defense: 20, specialDefense: 26 } }),
+  ],
+);
+earthquakeBattle = withMockRandom([0.1, 0.1, 0.1, 0.1, 0.1, 0.1], () => resolveTurn(earthquakeBattle, [
+  { type: 'move', actor: 0, moveId: earthquakeChoiceId, target: 0 },
+  { type: 'move', actor: 1, moveId: snarlChoiceId, target: 0 },
+]));
+assert.ok(earthquakeBattle.player.units[1].currentHp < earthquakeBattle.player.units[1].maxHp, 'All-adjacent moves should hit the user\'s ally when appropriate.');
+assert.ok(earthquakeBattle.opponent.units[0].currentHp < earthquakeBattle.opponent.units[0].maxHp, 'Earthquake should damage the first opposing target.');
+assert.ok(earthquakeBattle.opponent.units[1].currentHp < earthquakeBattle.opponent.units[1].maxHp, 'Earthquake should damage the second opposing target.');
+
+let freezeBattle = buildBattle(
+  'Singles',
+  [buildSlot('freeze-user', shadowBallUser, ['Shadow Ball'], { status: 'freeze', evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } })],
+  [buildSlot('freeze-foe', protectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } })],
+);
+freezeBattle = withMockRandom([0.9, 0.9, 0.9], () => resolveTurn(freezeBattle, [{ type: 'move', actor: 0, moveId: shadowBallChoiceId, target: 0 }]));
+assert.equal(freezeBattle.player.units[0].build.status, 'freeze', 'Frozen Pokemon should stay frozen on the first failed thaw turn.');
+freezeBattle = withMockRandom([0.9, 0.9, 0.9], () => resolveTurn(freezeBattle, [{ type: 'move', actor: 0, moveId: shadowBallChoiceId, target: 0 }]));
+assert.equal(freezeBattle.player.units[0].build.status, 'freeze', 'Frozen Pokemon should still be frozen on the second failed thaw turn.');
+freezeBattle = withMockRandom([0.9, 0.9, 0.9], () => resolveTurn(freezeBattle, [{ type: 'move', actor: 0, moveId: shadowBallChoiceId, target: 0 }]));
+assert.equal(freezeBattle.player.units[0].build.status, 'healthy', 'Frozen Pokemon should always thaw by the third turn.');
+
+let wishBattle = buildBattle(
+  'Singles',
+  [
+    buildSlot('wish-user', wishUser, ['Wish'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 }, currentHpPercent: 40 }),
+    buildSlot('wish-bench', protectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } }),
+  ],
+  [buildSlot('wish-foe', shadowBallUser, ['Shadow Ball'], { evs: { ...blankStats(), specialAttack: 32, speed: 20, hp: 14 } })],
+);
+wishBattle = withMockRandom([0.2, 0.2, 0.2], () => resolveTurn(wishBattle, [{ type: 'move', actor: 0, moveId: wishChoiceId, target: 0 }]));
+const postWishHp = wishBattle.player.units[0].currentHp;
+wishBattle = withMockRandom([0.2, 0.2, 0.2], () => resolveTurn(wishBattle, [{ type: 'move', actor: 0, moveId: protectChoiceId, target: 0 }]));
+assert.ok(wishBattle.player.units[0].currentHp > postWishHp, 'Wish should heal the active slot at the end of the following turn.');
+
+let pivotBattle = buildBattle(
+  'Singles',
+  [
+    buildSlot('pivot-user', pivotUser, ['Volt Switch'], { evs: { ...blankStats(), specialAttack: 32, speed: 32, hp: 2 } }),
+    buildSlot('pivot-bench', protectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } }),
+  ],
+  [buildSlot('pivot-foe', shadowBallUser, ['Shadow Ball'], { evs: { ...blankStats(), hp: 20, specialDefense: 24, defense: 22 } })],
+);
+pivotBattle = withMockRandom([0.1, 0.1, 0.1], () => resolveTurn(pivotBattle, [{ type: 'move', actor: 0, moveId: voltSwitchChoiceId, target: 0 }]));
+assert.equal(pivotBattle.player.units[pivotBattle.player.active[0]].pokemon.displayName, protectUser.displayName, 'Volt Switch should pivot the user into the first available bench replacement.');
+
+let brickBreakBattle = buildBattle(
+  'Singles',
+  [buildSlot('brick-user', brickBreakUser, ['Brick Break'], { evs: { ...blankStats(), attack: 32, speed: 20, hp: 14 } })],
+  [buildSlot('brick-foe', protectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } })],
+);
+brickBreakBattle.opponent.reflectTurns = 5;
+brickBreakBattle.opponent.lightScreenTurns = 5;
+brickBreakBattle = withMockRandom([0.1, 0.1, 0.1], () => resolveTurn(brickBreakBattle, [{ type: 'move', actor: 0, moveId: brickBreakChoiceId, target: 0 }]));
+assert.equal(brickBreakBattle.opponent.reflectTurns, 0, 'Brick Break should remove Reflect.');
+assert.equal(brickBreakBattle.opponent.lightScreenTurns, 0, 'Brick Break should remove Light Screen.');
+
+let terrainBattle = buildBattle(
+  'Singles',
+  [buildSlot('ice-user', iceSpinnerUser, ['Ice Spinner'], { evs: { ...blankStats(), attack: 32, speed: 20, hp: 14 } })],
+  [buildSlot('ice-foe', protectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } })],
+);
+terrainBattle.environment.terrain = 'psychic';
+terrainBattle = withMockRandom([0.1, 0.1, 0.1], () => resolveTurn(terrainBattle, [{ type: 'move', actor: 0, moveId: iceSpinnerChoiceId, target: 0 }]));
+assert.equal(terrainBattle.environment.terrain, 'none', 'Ice Spinner should clear the current terrain.');
+
+let seedBattle = buildBattle(
+  'Singles',
+  [buildSlot('seed-user', leechSeedUser, ['Leech Seed'], { evs: { ...blankStats(), hp: 32, specialDefense: 20, defense: 14 }, currentHpPercent: 60 })],
+  [buildSlot('seed-foe', protectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } })],
+);
+seedBattle = withMockRandom([0.1, 0.1, 0.1], () => resolveTurn(seedBattle, [{ type: 'move', actor: 0, moveId: leechSeedChoiceId, target: 0 }]));
+assert.ok(seedBattle.opponent.units[0].currentHp < seedBattle.opponent.units[0].maxHp, 'Leech Seed should drain HP at end of turn.');
+assert.ok(seedBattle.player.units[0].currentHp > Math.round(seedBattle.player.units[0].maxHp * 0.6) - 1, 'Leech Seed should restore HP to the seeding side.');
+
+let restBattle = buildBattle(
+  'Singles',
+  [buildSlot('rest-user', restUser, ['Rest'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 }, currentHpPercent: 35, status: 'burn' })],
+  [buildSlot('rest-foe', protectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } })],
+);
+restBattle = withMockRandom([0.1, 0.1, 0.1], () => resolveTurn(restBattle, [{ type: 'move', actor: 0, moveId: restChoiceId, target: 0 }]));
+assert.equal(restBattle.player.units[0].currentHp, restBattle.player.units[0].maxHp, 'Rest should fully restore HP.');
+assert.equal(restBattle.player.units[0].build.status, 'sleep', 'Rest should put the user to sleep.');
+
+let disableBattle = buildBattle(
+  'Singles',
+  [buildSlot('disable-user', disableUser, ['Disable', 'Protect'], { evs: { ...blankStats(), hp: 32, speed: 20, defense: 14 } })],
+  [buildSlot('disable-foe', shadowBallUser, ['Shadow Ball', 'Protect'], { evs: { ...blankStats(), specialAttack: 32, speed: 32, hp: 2 } })],
+);
+disableBattle = withMockRandom([0.1, 0.1, 0.1], () => resolveTurn(disableBattle, [{ type: 'move', actor: 0, moveId: protectChoiceId, target: 0 }]));
+disableBattle = withMockRandom([0.1, 0.1, 0.1], () => resolveTurn(disableBattle, [{ type: 'move', actor: 0, moveId: disableChoiceId, target: 0 }]));
+assert.equal(disableBattle.opponent.units[0].disabledMoveId, shadowBallChoiceId, 'Disable should lock the target\'s last used move.');
+const hpAfterDisableTurn = disableBattle.player.units[0].currentHp;
+disableBattle = withMockRandom([0.1, 0.1, 0.1], () => resolveTurn(disableBattle, [{ type: 'move', actor: 0, moveId: protectChoiceId, target: 0 }]));
+assert.equal(disableBattle.player.units[0].currentHp, hpAfterDisableTurn, 'A disabled attacker should not be able to reuse its disabled move immediately.');
+
+let calmMindBattle = buildBattle(
+  'Singles',
+  [buildSlot('calm-mind-user', calmMindUser, ['Calm Mind'], { evs: { ...blankStats(), hp: 32, specialAttack: 20, specialDefense: 14 } })],
+  [buildSlot('calm-mind-foe', protectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } })],
+);
+calmMindBattle = withMockRandom([0.1, 0.1, 0.1], () => resolveTurn(calmMindBattle, [{ type: 'move', actor: 0, moveId: calmMindChoiceId, target: 0 }]));
+assert.equal(calmMindBattle.player.units[0].build.specialAttackStage, 1, 'Calm Mind should raise Sp. Atk by one stage.');
+assert.equal(calmMindBattle.player.units[0].build.specialDefenseStage, 1, 'Calm Mind should raise Sp. Def by one stage.');
+
+let nastyPlotBattle = buildBattle(
+  'Singles',
+  [buildSlot('nasty-plot-user', nastyPlotUser, ['Nasty Plot'], { evs: { ...blankStats(), hp: 32, specialAttack: 20, specialDefense: 14 } })],
+  [buildSlot('nasty-plot-foe', protectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } })],
+);
+nastyPlotBattle = withMockRandom([0.1, 0.1, 0.1], () => resolveTurn(nastyPlotBattle, [{ type: 'move', actor: 0, moveId: nastyPlotChoiceId, target: 0 }]));
+assert.equal(nastyPlotBattle.player.units[0].build.specialAttackStage, 2, 'Nasty Plot should sharply raise Sp. Atk.');
+
+let trickRoomBattle = buildBattle(
+  'Singles',
+  [buildSlot('trick-room-user', trickRoomUser, ['Trick Room', 'Shadow Ball'], { evs: { ...blankStats(), hp: 32, specialAttack: 20, specialDefense: 14 }, natureId: 'quiet' })],
+  [buildSlot('trick-room-foe', protectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } })],
+);
+trickRoomBattle = withMockRandom([0.1, 0.1, 0.1], () => resolveTurn(trickRoomBattle, [{ type: 'move', actor: 0, moveId: trickRoomChoiceId, target: 0 }]));
+assert.equal(trickRoomBattle.trickRoomTurns, 4, 'Trick Room should be active after the turn it was used.');
+trickRoomBattle = withMockRandom([0.1, 0.1, 0.1], () => resolveTurn(trickRoomBattle, [{ type: 'move', actor: 0, moveId: trickRoomChoiceId, target: 0 }]));
+assert.equal(trickRoomBattle.trickRoomTurns, 0, 'Using Trick Room again while active should cancel it.');
+
+let megaWeatherBattle = buildBattle(
+  'Singles',
+  [buildSlot('mega-charizard', charizardBase, ['Flamethrower'], { itemId: charizarditeYId, evs: { ...blankStats(), specialAttack: 32, speed: 32, hp: 2 }, natureId: 'timid' })],
+  [buildSlot('mega-abomasnow', abomasnowBase, ['Blizzard'], { itemId: abomasiteId, evs: { ...blankStats(), specialAttack: 32, hp: 32, speed: 0 }, natureId: 'quiet' })],
+);
+megaWeatherBattle = withMockRandom([0.1, 0.1, 0.1], () => resolveTurn(megaWeatherBattle, [
+  { type: 'mega', actor: 0, moveId: megaCharizardMoveId, target: 0 },
+]));
+assert.equal(megaWeatherBattle.player.units[0].megaEvolved, true, 'Player Mega Evolution should trigger when the Mega action is chosen.');
+assert.equal(megaWeatherBattle.opponent.units[0].megaEvolved, true, 'AI Mega Evolution should also trigger when available.');
+assert.equal(megaWeatherBattle.environment.weather, 'snow', 'When both Megas set weather, the slower Mega should override the faster weather.');
+assert.equal(megaWeatherBattle.player.megaUsed, true, 'A side should record that its Mega Evolution has been used.');
+assert.equal(megaWeatherBattle.opponent.megaUsed, true, 'The opposing side should also record Mega usage.');
+
 if (failures.length) {
   throw new Error(`Stat range audit failed for ${failures.length} entries.\n${failures.slice(0, 24).join('\n')}`);
 }
@@ -200,6 +547,7 @@ const summary = [
   `Verified global EV limits: 66 total points, 32 max per stat.`,
   `Verified item clause sanitization for manual teams and AI-generated teams.`,
   `Verified damage engine produces live damage output under the Champions EV model.`,
+  `Verified simulator rules for chained Protect odds, rain-locked Thunder accuracy, Snarl spread debuffs, Earthquake ally collateral, forced-thaw freeze timing, Disable move locks, Calm Mind and Nasty Plot boosts, Trick Room toggling, and Mega weather ordering.`,
   warnings.length ? `Source-data warnings: ${warnings.length} HP floor rows on the scraped form pages disagree with fixed 31 IV policy, so the app keeps the fixed-IV result intentionally.` : 'Source-data warnings: none.',
 ];
 
