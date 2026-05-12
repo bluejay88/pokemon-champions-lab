@@ -29,6 +29,7 @@ import {
   resolvePokemonForm,
   sanitizeTeamForChampions,
   selectedPokemon,
+  stageMultiplier,
   statLabels,
   statOrder,
   statusOptions,
@@ -43,6 +44,7 @@ import {
   battleMusicTracks,
   createOnlineRoom,
   ensureOnlineSessionId,
+  fetchOnlineRoomHistory,
   fetchOnlineRoom,
   forfeitOnlineRoom,
   heartbeatPresence,
@@ -52,16 +54,19 @@ import {
   submitOnlineBringOrder,
   submitOnlineChoices,
 } from './lib/online';
-import { clearState, loadState, saveState } from './lib/storage';
+import { clearState, listStoredProfiles, loadState, saveState } from './lib/storage';
+import { buildMoveParitySummary, moveParityForMove } from './lib/moveParity';
 import { advancePreviewToBattle, createSimulatorBattle, legalMovesForUnit, resolveTurn } from './lib/simulator';
 import { getMoveUsageInsight, getPokemonUsageInsight, getPopularPresetPatch, getPopularPresetSummary } from './lib/usage';
 import type {
   BattleFormat,
+  BattleMusicMode,
   BattleTab,
   EnvironmentState,
   GeneratedTeamPlan,
   LayoutMode,
   OnlineBattleAccount,
+  OnlineBattleRoomHistoryEntry,
   OnlinePresenceStats,
   PokemonBuild,
   PokemonEntry,
@@ -965,6 +970,22 @@ function simulatorBattleTags(unit: SimUnit) {
       title: `${disabledMove} cannot be selected while Disable is active.`,
     });
   }
+  if (unit.yawnTurns > 0) {
+    tags.push({
+      key: 'yawn',
+      label: `Yawn ${unit.yawnTurns}`,
+      tone: 'warning',
+      title: `Yawn is active. This Pokemon will fall asleep when the countdown reaches zero if it stays in battle and is still healthy.`,
+    });
+  }
+  if (unit.perishSongTurns > 0) {
+    tags.push({
+      key: 'perish-song',
+      label: `Perish ${unit.perishSongTurns}`,
+      tone: 'negative',
+      title: `Perish Song is active. This Pokemon faints when the count reaches zero unless it switches out first.`,
+    });
+  }
   if (unit.tormentActive) {
     tags.push({
       key: 'torment',
@@ -1003,6 +1024,14 @@ function simulatorBattleTags(unit: SimUnit) {
       label: `Bind ${unit.bindingTurns}`,
       tone: 'negative',
       title: `A binding effect is active for ${unit.bindingTurns} more turn${unit.bindingTurns === 1 ? '' : 's'}.`,
+    });
+  }
+  if (unit.destinyBondActive) {
+    tags.push({
+      key: 'destiny-bond',
+      label: 'Destiny Bond',
+      tone: 'warning',
+      title: 'If this Pokemon is knocked out by a direct attack before its next move, the attacker will be taken down as well.',
     });
   }
   const sleepMeta = sleepTimerMeta(unit);
@@ -1062,6 +1091,12 @@ function simulatorRestrictionNotes(unit: SimUnit) {
     const disabledMove = unit.pokemon.movePool.find((move) => move.id === unit.disabledMoveId)?.name ?? 'the disabled move';
     notes.push(`${disabledMove} is disabled for ${unit.disableTurns} more turn${unit.disableTurns === 1 ? '' : 's'}.`);
   }
+  if (unit.yawnTurns > 0) {
+    notes.push(`Yawn is active for ${unit.yawnTurns} more end step${unit.yawnTurns === 1 ? '' : 's'} unless this Pokemon switches out first.`);
+  }
+  if (unit.perishSongTurns > 0) {
+    notes.push(`Perish Song count is ${unit.perishSongTurns}. This Pokemon will faint when it reaches zero unless it leaves the field first.`);
+  }
   if (unit.tormentActive) {
     notes.push('Torment is active until this Pokemon switches out, so it cannot repeat the last move it used.');
   }
@@ -1076,6 +1111,9 @@ function simulatorRestrictionNotes(unit: SimUnit) {
   }
   if (unit.bindingTurns > 0) {
     notes.push(`A binding effect is still active for ${unit.bindingTurns} more turn${unit.bindingTurns === 1 ? '' : 's'}.`);
+  }
+  if (unit.destinyBondActive) {
+    notes.push('Destiny Bond is primed. A direct knockout before this Pokemon moves again will drag the attacker down too.');
   }
   if (unit.build.status === 'freeze') {
     notes.push(freezeTimerMeta(unit)?.note ?? 'Freeze uses the current Champions rule set here: 25% thaw chance on each move attempt, guaranteed thaw by frozen turn 3.');
@@ -1173,35 +1211,85 @@ function battleTrackLabel(trackId: string) {
   return battleMusicTracks.find((track) => track.id === trackId)?.label ?? 'Battle Music';
 }
 
+function normalizedPlaylistIds(trackIds: string[]) {
+  const validIds = trackIds.filter((trackId) => battleMusicTracks.some((track) => track.id === trackId));
+  return validIds.length ? [...new Set(validIds)] : [battleMusicTracks[0]?.id ?? 'gen5-final'];
+}
+
+function primaryBattleMusicTrackId(preferredTrackId: string, playlistIds: string[]) {
+  const playlist = normalizedPlaylistIds(playlistIds);
+  return battleMusicTracks.some((track) => track.id === preferredTrackId) ? preferredTrackId : playlist[0];
+}
+
+function battlePlaylistSummary(trackIds: string[]) {
+  const playlist = normalizedPlaylistIds(trackIds);
+  return playlist.map(battleTrackLabel).join(', ');
+}
+
 function BattleMusicPlayer({
   trackId,
+  mode,
+  playlistIds,
   enabled,
   volume,
   active,
+  sessionKey,
 }: {
   trackId: string;
+  mode: BattleMusicMode;
+  playlistIds: string[];
   enabled: boolean;
   volume: number;
   active: boolean;
+  sessionKey: string;
 }) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const [currentTrackId, setCurrentTrackId] = useState(trackId);
+
+  useEffect(() => {
+    const playlist = normalizedPlaylistIds(playlistIds);
+    if (mode === 'random') {
+      const randomTrack = battleMusicTracks[Math.floor(Math.random() * battleMusicTracks.length)] ?? battleMusicTracks[0];
+      setCurrentTrackId(randomTrack?.id ?? trackId);
+      return;
+    }
+    if (mode === 'playlist') {
+      setCurrentTrackId(playlist[0] ?? trackId);
+      return;
+    }
+    setCurrentTrackId(trackId);
+  }, [trackId, playlistIds, mode, sessionKey]);
 
   useEffect(() => {
     if (typeof window === 'undefined') {
       return;
     }
 
-    const currentTrack = battleMusicTracks.find((track) => track.id === trackId) ?? battleMusicTracks[0];
+    const currentTrack = battleMusicTracks.find((track) => track.id === currentTrackId) ?? battleMusicTracks[0];
     if (!audioRef.current) {
       audioRef.current = new Audio(currentTrack.audioUrl);
-      audioRef.current.loop = true;
     }
 
     if (audioRef.current.src !== currentTrack.audioUrl) {
       audioRef.current.pause();
       audioRef.current = new Audio(currentTrack.audioUrl);
-      audioRef.current.loop = true;
     }
+
+    const playlist = normalizedPlaylistIds(playlistIds);
+    audioRef.current.loop = mode === 'single';
+    audioRef.current.onended = () => {
+      if (mode === 'playlist') {
+        const currentIndex = playlist.indexOf(currentTrack.id);
+        const nextTrackId = playlist[(currentIndex + 1) % playlist.length] ?? playlist[0];
+        setCurrentTrackId(nextTrackId);
+        return;
+      }
+      if (mode === 'random') {
+        const candidates = battleMusicTracks.filter((track) => track.id !== currentTrack.id);
+        const nextTrack = candidates[Math.floor(Math.random() * Math.max(1, candidates.length))] ?? battleMusicTracks[0];
+        setCurrentTrackId(nextTrack.id);
+      }
+    };
 
     audioRef.current.volume = Math.max(0, Math.min(1, volume / 100));
     if (active && enabled) {
@@ -1213,7 +1301,7 @@ function BattleMusicPlayer({
     return () => {
       audioRef.current?.pause();
     };
-  }, [trackId, active, enabled, volume]);
+  }, [currentTrackId, playlistIds, mode, active, enabled, volume]);
 
   return <span className="youtube-audio-player" aria-hidden="true" />;
 }
@@ -1240,6 +1328,7 @@ function buildSimulatorMatchRecord(
   battleLog: string[],
   turnReviews: SimulatorTurnReview[],
   mode: SimulatorMatchRecord['mode'] = 'AI Simulator',
+  extras: Partial<Pick<SimulatorMatchRecord, 'opponentName' | 'roomCode' | 'musicTrackId' | 'resultReason'>> = {},
 ): SimulatorMatchRecord {
   const performers = topBattlePerformers(battle);
   return {
@@ -1255,6 +1344,10 @@ function buildSimulatorMatchRecord(
     topPerformers: performers.slice(0, 3).map((entry) => entry.name),
     announcerEnabled,
     timerEnabled,
+    opponentName: extras.opponentName ?? null,
+    roomCode: extras.roomCode ?? null,
+    musicTrackId: extras.musicTrackId ?? null,
+    resultReason: extras.resultReason ?? 'normal',
     battleLog,
     turnReviews,
   };
@@ -1463,6 +1556,56 @@ function announcerStyleLine(style: AnnouncerStyle, line: string) {
   return line;
 }
 
+function announcerUnitName(unit: SimUnit) {
+  return unit.build.nickname.trim() || unit.pokemon.displayName;
+}
+
+function announcerReplaceCustomNames(line: string, battle: SimulatorBattleState) {
+  let nextLine = line;
+  for (const unit of [...battle.player.units, ...battle.opponent.units]) {
+    const nickname = unit.build.nickname.trim();
+    if (!nickname) {
+      continue;
+    }
+    nextLine = nextLine.replaceAll(unit.pokemon.displayName, nickname);
+    nextLine = nextLine.replaceAll(unit.basePokemon.displayName, nickname);
+  }
+  return nextLine;
+}
+
+function announcerApproxSpeed(unit: SimUnit, side: SimSide, battle: SimulatorBattleState) {
+  let speed = buildStats(unit.pokemon.baseStats, unit.build.evs, unit.build.natureId).speed * stageMultiplier(unit.build.speedStage);
+  if (side.tailwindTurns > 0) {
+    speed *= 2;
+  }
+  if (unit.build.status === 'paralysis') {
+    speed *= 0.5;
+  }
+  return speed;
+}
+
+function announcerCountdownAnalysis(battle: SimulatorBattleState, style: AnnouncerStyle, seconds: number) {
+  const allActive = [
+    ...battle.player.active.map((unitIndex) => ({ side: battle.player, unit: battle.player.units[unitIndex] })),
+    ...battle.opponent.active.map((unitIndex) => ({ side: battle.opponent, unit: battle.opponent.units[unitIndex] })),
+  ].filter((entry): entry is { side: SimSide; unit: SimUnit } => Boolean(entry.unit && !entry.unit.fainted));
+  if (!allActive.length) {
+    return null;
+  }
+
+  const fastest = [...allActive].sort((left, right) => announcerApproxSpeed(right.unit, right.side, battle) - announcerApproxSpeed(left.unit, left.side, battle))[0];
+  const baseLine = battle.trickRoomTurns > 0
+    ? `${announcerUnitName(fastest.unit)} has the raw speed edge, but Trick Room flips the order for this turn.`
+    : `${announcerUnitName(fastest.unit)} currently holds the cleanest speed edge on the field.`;
+  const fieldLine = battle.environment.weather !== 'clear'
+    ? `${titleCaseFieldLabel(battle.environment.weather)} weather is still shaping the board.`
+    : battle.environment.terrain !== 'none'
+      ? `${titleCaseFieldLabel(battle.environment.terrain)} Terrain is still affecting the next exchange.`
+      : 'The board is clear enough that positioning and speed control will decide the next line.';
+
+  return announcerStyleLine(style, announcerReplaceCustomNames(seconds <= 10 ? fieldLine : baseLine, battle));
+}
+
 function announcerLinesFromBattleUpdate(previous: SimulatorBattleState | null, current: SimulatorBattleState, style: AnnouncerStyle) {
   const lines: string[] = [];
   const previousLength = previous?.log.length ?? 0;
@@ -1504,7 +1647,7 @@ function announcerLinesFromBattleUpdate(previous: SimulatorBattleState | null, c
     }
 
     if (line) {
-      lines.push(announcerStyleLine(style, line));
+      lines.push(announcerStyleLine(style, announcerReplaceCustomNames(line, current)));
     }
   }
 
@@ -1534,27 +1677,28 @@ function announcerLinesFromBattleUpdate(previous: SimulatorBattleState | null, c
 }
 
 function App() {
-  const [state, setState] = useState(() => loadState());
+  const initialState = useMemo(() => loadState(), []);
+  const [state, setState] = useState(initialState);
   const [activeTab, setActiveTab] = useState<BattleTab>('team-builder');
   const [selectedSlotIndex, setSelectedSlotIndex] = useState(0);
-  const [calcAttacker, setCalcAttacker] = useState<PokemonBuild>(() => copyBuild(loadState().teams[0]?.slots[0] ?? createDefaultState().teams[0].slots[0]));
-  const [calcDefender, setCalcDefender] = useState<PokemonBuild>(() => copyBuild(loadState().teams[0]?.slots[1] ?? createDefaultState().teams[0].slots[1]));
+  const [calcAttacker, setCalcAttacker] = useState<PokemonBuild>(() => copyBuild(initialState.teams[0]?.slots[0] ?? createDefaultState().teams[0].slots[0]));
+  const [calcDefender, setCalcDefender] = useState<PokemonBuild>(() => copyBuild(initialState.teams[0]?.slots[1] ?? createDefaultState().teams[0].slots[1]));
   const [environment, setEnvironment] = useState<EnvironmentState>(() => ({
     ...defaultEnvironment,
-    battleFormat: activeTeamFromState(loadState()).format,
+    battleFormat: activeTeamFromState(initialState).format,
   }));
   const [selectedDamageMoveId, setSelectedDamageMoveId] = useState<string | null>(null);
   const [pokedexSearch, setPokedexSearch] = useState('');
   const [selectedPokedexId, setSelectedPokedexId] = useState<string>(dataset.pokemon[0]?.id ?? '');
   const [selectedArchetype, setSelectedArchetype] = useState(archetypeLibrary[0].id);
-  const [aiFormat, setAiFormat] = useState<BattleFormat>(() => activeTeamFromState(loadState()).format);
+  const [aiFormat, setAiFormat] = useState<BattleFormat>(() => activeTeamFromState(initialState).format);
   const [aiLockedNames, setAiLockedNames] = useState<string[]>(['', '', '', '', '']);
   const [aiVariantCount, setAiVariantCount] = useState(8);
   const [aiRandomMode, setAiRandomMode] = useState(false);
   const [generatedPlans, setGeneratedPlans] = useState<GeneratedTeamPlan[]>([]);
   const [selectedGeneratedPlanId, setSelectedGeneratedPlanId] = useState<string | null>(null);
   const [aiBuilderMessage, setAiBuilderMessage] = useState<string | null>(null);
-  const [simFormat, setSimFormat] = useState<BattleFormat>(() => activeTeamFromState(loadState()).format);
+  const [simFormat, setSimFormat] = useState<BattleFormat>(() => activeTeamFromState(initialState).format);
   const [simPreview, setSimPreview] = useState<SimulatorPreviewState | null>(null);
   const [simBringOrder, setSimBringOrder] = useState<number[]>([]);
   const [simBattle, setSimBattle] = useState<SimulatorBattleState | null>(null);
@@ -1583,6 +1727,10 @@ function App() {
   const [pvpCountdown, setPvpCountdown] = useState(0);
   const [pvpMessage, setPvpMessage] = useState<string | null>(null);
   const [pvpAnnouncerFeed, setPvpAnnouncerFeed] = useState<string[]>([]);
+  const [pvpRoomHistory, setPvpRoomHistory] = useState<OnlineBattleRoomHistoryEntry[]>([]);
+  const [pvpHistorySearch, setPvpHistorySearch] = useState('');
+  const [profileMusicPreviewActive, setProfileMusicPreviewActive] = useState(false);
+  const [profileMusicPreviewSession, setProfileMusicPreviewSession] = useState(0);
   const [lastSavedAt, setLastSavedAt] = useState<string | null>(null);
   const [saveMessage, setSaveMessage] = useState('Autosave ready');
   const [selectedReplayId, setSelectedReplayId] = useState<string | null>(null);
@@ -1631,7 +1779,34 @@ function App() {
     null;
   const aiBattleMusicActive = activeTab === 'simulator' && Boolean(simPreview || simBattle);
   const pvpBattleMusicActive = activeTab === 'pvp-battles' && Boolean(pvpRoom && (pvpRoom.stage === 'preview' || pvpRoom.stage === 'battle'));
-  const activeBattleMusicTrackId = activeTab === 'pvp-battles' ? pvpRoom?.musicTrackId ?? state.profile.preferredBattleTrackId : state.profile.preferredBattleTrackId;
+  const activeBattleMusicTrackId = activeTab === 'pvp-battles'
+    ? pvpRoom?.musicTrackId ?? primaryBattleMusicTrackId(state.profile.preferredBattleTrackId, state.profile.battleMusicPlaylistIds)
+    : primaryBattleMusicTrackId(state.profile.preferredBattleTrackId, state.profile.battleMusicPlaylistIds);
+  const battleMusicSessionKey = activeTab === 'pvp-battles'
+    ? `pvp-${pvpRoom?.code ?? 'idle'}-${pvpRoom?.stage ?? 'idle'}`
+    : simPreview
+      ? `sim-preview-${simPreview.previewEndsAt}`
+      : simBattle
+        ? `sim-battle-${simBattle.player.units.map((unit) => unit.slotIndex).join('-')}-${simBattle.opponent.units.map((unit) => unit.slotIndex).join('-')}`
+        : 'sim-idle';
+  const profileReady = Boolean(state.profile.trainerName.trim());
+  const storedProfiles = useMemo(() => listStoredProfiles(), [state.profile.trainerName, lastSavedAt]);
+  const overallMoveParity = useMemo(() => buildMoveParitySummary(dataset.moves), []);
+  const selectedMoveParityEntries = useMemo(
+    () => selectedPokedexPokemon.movePool.map((move) => moveParityForMove(move)),
+    [selectedPokedexPokemon],
+  );
+  const filteredPvpHistory = useMemo(() => {
+    const query = pvpHistorySearch.trim().toLowerCase();
+    if (!query) {
+      return pvpRoomHistory;
+    }
+    return pvpRoomHistory.filter((entry) =>
+      entry.code.includes(query) ||
+      entry.opponentName.toLowerCase().includes(query) ||
+      entry.trainerName.toLowerCase().includes(query),
+    );
+  }, [pvpHistorySearch, pvpRoomHistory]);
 
   const selectedResult = attackerMoveResults.find(({ move }) => move.id === selectedDamageMoveId)?.result ?? null;
 
@@ -1644,6 +1819,20 @@ function App() {
 
     return () => window.clearTimeout(handle);
   }, [state]);
+
+  useEffect(() => {
+    if (!state.profile.trainerName.trim() || state.profile.profileCreatedAt) {
+      return;
+    }
+
+    setState((current) => ({
+      ...current,
+      profile: {
+        ...current.profile,
+        profileCreatedAt: new Date().toISOString(),
+      },
+    }));
+  }, [state.profile.trainerName, state.profile.profileCreatedAt]);
 
   useEffect(() => {
     if (!selectedDamageMoveId && attackerMoves[0]) {
@@ -1662,6 +1851,12 @@ function App() {
     const handle = window.setInterval(tick, 1000);
     return () => window.clearInterval(handle);
   }, [simPreview]);
+
+  useEffect(() => {
+    if (activeTab !== 'profile' && profileMusicPreviewActive) {
+      setProfileMusicPreviewActive(false);
+    }
+  }, [activeTab, profileMusicPreviewActive]);
 
   useEffect(() => {
     simBattleRef.current = simBattle;
@@ -1729,6 +1924,11 @@ function App() {
           simTurnTimerEnabled,
           [...simBattle.log].reverse(),
           simTurnReviewsRef.current,
+          'AI Simulator',
+          {
+            musicTrackId: state.profile.preferredBattleTrackId,
+            resultReason: 'normal',
+          },
         );
         setState((current) => ({
           ...current,
@@ -1771,6 +1971,12 @@ function App() {
             [...pvpRoom.battle.log].reverse(),
             [],
             'PvP',
+            {
+              opponentName: pvpRoom.seat === 'host' ? pvpRoom.guestTrainerName ?? 'Opponent' : pvpRoom.hostTrainerName,
+              roomCode: pvpRoom.code,
+              musicTrackId: pvpRoom.musicTrackId,
+              resultReason: pvpRoom.resultReason ?? 'normal',
+            },
           );
           setState((current) => ({
             ...current,
@@ -1780,6 +1986,11 @@ function App() {
             },
           }));
           setSelectedReplayId(record.id);
+          if (pvpAnnouncerEnabled) {
+            const winnerLine = announcerStyleLine('Arena', `${pvpRoom.winnerName ?? 'The winner'} closes the battle and takes the room.`);
+            setPvpAnnouncerFeed((current) => [winnerLine, ...current].slice(0, 16));
+            speakAnnouncerLines([winnerLine], 1);
+          }
           recordedPvpBattleKeyRef.current = battleKey;
         }
       }
@@ -1810,6 +2021,26 @@ function App() {
       window.clearInterval(handle);
     };
   }, [pvpRoom?.code, onlineAccount]);
+
+  useEffect(() => {
+    if (!onlineAccount) {
+      setPvpRoomHistory([]);
+      return;
+    }
+
+    let mounted = true;
+    const loadHistory = async () => {
+      const history = await fetchOnlineRoomHistory({ account: onlineAccount });
+      if (mounted) {
+        setPvpRoomHistory(history);
+      }
+    };
+
+    void loadHistory();
+    return () => {
+      mounted = false;
+    };
+  }, [onlineAccount, pvpRoom?.stage, pvpRoom?.code]);
 
   useEffect(() => {
     if (!pvpRoom?.deadlineAt) {
@@ -1856,21 +2087,56 @@ function App() {
       return;
     }
 
-    if ([20, 10, 5].includes(simTurnClock)) {
+    if ([30, 20, 10, 5].includes(simTurnClock)) {
+      const countdownLine = announcerCountdownAnalysis(simBattle, simAnnouncerStyle, simTurnClock);
       pushAnnouncerLines([
         announcerStyleLine(
           simAnnouncerStyle,
           `${fillAnnouncerLine(pickLine(announcerScripts.turn), { turn: simBattle.turn })} ${simTurnClock} seconds remain on the move clock.`,
         ),
+        countdownLine ?? '',
       ]);
     }
   }, [simTurnClock, simBattle, simAnnouncerEnabled, simTurnTimerEnabled, simAnnouncerStyle]);
+
+  useEffect(() => {
+    if (!pvpRoom?.battle || pvpRoom.stage !== 'battle' || !pvpCountdown) {
+      return;
+    }
+
+    const pvpAnnouncerEnabled = pvpRoom.seat === 'host' ? pvpRoom.hostAnnouncerEnabled : pvpRoom.guestAnnouncerEnabled;
+    if (!pvpAnnouncerEnabled || ![30, 20, 10, 5].includes(pvpCountdown)) {
+      return;
+    }
+
+    const line = announcerCountdownAnalysis(pvpRoom.battle, 'Arena', pvpCountdown);
+    if (!line) {
+      return;
+    }
+
+    setPvpAnnouncerFeed((current) => [line, ...current].slice(0, 16));
+    speakAnnouncerLines([line], 1);
+  }, [pvpCountdown, pvpRoom]);
 
   function updateState(mutator: (draft: ReturnType<typeof createDefaultState>) => ReturnType<typeof createDefaultState>) {
     setState((current) => mutator(current));
   }
 
-  function persistNow(message: string) {
+  function requireProfileForPersistentTeamSave(actionLabel: string) {
+    if (profileReady) {
+      return true;
+    }
+
+    setActiveTab('profile');
+    setLastSavedAt(new Date().toISOString());
+    setSaveMessage(`${actionLabel} needs a trainer profile first. Add a trainer name in Profile before saving teams.`);
+    return false;
+  }
+
+  function persistNow(message: string, requiresProfile = false, actionLabel = 'Saving your team data') {
+    if (requiresProfile && !requireProfileForPersistentTeamSave(actionLabel)) {
+      return;
+    }
     saveState(state);
     setLastSavedAt(new Date().toISOString());
     setSaveMessage(message);
@@ -2152,6 +2418,10 @@ function App() {
       return;
     }
 
+    if (!requireProfileForPersistentTeamSave('Saving AI teams')) {
+      return;
+    }
+
     if (state.teams.length >= 10) {
       setLastSavedAt(new Date().toISOString());
       setSaveMessage('Team cap reached. Remove or duplicate a team before saving another AI draft.');
@@ -2264,6 +2534,8 @@ function App() {
     playerTeam.format = simPreview.format;
     const opponentOrder = chooseOpponentBringOrder(simPreview.format, simPreview.opponentTeam, playerTeam, simBringOrder);
     const battle = advancePreviewToBattle(createSimulatorBattle(simPreview.format, playerTeam, simBringOrder, simPreview.opponentTeam, opponentOrder, simPreview.previewEndsAt));
+    battle.player.name = state.profile.trainerName.trim() || 'Player';
+    battle.opponent.name = 'Arena AI';
     setSimBattle(battle);
     setSimPreview(null);
     setSimPreviewMessage(null);
@@ -2358,7 +2630,7 @@ function App() {
         account: onlineAccount,
         team: sanitizeTeamForChampions(cloneTeam(team)),
         format: team.format,
-        musicTrackId: state.profile.preferredBattleTrackId,
+        musicTrackId: primaryBattleMusicTrackId(state.profile.preferredBattleTrackId, state.profile.battleMusicPlaylistIds),
         announcerEnabled: state.profile.announcerDefaultEnabled,
       });
       setPvpRoom(room);
@@ -2382,7 +2654,7 @@ function App() {
         account: onlineAccount,
         code: pvpRoomCodeInput.trim(),
         team: sanitizeTeamForChampions(cloneTeam(team)),
-        musicTrackId: state.profile.preferredBattleTrackId,
+        musicTrackId: primaryBattleMusicTrackId(state.profile.preferredBattleTrackId, state.profile.battleMusicPlaylistIds),
         announcerEnabled: state.profile.announcerDefaultEnabled,
       });
       setPvpRoom(room);
@@ -2467,11 +2739,23 @@ function App() {
       {state.profile.battleMusicEnabled && (aiBattleMusicActive || pvpBattleMusicActive) ? (
         <BattleMusicPlayer
           trackId={activeBattleMusicTrackId}
+          mode={state.profile.battleMusicMode}
+          playlistIds={state.profile.battleMusicPlaylistIds}
           enabled={state.profile.battleMusicEnabled}
           volume={state.profile.battleMusicVolume}
           active={aiBattleMusicActive || pvpBattleMusicActive}
+          sessionKey={battleMusicSessionKey}
         />
       ) : null}
+      <BattleMusicPlayer
+        trackId={primaryBattleMusicTrackId(state.profile.preferredBattleTrackId, state.profile.battleMusicPlaylistIds)}
+        mode={state.profile.battleMusicMode}
+        playlistIds={state.profile.battleMusicPlaylistIds}
+        enabled
+        volume={state.profile.battleMusicVolume}
+        active={profileMusicPreviewActive}
+        sessionKey={`profile-preview-${profileMusicPreviewSession}`}
+      />
       <aside className="sidebar">
         <div className="brand-panel">
           <div className="brand-kicker">Pokemon Champions Lab</div>
@@ -2625,7 +2909,9 @@ function App() {
               </div>
               <div className="save-status-row">
                 <span>{saveStatusLabel}</span>
-                <button className="action-button" onClick={() => persistNow('Team saved locally')}>Save Team</button>
+                <button className="action-button" disabled={!profileReady} onClick={() => persistNow('Team saved locally', true, 'Saving this team')}>
+                  {profileReady ? 'Save Team' : 'Profile Needed'}
+                </button>
               </div>
 
               <div className="slot-grid">
@@ -2895,6 +3181,19 @@ function App() {
               </div>
 
               <div className="move-table">
+                <div className="result-grid parity-summary-grid">
+                  <InfoStat label="Move Coverage" value={`${overallMoveParity.coveredPercent}%`} />
+                  <InfoStat label="Explicit" value={`${overallMoveParity.explicit}`} />
+                  <InfoStat label="Rules-aware" value={`${overallMoveParity.rulesAware}`} />
+                  <InfoStat label="Damage Core" value={`${overallMoveParity.damageCore}`} />
+                  <InfoStat label="Review Needed" value={`${overallMoveParity.reviewNeeded}`} />
+                </div>
+                <div className="notes-list compact-scroll">
+                  <div className="note-row">Parity report is live: explicit means the move has a bespoke simulator hook, rules-aware means it rides on a shared pattern path, damage core means the calculator covers the base hit math cleanly, and review needed marks the remaining edge-case list.</div>
+                  {overallMoveParity.topReviewMoves.slice(0, 3).map((entry) => (
+                    <div key={entry.moveId} className="note-row">Review queue: <strong>{entry.moveName}</strong> - {entry.summary}</div>
+                  ))}
+                </div>
                 <div className="move-table-head move-table-head-wide">
                   <span>Move</span>
                   <span>Type</span>
@@ -2902,9 +3201,12 @@ function App() {
                   <span>Power</span>
                   <span>Acc</span>
                   <span>Meta</span>
+                  <span>Parity</span>
                   <span>Effect</span>
                 </div>
-                {selectedPokedexPokemon.movePool.map((move) => (
+                {selectedPokedexPokemon.movePool.map((move, index) => {
+                  const parity = selectedMoveParityEntries[index] ?? moveParityForMove(move);
+                  return (
                   <div key={move.id} className="move-table-row move-table-row-wide">
                     <strong>{move.name}</strong>
                     <span>{move.type}</span>
@@ -2912,9 +3214,11 @@ function App() {
                     <span>{move.power ?? '--'}</span>
                     <span>{move.accuracy ?? '--'}</span>
                     <span>{getMoveUsageInsight(move.name, team.format).label}</span>
+                    <span>{parity.tier}</span>
                     <small>{move.description || 'No extra rider text on the source page.'}</small>
                   </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           </section>
@@ -3100,8 +3404,8 @@ function App() {
                       </div>
 
                       <div className="team-actions">
-                        <button className="action-button primary" onClick={() => saveGeneratedPlanAsTeam(selectedGeneratedPlan)} disabled={state.teams.length >= 10}>
-                          {state.teams.length >= 10 ? 'Team List Full (10/10)' : 'Save as New Team'}
+                        <button className="action-button primary" onClick={() => saveGeneratedPlanAsTeam(selectedGeneratedPlan)} disabled={state.teams.length >= 10 || !profileReady}>
+                          {state.teams.length >= 10 ? 'Team List Full (10/10)' : !profileReady ? 'Profile Needed to Save' : 'Save as New Team'}
                         </button>
                         <button className="action-button primary" onClick={() => applyGeneratedPlan(selectedGeneratedPlan)}>Apply to Active Team</button>
                         <button className="action-button" onClick={() => { applyGeneratedPlan(selectedGeneratedPlan); setActiveTab('analyzer'); }}>Apply + Analyze</button>
@@ -3817,11 +4121,24 @@ function App() {
                 <span>Player Notes</span>
                 <textarea rows={6} value={state.profile.playerNote} onChange={(event) => setState((current) => ({ ...current, profile: { ...current.profile, playerNote: event.target.value } }))} placeholder="Personal metagame reads, comfort picks, anti-meta angles..." />
               </label>
+              <div className="notes-list compact-scroll">
+                <div className="note-row">{profileReady ? `Profile anchor ready: ${state.profile.trainerName}. Team saves are attached to this profile library.` : 'Team saves now require a named profile. Add a trainer name here before using Save Team or saving an AI draft permanently.'}</div>
+                <div className="note-row">Stored local profiles on this browser: {storedProfiles.length ? storedProfiles.join(', ') : 'None yet'}</div>
+                <div className="note-row">Profile created: {state.profile.profileCreatedAt ? new Date(state.profile.profileCreatedAt).toLocaleString() : 'Waiting for first profile save'}</div>
+              </div>
               <ToggleField
                 label="Battle Music"
                 checked={state.profile.battleMusicEnabled}
                 onChange={(checked) => setState((current) => ({ ...current, profile: { ...current.profile, battleMusicEnabled: checked } }))}
               />
+              <label className="field">
+                <span>Battle Music Mode</span>
+                <select value={state.profile.battleMusicMode} onChange={(event) => setState((current) => ({ ...current, profile: { ...current.profile, battleMusicMode: event.target.value as BattleMusicMode } }))}>
+                  <option value="single">Single Track</option>
+                  <option value="random">Random Rotation</option>
+                  <option value="playlist">Playlist Cycle</option>
+                </select>
+              </label>
               <label className="field">
                 <span>Battle Music Track</span>
                 <select value={state.profile.preferredBattleTrackId} onChange={(event) => setState((current) => ({ ...current, profile: { ...current.profile, preferredBattleTrackId: event.target.value } }))}>
@@ -3830,6 +4147,45 @@ function App() {
                   ))}
                 </select>
               </label>
+              <div className="notes-list compact-scroll profile-playlist-stack">
+                <div className="note-row">Playlist cycle: {battlePlaylistSummary(state.profile.battleMusicPlaylistIds)}</div>
+                {battleMusicTracks.map((track) => {
+                  const checked = normalizedPlaylistIds(state.profile.battleMusicPlaylistIds).includes(track.id);
+                  return (
+                    <label key={track.id} className="playlist-toggle-row">
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={(event) => {
+                          const currentPlaylist = normalizedPlaylistIds(state.profile.battleMusicPlaylistIds);
+                          const nextPlaylist = event.target.checked
+                            ? [...new Set([...currentPlaylist, track.id])]
+                            : currentPlaylist.filter((entry) => entry !== track.id);
+                          setState((current) => ({
+                            ...current,
+                            profile: {
+                              ...current.profile,
+                              battleMusicPlaylistIds: nextPlaylist.length ? nextPlaylist : [track.id],
+                            },
+                          }));
+                        }}
+                      />
+                      <span>{track.generation} - {track.label}</span>
+                    </label>
+                  );
+                })}
+              </div>
+              <div className="team-actions compact-actions">
+                <button className="mini-button active" onClick={() => { setProfileMusicPreviewActive(true); setProfileMusicPreviewSession((current) => current + 1); }}>
+                  Preview Current Mode
+                </button>
+                <button className="mini-button" onClick={() => setState((current) => ({ ...current, profile: { ...current.profile, battleMusicMode: 'random' } }))}>
+                  Use Random
+                </button>
+                <button className="mini-button" onClick={() => setProfileMusicPreviewActive(false)}>
+                  Stop Preview
+                </button>
+              </div>
               <label className="field">
                 <span>Battle Music Volume</span>
                 <input
@@ -3849,10 +4205,11 @@ function App() {
               <div className="notes-list compact-scroll">
                 <div className="note-row">Online battle account: {onlineAccount ? `${onlineAccount.trainerName} registered` : 'Not signed in yet'}</div>
                 {onlineAccount ? <div className="note-row">Email on file: {onlineAccount.email || 'Not provided'}</div> : null}
+                <div className="note-row">Battle music mode: {state.profile.battleMusicMode === 'single' ? 'single selected track' : state.profile.battleMusicMode === 'random' ? 'randomized between battles' : 'playlist cycling between tracks'}</div>
               </div>
               <div className="save-status-row">
                 <span>{saveStatusLabel}</span>
-                <button className="action-button primary" onClick={() => persistNow('Profile saved locally')}>Save Profile</button>
+                <button className="action-button primary" onClick={() => persistNow('Profile saved locally', true, 'Saving this profile')}>Save Profile</button>
               </div>
             </div>
 
@@ -3894,12 +4251,16 @@ function App() {
                     <InfoStat label="Result" value={selectedReplay.result} />
                     <InfoStat label="Mode" value={selectedReplay.mode} />
                     <InfoStat label="Format" value={selectedReplay.format} />
+                    <InfoStat label="Opponent" value={selectedReplay.opponentName ?? 'Unknown'} />
                     <InfoStat label="Star" value={selectedReplay.starPokemon ?? 'None'} />
                     <InfoStat label="Timer" value={selectedReplay.timerEnabled ? '30s On' : 'Off'} />
                     <InfoStat label="Announcer" value={selectedReplay.announcerEnabled ? 'On' : 'Off'} />
                     <InfoStat label="Turns" value={`${selectedReplay.turns}`} />
                   </div>
                   <div className="notes-list compact-scroll replay-stack">
+                    {selectedReplay.roomCode ? <div className="note-row"><strong>Room Code:</strong> {selectedReplay.roomCode}</div> : null}
+                    {selectedReplay.musicTrackId ? <div className="note-row"><strong>Battle Music:</strong> {battleTrackLabel(selectedReplay.musicTrackId)}</div> : null}
+                    {selectedReplay.resultReason ? <div className="note-row"><strong>Finish:</strong> {selectedReplay.resultReason === 'forfeit' ? 'Ended by forfeit' : 'Normal battle close'}</div> : null}
                     <div className="note-row"><strong>Opponent Preview:</strong> {selectedReplay.opponentPreview.join(', ')}</div>
                     <div className="note-row"><strong>Top Performers:</strong> {selectedReplay.topPerformers.join(', ') || 'No standout logged'}</div>
                     {selectedReplay.turnReviews.map((review, index) => (
@@ -3926,8 +4287,43 @@ function App() {
                 <div className="note-row">Layout mode: {state.profile.layoutMode} | Resizable panels: {state.profile.resizablePanels ? 'On' : 'Off'}</div>
               </div>
               <div className="team-actions">
-                <button className="action-button" onClick={() => persistNow('Full local save updated')}>Save Everything</button>
+                <button className="action-button" onClick={() => persistNow('Full local save updated', true, 'Saving your profile library')}>Save Everything</button>
                 <button className="action-button danger" onClick={resetEverything}>Clear Local Save</button>
+              </div>
+            </div>
+
+            <div className="panel tall">
+              <SectionHeader title="PvP Room History" subtitle="Browse finished live rooms by code or opponent, then use the replay panel above for the locally stored battle log." />
+              <label className="field">
+                <span>Filter Room History</span>
+                <input value={pvpHistorySearch} onChange={(event) => setPvpHistorySearch(event.target.value)} placeholder="Search by code or opponent name" />
+              </label>
+              <div className="notes-list scroll-stack compact-scroll replay-stack">
+                {filteredPvpHistory.length ? filteredPvpHistory.map((entry) => {
+                  const linkedReplay = state.profile.matchHistory.find((record) => record.roomCode === entry.code) ?? null;
+                  return (
+                  <button
+                    key={`${entry.code}-${entry.playedAt}`}
+                    className={linkedReplay?.id === selectedReplay?.id ? 'saved-team-card active growth-row' : 'saved-team-card growth-row'}
+                    onClick={() => {
+                      if (linkedReplay) {
+                        setSelectedReplayId(linkedReplay.id);
+                      }
+                    }}
+                  >
+                    <div className="growth-row-copy">
+                      <strong>{entry.code} - {entry.result}</strong>
+                      <small>{new Date(entry.playedAt).toLocaleString()} | {entry.format} | vs {entry.opponentName}</small>
+                    </div>
+                    <div className="notes-list compact-scroll">
+                      <div className="note-row">Winner: {entry.winnerName ?? 'Unknown'} | Finish: {entry.resultReason === 'forfeit' ? 'Forfeit' : 'Normal'} | Turns: {entry.turns}</div>
+                      <div className="note-row">Music: {battleTrackLabel(entry.musicTrackId)}{linkedReplay ? ' | Click to open replay' : ' | Replay log not stored on this browser yet'}</div>
+                    </div>
+                  </button>
+                );
+                }) : (
+                  <div className="note-row">No PvP room history loaded yet. Finish a live room or sign in to fetch room archives from the arena service.</div>
+                )}
               </div>
             </div>
           </section>

@@ -102,6 +102,7 @@ if (!skipCompile) {
     resolve(workspaceRoot, 'src/lib/damage.ts'),
     resolve(workspaceRoot, 'src/lib/usage.ts'),
     resolve(workspaceRoot, 'src/lib/ai.ts'),
+    resolve(workspaceRoot, 'src/lib/moveParity.ts'),
     resolve(workspaceRoot, 'src/lib/online.ts'),
     resolve(workspaceRoot, 'src/lib/simulator.ts'),
     resolve(workspaceRoot, 'src/types.ts'),
@@ -131,6 +132,7 @@ const auditRequire = rootRequire;
 const champions = auditRequire(resolve(auditDir, 'lib/champions.js'));
 const damage = auditRequire(resolve(auditDir, 'lib/damage.js'));
 const ai = auditRequire(resolve(auditDir, 'lib/ai.js'));
+const moveParity = auditRequire(resolve(auditDir, 'lib/moveParity.js'));
 const online = auditRequire(resolve(auditDir, 'lib/online.js'));
 const simulator = auditRequire(resolve(auditDir, 'lib/simulator.js'));
 const dataset = JSON.parse(readFileSync(resolve(workspaceRoot, 'src/data/champions-data.json'), 'utf8'));
@@ -151,6 +153,7 @@ const {
 
 const { calculateDamage } = damage;
 const { generateTeamPlans } = ai;
+const { buildMoveParitySummary, moveParityForMove } = moveParity;
 const { createRoomState, forfeitRoomState, joinRoomState, submitBringOrderState, submitTurnChoicesState } = online;
 const { advancePreviewToBattle, createSimulatorBattle, legalMovesForUnit, randomChoicesForSide, resolveTurn } = simulator;
 
@@ -233,6 +236,15 @@ for (const plan of aiPlans) {
     assert.ok(!usedItems.has(slot.itemId), `AI plan ${plan.name} repeated held item ${slot.itemId}.`);
     usedItems.add(slot.itemId);
   }
+}
+
+const paritySummary = buildMoveParitySummary(dataset.moves);
+assert.ok(paritySummary.coveredPercent >= 75, `Expected move parity coverage to stay above 75%, received ${paritySummary.coveredPercent}%.`);
+for (const moveName of ['Protect', 'Encore', 'Disable', 'Aurora Veil', 'Clear Smog', 'Yawn', 'Perish Song', 'Pain Split', 'Destiny Bond']) {
+  const move = dataset.moves.find((entry) => entry.name === moveName);
+  assert(move, `Expected ${moveName} to exist in the Champions move list.`);
+  const parity = moveParityForMove(move);
+  assert.equal(parity.tier, 'Explicit', `Expected ${moveName} to be tagged Explicit, received ${parity.tier}.`);
 }
 
 const garchomp = getPokemonById('garchomp');
@@ -829,6 +841,7 @@ const summary = [
   `Verified Froslass Timid speed benchmark: 143 base, 178 with 32 Speed EV points.`,
   `Verified global EV limits: 66 total points, 32 max per stat.`,
   `Verified item clause sanitization for manual teams and AI-generated teams.`,
+  `Verified move-parity registry coverage at ${paritySummary.coveredPercent}% across ${paritySummary.total} Champions moves, with ${paritySummary.explicit} explicit hooks tagged in the report.`,
   `Verified damage engine produces live damage output under the Champions EV model, including Doubles spread reduction, Aurora Veil, Helping Hand, Magic Room, and Wonder Room checks.`,
   `Verified simulator rules for chained Protect odds, ally-target support hooks, rain-locked Thunder accuracy, Snarl spread debuffs, Earthquake ally collateral, Sticky Web and Toxic Spikes switch-in hooks, forced-thaw freeze timing, Rest sleep timing, Disable and Torment move locks, weather field timers, opponent reveal state, Calm Mind and Nasty Plot boosts, Trick Room toggling, and Mega weather ordering.`,
   `Verified shared PvP room logic, including bring-four lock-in, live turn resolution, forfeit handling, and 50 automated room-code battle simulations (${onlineBattleHostWins} host wins / ${onlineBattleGuestWins} guest wins).`,

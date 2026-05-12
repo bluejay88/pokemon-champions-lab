@@ -7,7 +7,7 @@ import {
   type SimulatorChoice,
 } from './simulator';
 import { createTeam, makeId, sanitizeTeamForChampions } from './champions';
-import type { BattleFormat, OnlineBattleAccount, OnlinePresenceStats, PokemonEntry, Team } from '../types';
+import type { BattleFormat, OnlineBattleAccount, OnlineBattleRoomHistoryEntry, OnlinePresenceStats, PokemonEntry, Team } from '../types';
 
 export type OnlineSeat = 'host' | 'guest';
 export type OnlineRoomStage = 'lobby' | 'preview' | 'battle' | 'finished';
@@ -339,6 +339,36 @@ export function roomView(room: OnlineBattleRoomState, playerId: string): OnlineB
     hostAnnouncerEnabled: room.hostAnnouncerEnabled,
     guestAnnouncerEnabled: room.guestAnnouncerEnabled,
     lastActionSummary: room.lastActionSummary,
+  };
+}
+
+export function roomHistoryEntry(room: OnlineBattleRoomState, playerId: string): OnlineBattleRoomHistoryEntry | null {
+  const seat = seatForPlayer(room, playerId);
+  if (!seat || room.stage !== 'finished') {
+    return null;
+  }
+
+  const isHost = seat === 'host';
+  const trainerName = isHost ? room.hostTrainerName : room.guestTrainerName ?? 'Guest';
+  const opponentName = isHost ? room.guestTrainerName ?? 'Guest' : room.hostTrainerName;
+  const winnerName =
+    room.winnerSeat === 'host'
+      ? room.hostTrainerName
+      : room.winnerSeat === 'guest'
+        ? room.guestTrainerName ?? null
+        : null;
+
+  return {
+    code: room.code,
+    playedAt: room.updatedAt,
+    format: room.format,
+    trainerName,
+    opponentName,
+    result: room.winnerSeat === seat ? 'Win' : 'Loss',
+    resultReason: room.resultReason,
+    turns: room.battle ? Math.max(1, room.battle.turn - 1) : 0,
+    musicTrackId: room.musicTrackId,
+    winnerName,
   };
 }
 
@@ -744,6 +774,14 @@ export function localPresenceHeartbeat(sessionId: string) {
   return stats;
 }
 
+export function localFetchRoomHistory(input: { account: OnlineBattleAccount }) {
+  const store = readLocalStore();
+  return store.rooms
+    .map((room) => roomHistoryEntry(room, input.account.playerId))
+    .filter((entry): entry is OnlineBattleRoomHistoryEntry => Boolean(entry))
+    .sort((left, right) => new Date(right.playedAt).getTime() - new Date(left.playedAt).getTime());
+}
+
 async function postArena<T>(action: string, payload: Record<string, unknown>) {
   const response = await fetch(NETLIFY_FUNCTION_ENDPOINT, {
     method: 'POST',
@@ -836,6 +874,15 @@ export async function fetchOnlineRoom(input: { account: OnlineBattleAccount; cod
     return remote.room;
   } catch {
     return localFetchRoom(input);
+  }
+}
+
+export async function fetchOnlineRoomHistory(input: { account: OnlineBattleAccount }) {
+  try {
+    const remote = await tryRemote<{ history: OnlineBattleRoomHistoryEntry[] }>('history', input);
+    return remote.history;
+  } catch {
+    return localFetchRoomHistory(input);
   }
 }
 

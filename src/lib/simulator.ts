@@ -62,6 +62,9 @@ export interface SimUnit {
   disableTurns: number;
   disabledMoveId: string | null;
   tormentActive: boolean;
+  yawnTurns: number;
+  perishSongTurns: number;
+  destinyBondActive: boolean;
   lastMoveId: string | null;
   protectStreak: number;
   protectSource: string | null;
@@ -414,6 +417,9 @@ function makeUnit(build: PokemonBuild, slotIndex: number): SimUnit | null {
     encoreMoveId: null,
     disableTurns: 0,
     disabledMoveId: null,
+    yawnTurns: 0,
+    perishSongTurns: 0,
+    destinyBondActive: false,
     lastMoveId: null,
     protectStreak: 0,
     protectSource: null,
@@ -947,6 +953,9 @@ function switchOutUnit(side: SimSide, unitIndex: number) {
   unit.disableTurns = 0;
   unit.disabledMoveId = null;
   unit.tormentActive = false;
+  unit.yawnTurns = 0;
+  unit.perishSongTurns = 0;
+  unit.destinyBondActive = false;
 }
 
 function applyEntryHazards(state: SimulatorBattleState, side: SimSide, unit: SimUnit) {
@@ -1049,6 +1058,22 @@ function switchInUnit(state: SimulatorBattleState, sideId: SideId, unitIndex: nu
   }
 
   applySwitchInAbility(state, sideId, unit);
+}
+
+function forceSwitchTarget(state: SimulatorBattleState, targetRef: TargetRef, reason: string) {
+  const replacement = firstAvailableBench(targetRef.side);
+  if (replacement === null || targetRef.activeSlot < 0) {
+    state.log.unshift(`${targetRef.unit.pokemon.displayName} had no bench replacement for ${reason}.`);
+    return false;
+  }
+
+  switchOutUnit(targetRef.side, targetRef.unitIndex);
+  targetRef.side.active[targetRef.activeSlot] = replacement;
+  targetRef.side.bench = [...targetRef.side.bench.filter((entry) => entry !== replacement), targetRef.unitIndex];
+  targetRef.side.units[replacement].turnsActive = 0;
+  state.log.unshift(`${targetRef.unit.pokemon.displayName} was forced out by ${reason}.`);
+  switchInUnit(state, targetRef.sideId, replacement, true);
+  return true;
 }
 
 function integrateReplacements(state: SimulatorBattleState, sideId: SideId) {
@@ -1232,15 +1257,19 @@ function maybeInflictStatus(
 function resetStageModifiers(state: SimulatorBattleState) {
   for (const side of [state.player, state.opponent]) {
     for (const unit of side.units) {
-      unit.build.attackStage = 0;
-      unit.build.defenseStage = 0;
-      unit.build.specialAttackStage = 0;
-      unit.build.specialDefenseStage = 0;
-      unit.build.speedStage = 0;
-      unit.build.accuracyStage = 0;
-      unit.build.evasionStage = 0;
+      resetUnitStageModifiers(unit);
     }
   }
+}
+
+function resetUnitStageModifiers(unit: SimUnit) {
+  unit.build.attackStage = 0;
+  unit.build.defenseStage = 0;
+  unit.build.specialAttackStage = 0;
+  unit.build.specialDefenseStage = 0;
+  unit.build.speedStage = 0;
+  unit.build.accuracyStage = 0;
+  unit.build.evasionStage = 0;
 }
 
 function applyStatusMove(
@@ -1737,6 +1766,70 @@ function applyStatusMove(
     }
   }
 
+  if (move.name === 'Yawn') {
+    accurateOpponentTargets.forEach((targetRef) => {
+      if (targetRef.unit.build.status === 'healthy') {
+        targetRef.unit.yawnTurns = 2;
+      }
+    });
+    if (accurateOpponentTargets.some((targetRef) => targetRef.unit.build.status === 'healthy')) {
+      state.log.unshift(`${actor.pokemon.displayName} made the opposing side drowsy with Yawn.`);
+      return;
+    }
+  }
+
+  if (move.name === 'Perish Song') {
+    for (const side of [state.player, state.opponent]) {
+      for (const activeIndex of side.active) {
+        const unit = side.units[activeIndex];
+        if (unit && !unit.fainted) {
+          unit.perishSongTurns = 4;
+        }
+      }
+    }
+    state.log.unshift(`${actor.pokemon.displayName} started a Perish Song countdown for all active Pokemon.`);
+    return;
+  }
+
+  if (move.name === 'Roar' || move.name === 'Whirlwind') {
+    const targetRef = accurateOpponentTargets[0] ?? null;
+    if (targetRef && forceSwitchTarget(state, targetRef, move.name)) {
+      return;
+    }
+    state.log.unshift(`${actor.pokemon.displayName}'s ${move.name} failed because no forced switch was available.`);
+    return;
+  }
+
+  if (move.name === 'Pain Split') {
+    const chosenTarget = accurateOpponentTargets[0]?.unit ?? null;
+    if (chosenTarget) {
+      const sharedHp = Math.max(1, Math.floor((actor.currentHp + chosenTarget.currentHp) / 2));
+      actor.currentHp = Math.min(actor.maxHp, sharedHp);
+      chosenTarget.currentHp = Math.min(chosenTarget.maxHp, sharedHp);
+      state.log.unshift(`${actor.pokemon.displayName} shared HP totals with Pain Split.`);
+      return;
+    }
+  }
+
+  if (move.name === 'Destiny Bond') {
+    actor.destinyBondActive = true;
+    state.log.unshift(`${actor.pokemon.displayName} is waiting to drag a foe down with Destiny Bond.`);
+    return;
+  }
+
+  if (move.name === 'Belly Drum') {
+    if (actor.currentHp <= Math.floor(actor.maxHp / 2)) {
+      state.log.unshift(`${actor.pokemon.displayName}'s Belly Drum failed because it did not have enough HP.`);
+      return;
+    }
+    lowerUnitHp(actor, Math.max(1, Math.floor(actor.maxHp / 2)));
+    actor.build.attackStage = 6;
+    actor.statsRaisedThisTurn = true;
+    state.log.unshift(`${actor.pokemon.displayName} cut its HP and maximized its Attack with Belly Drum.`);
+    maybeTriggerHealingBerry(state, actor);
+    return;
+  }
+
   if (move.name === 'Taunt') {
     accurateOpponentTargets.forEach((targetRef) => {
       targetRef.unit.tauntTurns = 3;
@@ -1827,6 +1920,10 @@ function chanceRoll(percent: number) {
 
 function applyTargetStatEffect(state: SimulatorBattleState, actor: SimUnit, target: SimUnit, move: PokemonMove) {
   switch (move.name) {
+    case 'Clear Smog':
+      resetUnitStageModifiers(target);
+      state.log.unshift(`${target.pokemon.displayName}'s stat changes were erased by Clear Smog.`);
+      return;
     case 'Snarl':
     case 'Struggle Bug':
     case 'Mystical Fire':
@@ -2188,6 +2285,10 @@ function executeDamageMove(
     if (targetRef.unit.fainted) {
       actor.knockouts += 1;
       state.log.unshift(`${targetRef.unit.pokemon.displayName} was knocked out.`);
+      if (targetRef.unit.destinyBondActive && !actor.fainted) {
+        lowerUnitHp(actor, actor.currentHp);
+        state.log.unshift(`${actor.pokemon.displayName} was taken down by Destiny Bond.`);
+      }
     }
     maybeTriggerHealingBerry(state, targetRef.unit);
     applyProtectionContactRebound(state, targetRef.unit, actor, move);
@@ -2199,6 +2300,9 @@ function executeDamageMove(
 
     applyTargetStatEffect(state, actor, targetRef.unit, move);
     applyTargetStatusEffect(state, actor, targetRef.unit, move);
+    if (!targetRef.unit.fainted && (move.name === 'Dragon Tail' || move.name === 'Circle Throw')) {
+      forceSwitchTarget(state, targetRef, move.name);
+    }
   }
 
   if (drainingMoves.has(move.name) && totalDamage > 0 && !actor.fainted) {
@@ -2326,6 +2430,23 @@ function endTurnSideEffects(state: SimulatorBattleState, side: SimSide) {
     if (unit.syrupTurns > 0) {
       applySingleStage(unit, 'speedStage', -1);
       unit.syrupTurns = Math.max(0, unit.syrupTurns - 1);
+    }
+
+    if (unit.yawnTurns > 0) {
+      unit.yawnTurns = Math.max(0, unit.yawnTurns - 1);
+      if (unit.yawnTurns === 0 && unit.build.status === 'healthy') {
+        maybeInflictStatus(state, null, unit, 'sleep', 'Yawn');
+      }
+    }
+
+    if (unit.perishSongTurns > 0) {
+      unit.perishSongTurns = Math.max(0, unit.perishSongTurns - 1);
+      if (unit.perishSongTurns > 0) {
+        state.log.unshift(`${unit.pokemon.displayName}'s perish count fell to ${unit.perishSongTurns}.`);
+      } else {
+        lowerUnitHp(unit, unit.currentHp);
+        state.log.unshift(`${unit.pokemon.displayName} fainted because of Perish Song.`);
+      }
     }
 
     if (unit.fainted) {
@@ -2762,6 +2883,10 @@ export function resolveTurnWithChoices(
       continue;
     }
 
+    if (move.name !== 'Destiny Bond') {
+      actor.destinyBondActive = false;
+    }
+
     const target = resolveMoveTarget(next, defendingSide, queuedAction.choice.target, move);
     actor.lastMoveId = move.id;
     if (!protectionCounterMoves.has(move.name)) {
@@ -2828,7 +2953,8 @@ export function resolveTurnWithChoices(
   if (!next.winner) {
     next.log.unshift(`Turn ${next.turn - 1} ended. ${describeActive(next.player)} face ${describeActive(next.opponent)}.`);
   } else {
-    next.log.unshift(next.winner === 'player' ? 'You won the simulation.' : 'The AI side won the simulation.');
+    const winningName = next.winner === 'player' ? next.player.name : next.opponent.name;
+    next.log.unshift(`${winningName} won the battle.`);
   }
 
   return next;

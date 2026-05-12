@@ -1394,7 +1394,35 @@ button {
 
 .move-table-head-wide,
 .move-table-row-wide {
-  grid-template-columns: 1.1fr 0.7fr 0.65fr 0.55fr 0.55fr 0.55fr 2fr;
+  grid-template-columns: 1.05fr 0.62fr 0.58fr 0.5fr 0.5fr 0.5fr 0.9fr 1.85fr;
+}
+
+.parity-summary-grid {
+  margin-bottom: 16px;
+}
+
+.profile-playlist-stack {
+  max-height: 260px;
+}
+
+.playlist-toggle-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: 14px;
+  border: 1px solid rgba(162, 201, 255, 0.12);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.playlist-toggle-row input {
+  width: 18px;
+  height: 18px;
+}
+
+.playlist-toggle-row span {
+  color: var(--text);
+  font-size: 0.9rem;
 }
 
 .sim-preview-grid {

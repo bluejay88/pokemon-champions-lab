@@ -5,6 +5,7 @@ import {
   forfeitRoomState,
   heartbeatPresenceStore,
   joinRoomState,
+  roomHistoryEntry,
   roomView,
   submitBringOrderState,
   submitTurnChoicesState,
@@ -235,6 +236,16 @@ async function handleGetRoom(payload: ArenaPayload) {
   return { room: roomView(room, account.playerId) };
 }
 
+async function handleHistory(payload: ArenaPayload) {
+  const account = await authenticate(payload.account);
+  const rooms = await allRooms();
+  const history = rooms
+    .map((room) => roomHistoryEntry(room, account.playerId))
+    .filter((entry): entry is NonNullable<typeof entry> => Boolean(entry))
+    .sort((left, right) => new Date(right.playedAt).getTime() - new Date(left.playedAt).getTime());
+  return { history };
+}
+
 async function handleBringOrder(payload: ArenaPayload) {
   const account = await authenticate(payload.account);
   if (!payload.code || !payload.bringOrder) {
@@ -299,6 +310,9 @@ export default async function handler(request: Request) {
     }
     if (action === 'get-room') {
       return jsonResponse(await handleGetRoom(payload));
+    }
+    if (action === 'history') {
+      return jsonResponse(await handleHistory(payload));
     }
     if (action === 'submit-bring-order') {
       return jsonResponse(await handleBringOrder(payload));

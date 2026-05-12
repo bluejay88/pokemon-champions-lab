@@ -14,6 +14,7 @@ export type BattleTab = 'team-builder' | 'damage-lab' | 'pokedex' | 'ai-builder'
 export type BattleFormat = 'Singles' | 'Doubles';
 export type UsageLabel = 'OU' | 'UU' | 'RU' | 'NU';
 export type LayoutMode = 'Auto' | 'Stretch' | 'Focus';
+export type BattleMusicMode = 'single' | 'random' | 'playlist';
 
 export interface StatBlock {
   hp: number;
@@ -157,6 +158,10 @@ export interface SimulatorMatchRecord {
   topPerformers: string[];
   announcerEnabled: boolean;
   timerEnabled: boolean;
+  opponentName?: string | null;
+  roomCode?: string | null;
+  musicTrackId?: string | null;
+  resultReason?: 'normal' | 'forfeit' | null;
   battleLog: string[];
   turnReviews: SimulatorTurnReview[];
 }
@@ -171,6 +176,7 @@ export interface SimulatorTurnReview {
 
 export interface Profile {
   trainerName: string;
+  profileCreatedAt: string | null;
   favoriteFormat: BattleFormat;
   playerNote: string;
   offMetaBias: number;
@@ -178,7 +184,9 @@ export interface Profile {
   resizablePanels: boolean;
   battleMusicEnabled: boolean;
   battleMusicVolume: number;
+  battleMusicMode: BattleMusicMode;
   preferredBattleTrackId: string;
+  battleMusicPlaylistIds: string[];
   announcerDefaultEnabled: boolean;
   onlineAccount: OnlineBattleAccount | null;
   matchHistory: SimulatorMatchRecord[];
@@ -196,6 +204,19 @@ export interface OnlinePresenceStats {
   activeUsers: number;
   totalVisits: number;
   activeBattles: number;
+}
+
+export interface OnlineBattleRoomHistoryEntry {
+  code: string;
+  playedAt: string;
+  format: BattleFormat;
+  trainerName: string;
+  opponentName: string;
+  result: 'Win' | 'Loss';
+  resultReason: 'normal' | 'forfeit' | null;
+  turns: number;
+  musicTrackId: string;
+  winnerName: string | null;
 }
 
 export interface EnvironmentState {

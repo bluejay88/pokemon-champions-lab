@@ -6,4 +6,30 @@ export default defineConfig({
   server: {
     port: 4173,
   },
+  build: {
+    cssCodeSplit: true,
+    chunkSizeWarningLimit: 1400,
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (id.includes('node_modules')) {
+            return 'vendor';
+          }
+          if (id.includes('src/data/champions-data.json')) {
+            return 'champions-data';
+          }
+          if (id.includes('src/lib/online') || id.includes('netlify/functions/arena')) {
+            return 'online-battles';
+          }
+          if (id.includes('src/lib/simulator') || id.includes('src/lib/damage') || id.includes('src/lib/moveParity')) {
+            return 'battle-core';
+          }
+          if (id.includes('src/lib/ai') || id.includes('src/lib/usage')) {
+            return 'team-ai';
+          }
+          return undefined;
+        },
+      },
+    },
+  },
 });

@@ -406,6 +406,10 @@ export function sanitizeAppState(state: AppState) {
       matchHistory: (state.profile?.matchHistory ?? defaults.profile.matchHistory).map((record) => ({
         ...record,
         mode: record.mode ?? 'AI Simulator',
+        opponentName: record.opponentName ?? null,
+        roomCode: record.roomCode ?? null,
+        musicTrackId: record.musicTrackId ?? null,
+        resultReason: record.resultReason ?? 'normal',
       })),
     },
     teams,
@@ -482,6 +486,7 @@ export function createDefaultState(): AppState {
   return {
     profile: {
       trainerName: '',
+      profileCreatedAt: null,
       favoriteFormat: 'Singles',
       playerNote: '',
       offMetaBias: 50,
@@ -489,7 +494,9 @@ export function createDefaultState(): AppState {
       resizablePanels: true,
       battleMusicEnabled: true,
       battleMusicVolume: 18,
+      battleMusicMode: 'single',
       preferredBattleTrackId: 'gen5-final',
+      battleMusicPlaylistIds: ['gen5-final'],
       announcerDefaultEnabled: true,
       onlineAccount: null,
       matchHistory: [],
