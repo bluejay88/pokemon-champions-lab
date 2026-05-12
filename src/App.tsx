@@ -371,6 +371,34 @@ function teammateItemIds(team: Team, slotIndex: number) {
   );
 }
 
+function simulatorBringSummary(team: Team, format: BattleFormat, bringOrder: number[]) {
+  if (!bringOrder.length) {
+    return `Pick 4 Pokemon to lock your bring order. In ${format}, the first ${format === 'Doubles' ? 'two selected Pokemon become your leads' : 'selected Pokemon becomes your lead'}.`;
+  }
+
+  const names = bringOrder
+    .map((slotIndex) => selectedPokemon(team.slots[slotIndex])?.displayName ?? resolvePokemonForm(team.slots[slotIndex])?.displayName ?? `Slot ${slotIndex + 1}`)
+    .filter(Boolean);
+
+  if (format === 'Singles') {
+    const lead = names[0] ?? 'your lead';
+    const backline = names.slice(1);
+    return backline.length
+      ? `Singles lead: ${lead}. Backline order: ${backline.join(' -> ')}.`
+      : `Singles lead: ${lead}. Select ${4 - bringOrder.length} more Pokemon to finish your bring order.`;
+  }
+
+  const leads = names.slice(0, 2);
+  const backline = names.slice(2);
+  if (leads.length < 2) {
+    return `Doubles lead slot 1 is ${leads[0] ?? 'open'}. Select one more lead plus ${Math.max(0, 4 - bringOrder.length - 1)} backline Pokemon.`;
+  }
+
+  return backline.length
+    ? `Doubles leads: ${leads[0]} and ${leads[1]}. Backline order: ${backline.join(' -> ')}.`
+    : `Doubles leads: ${leads[0]} and ${leads[1]}. Select ${4 - bringOrder.length} more Pokemon for the backline.`;
+}
+
 function App() {
   const [state, setState] = useState(() => loadState());
   const [activeTab, setActiveTab] = useState<BattleTab>('team-builder');
@@ -394,6 +422,7 @@ function App() {
   const [simBattle, setSimBattle] = useState<SimulatorBattleState | null>(null);
   const [simChoiceDrafts, setSimChoiceDrafts] = useState<Record<number, ChoiceDraft>>({});
   const [simCountdown, setSimCountdown] = useState(0);
+  const [simPreviewMessage, setSimPreviewMessage] = useState<string | null>(null);
   const [lastSavedAt, setLastSavedAt] = useState<string | null>(null);
   const [saveMessage, setSaveMessage] = useState('Autosave ready');
 
@@ -636,11 +665,13 @@ function App() {
       previewEndsAt: Date.now() + 60_000,
     });
     setSimBringOrder([]);
+    setSimPreviewMessage(null);
     setSimBattle(null);
     setSimChoiceDrafts({});
   }
 
   function toggleBringIndex(slotIndex: number) {
+    setSimPreviewMessage(null);
     setSimBringOrder((current) => {
       if (current.includes(slotIndex)) {
         return current.filter((entry) => entry !== slotIndex);
@@ -653,7 +684,12 @@ function App() {
   }
 
   function beginSimBattle() {
-    if (!simPreview || simBringOrder.length !== 4) {
+    if (!simPreview) {
+      return;
+    }
+
+    if (simBringOrder.length !== 4) {
+      setSimPreviewMessage(`Select exactly 4 Pokemon before starting the battle. Current lock-in: ${simBringOrder.length}/4.`);
       return;
     }
 
@@ -663,6 +699,7 @@ function App() {
     const battle = advancePreviewToBattle(createSimulatorBattle(simPreview.format, playerTeam, simBringOrder, simPreview.opponentTeam, opponentOrder, simPreview.previewEndsAt));
     setSimBattle(battle);
     setSimPreview(null);
+    setSimPreviewMessage(null);
     setSimChoiceDrafts({});
   }
 
@@ -1414,8 +1451,12 @@ function App() {
                     </div>
                   </div>
 
+                  <div className="note-row">
+                    {simPreviewMessage ?? simulatorBringSummary(team, simPreview.format, simBringOrder)}
+                  </div>
+
                   <div className="team-actions">
-                    <button className="action-button primary" onClick={beginSimBattle} disabled={simCountdown > 0 || simBringOrder.length !== 4}>Start Battle</button>
+                    <button className="action-button primary" onClick={beginSimBattle}>Start Battle</button>
                     <button className="action-button" onClick={() => setSimPreview(null)}>Cancel Preview</button>
                   </div>
                 </>
