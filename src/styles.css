@@ -95,6 +95,7 @@ button {
   display: flex;
   flex-direction: column;
   gap: 18px;
+  overflow: hidden;
   backdrop-filter: blur(22px);
 }
 
@@ -192,10 +193,32 @@ button {
 .side-nav {
   display: flex;
   flex-direction: column;
+  flex: 1 1 auto;
   gap: 10px;
+  min-height: 0;
   min-width: 0;
   width: 100%;
   max-width: 100%;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding-right: 8px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(94, 199, 255, 0.34) rgba(255, 255, 255, 0.04);
+  scrollbar-gutter: stable;
+}
+
+.side-nav::-webkit-scrollbar {
+  width: 10px;
+}
+
+.side-nav::-webkit-scrollbar-thumb {
+  background: rgba(94, 199, 255, 0.34);
+  border-radius: 999px;
+}
+
+.side-nav::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.04);
+  border-radius: 999px;
 }
 
 .nav-item {
@@ -233,6 +256,7 @@ button {
 }
 
 .sidebar-foot {
+  flex: 0 0 auto;
   margin-top: auto;
 }
 
@@ -1344,6 +1368,11 @@ button {
     border-bottom: 1px solid var(--line);
   }
 
+  .side-nav {
+    flex: 0 1 auto;
+    max-height: clamp(220px, 40vh, 380px);
+  }
+
   .page-grid,
   .page-grid-wide {
     grid-template-columns: minmax(0, 1fr);
@@ -1393,31 +1422,25 @@ button {
   }
 
   .side-nav {
-    flex-direction: row;
-    gap: 12px;
+    flex-direction: column;
+    gap: 10px;
     width: 100%;
     max-width: 100%;
-    overflow-x: auto;
-    overflow-y: hidden;
-    padding-bottom: 4px;
-    scroll-snap-type: x proximity;
-  }
-
-  .side-nav::-webkit-scrollbar {
-    height: 6px;
-  }
-
-  .side-nav::-webkit-scrollbar-thumb {
-    background: rgba(94, 199, 255, 0.26);
-    border-radius: 999px;
+    max-height: clamp(210px, 36vh, 340px);
+    overflow-x: hidden;
+    overflow-y: auto;
+    padding-right: 8px;
+    padding-bottom: 0;
+    scroll-snap-type: none;
   }
 
   .nav-item {
-    flex: 0 0 210px;
-    min-width: 210px;
-    max-width: calc(100vw - 48px);
+    flex: 0 0 auto;
+    min-width: 0;
+    max-width: none;
+    width: 100%;
     padding: 12px;
-    scroll-snap-align: start;
+    scroll-snap-align: none;
   }
 
   .main-shell {
@@ -1482,12 +1505,14 @@ button {
 
   .side-nav {
     gap: 10px;
+    max-height: clamp(190px, 34vh, 300px);
   }
 
   .nav-item {
-    flex: 0 0 148px;
-    min-width: 148px;
-    max-width: calc(100vw - 40px);
+    flex: 0 0 auto;
+    min-width: 0;
+    max-width: none;
+    width: 100%;
     grid-template-columns: 40px 1fr;
     gap: 10px;
     padding: 12px;
