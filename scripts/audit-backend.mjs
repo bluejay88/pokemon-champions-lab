@@ -149,7 +149,7 @@ const {
 
 const { calculateDamage } = damage;
 const { generateTeamPlans } = ai;
-const { advancePreviewToBattle, createSimulatorBattle, resolveTurn } = simulator;
+const { advancePreviewToBattle, createSimulatorBattle, legalMovesForUnit, resolveTurn } = simulator;
 
 const statKeys = ['hp', 'attack', 'defense', 'specialAttack', 'specialDefense', 'speed'];
 const failures = [];
@@ -273,6 +273,8 @@ const disableUser = findPokemonWithMoves(['Disable', 'Protect'], ['Gengar', 'Sab
 const trickRoomUser = findPokemonWithMoves(['Trick Room', 'Shadow Ball'], ['Mimikyu', 'Bronzong', 'Flutter Mane']);
 const calmMindUser = findPokemonWithMoves(['Calm Mind'], ['Alakazam', 'Suicune', 'Clefable']);
 const nastyPlotUser = findPokemonWithMoves(['Nasty Plot'], ['Gengar', 'Hydreigon', 'Mismagius']);
+const sunnyDayUser = findPokemonWithMoves(['Sunny Day', 'Protect'], ['Charizard', 'Venusaur', 'Castform']);
+const tormentUser = findPokemonWithMoves(['Torment', 'Protect'], ['Infernape', 'Sableye', 'Umbreon']);
 const charizardBase = dataset.pokemon.find((pokemon) => pokemon.displayName === 'Charizard' && !pokemon.isMega) ?? null;
 const abomasnowBase = dataset.pokemon.find((pokemon) => pokemon.displayName === 'Abomasnow' && !pokemon.isMega) ?? null;
 assert(
@@ -293,6 +295,8 @@ assert(
     trickRoomUser &&
     calmMindUser &&
     nastyPlotUser &&
+    sunnyDayUser &&
+    tormentUser &&
     charizardBase &&
     abomasnowBase,
   'Expected simulator audit Pokemon to exist in the Champions roster.',
@@ -309,10 +313,13 @@ const brickBreakChoiceId = moveIdFor(brickBreakUser, 'Brick Break');
 const iceSpinnerChoiceId = moveIdFor(iceSpinnerUser, 'Ice Spinner');
 const leechSeedChoiceId = moveIdFor(leechSeedUser, 'Leech Seed');
 const restChoiceId = moveIdFor(restUser, 'Rest');
+const restFollowUpChoiceId = restUser.movePool.find((move) => move.id !== restChoiceId)?.id ?? null;
 const disableChoiceId = moveIdFor(disableUser, 'Disable');
 const trickRoomChoiceId = moveIdFor(trickRoomUser, 'Trick Room');
 const calmMindChoiceId = moveIdFor(calmMindUser, 'Calm Mind');
 const nastyPlotChoiceId = moveIdFor(nastyPlotUser, 'Nasty Plot');
+const sunnyDayChoiceId = moveIdFor(sunnyDayUser, 'Sunny Day');
+const tormentChoiceId = moveIdFor(tormentUser, 'Torment');
 const megaCharizardMoveId = moveIdFor(charizardBase, 'Flamethrower') ?? moveIdFor(charizardBase, 'Heat Wave') ?? charizardBase.movePool[0]?.id ?? null;
 const megaAbomasnowMoveId = moveIdFor(abomasnowBase, 'Blizzard') ?? moveIdFor(abomasnowBase, 'Ice Shard') ?? abomasnowBase.movePool[0]?.id ?? null;
 const charizarditeYId = itemIdByName('Charizardite Y');
@@ -329,10 +336,13 @@ assert(
     iceSpinnerChoiceId &&
     leechSeedChoiceId &&
     restChoiceId &&
+    restFollowUpChoiceId &&
     disableChoiceId &&
     trickRoomChoiceId &&
     calmMindChoiceId &&
     nastyPlotChoiceId &&
+    sunnyDayChoiceId &&
+    tormentChoiceId &&
     megaCharizardMoveId &&
     megaAbomasnowMoveId &&
     charizarditeYId &&
@@ -483,6 +493,12 @@ let restBattle = buildBattle(
 restBattle = withMockRandom([0.1, 0.1, 0.1], () => resolveTurn(restBattle, [{ type: 'move', actor: 0, moveId: restChoiceId, target: 0 }]));
 assert.equal(restBattle.player.units[0].currentHp, restBattle.player.units[0].maxHp, 'Rest should fully restore HP.');
 assert.equal(restBattle.player.units[0].build.status, 'sleep', 'Rest should put the user to sleep.');
+restBattle = withMockRandom([0.1, 0.1, 0.1], () => resolveTurn(restBattle, [{ type: 'move', actor: 0, moveId: restFollowUpChoiceId, target: 0 }]));
+assert.equal(restBattle.player.units[0].build.status, 'sleep', 'Rest sleep should still be active after the first forced sleep turn.');
+restBattle = withMockRandom([0.1, 0.1, 0.1], () => resolveTurn(restBattle, [{ type: 'move', actor: 0, moveId: restFollowUpChoiceId, target: 0 }]));
+assert.equal(restBattle.player.units[0].build.status, 'sleep', 'Rest sleep should still be active after the second forced sleep turn.');
+restBattle = withMockRandom([0.1, 0.1, 0.1], () => resolveTurn(restBattle, [{ type: 'move', actor: 0, moveId: restFollowUpChoiceId, target: 0 }]));
+assert.equal(restBattle.player.units[0].build.status, 'healthy', 'Rest sleep should clear on the third move attempt.');
 
 let disableBattle = buildBattle(
   'Singles',
@@ -495,6 +511,19 @@ assert.equal(disableBattle.opponent.units[0].disabledMoveId, shadowBallChoiceId,
 const hpAfterDisableTurn = disableBattle.player.units[0].currentHp;
 disableBattle = withMockRandom([0.1, 0.1, 0.1], () => resolveTurn(disableBattle, [{ type: 'move', actor: 0, moveId: protectChoiceId, target: 0 }]));
 assert.equal(disableBattle.player.units[0].currentHp, hpAfterDisableTurn, 'A disabled attacker should not be able to reuse its disabled move immediately.');
+
+let tormentBattle = buildBattle(
+  'Singles',
+  [buildSlot('torment-user', tormentUser, ['Torment', 'Protect'], { evs: { ...blankStats(), hp: 32, speed: 20, defense: 14 } })],
+  [buildSlot('torment-foe', shadowBallUser, ['Shadow Ball', 'Protect'], { evs: { ...blankStats(), specialAttack: 32, speed: 32, hp: 2 } })],
+);
+tormentBattle = withMockRandom([0.1, 0.1, 0.1], () => resolveTurn(tormentBattle, [{ type: 'move', actor: 0, moveId: protectChoiceId, target: 0 }]));
+tormentBattle = withMockRandom([0.1, 0.1, 0.1], () => resolveTurn(tormentBattle, [{ type: 'move', actor: 0, moveId: tormentChoiceId, target: 0 }]));
+assert.equal(tormentBattle.opponent.units[0].tormentActive, true, 'Torment should stay active until the target switches out.');
+assert.ok(
+  !legalMovesForUnit(tormentBattle.opponent.units[0]).some((move) => move.id === shadowBallChoiceId),
+  'A tormented target should not be able to immediately repeat its last move.',
+);
 
 let calmMindBattle = buildBattle(
   'Singles',
@@ -512,6 +541,20 @@ let nastyPlotBattle = buildBattle(
 );
 nastyPlotBattle = withMockRandom([0.1, 0.1, 0.1], () => resolveTurn(nastyPlotBattle, [{ type: 'move', actor: 0, moveId: nastyPlotChoiceId, target: 0 }]));
 assert.equal(nastyPlotBattle.player.units[0].build.specialAttackStage, 2, 'Nasty Plot should sharply raise Sp. Atk.');
+
+let weatherTimerBattle = buildBattle(
+  'Singles',
+  [buildSlot('sunny-user', sunnyDayUser, ['Sunny Day', 'Protect'], { evs: { ...blankStats(), hp: 24, speed: 22, specialDefense: 20 } })],
+  [buildSlot('sunny-foe', protectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } })],
+);
+weatherTimerBattle = withMockRandom([0.1, 0.1, 0.1], () => resolveTurn(weatherTimerBattle, [{ type: 'move', actor: 0, moveId: sunnyDayChoiceId, target: 0 }]));
+assert.equal(weatherTimerBattle.environment.weather, 'sun', 'Sunny Day should apply sun to the field.');
+assert.equal(weatherTimerBattle.weatherTurns, 4, 'A five-turn weather move should show four turns remaining after the turn resolves.');
+for (let index = 0; index < 4; index += 1) {
+  weatherTimerBattle = withMockRandom([0.1, 0.1, 0.1], () => resolveTurn(weatherTimerBattle, [{ type: 'move', actor: 0, moveId: protectChoiceId, target: 0 }]));
+}
+assert.equal(weatherTimerBattle.environment.weather, 'clear', 'Weather should expire after its full field duration.');
+assert.equal(weatherTimerBattle.weatherTurns, 0, 'Weather timer should clear after expiration.');
 
 let trickRoomBattle = buildBattle(
   'Singles',
@@ -534,8 +577,22 @@ megaWeatherBattle = withMockRandom([0.1, 0.1, 0.1], () => resolveTurn(megaWeathe
 assert.equal(megaWeatherBattle.player.units[0].megaEvolved, true, 'Player Mega Evolution should trigger when the Mega action is chosen.');
 assert.equal(megaWeatherBattle.opponent.units[0].megaEvolved, true, 'AI Mega Evolution should also trigger when available.');
 assert.equal(megaWeatherBattle.environment.weather, 'snow', 'When both Megas set weather, the slower Mega should override the faster weather.');
+assert.equal(megaWeatherBattle.weatherTurns, 4, 'Mega weather abilities should also start a five-turn field timer.');
 assert.equal(megaWeatherBattle.player.megaUsed, true, 'A side should record that its Mega Evolution has been used.');
 assert.equal(megaWeatherBattle.opponent.megaUsed, true, 'The opposing side should also record Mega usage.');
+
+let revealBattle = buildBattle(
+  'Singles',
+  [buildSlot('reveal-user', earthquakeUser, ['Earthquake'], { natureId: 'jolly', evs: { ...blankStats(), attack: 32, speed: 32, hp: 2 } })],
+  [
+    buildSlot('reveal-foe-a', specialTargetA, [specialTargetA.movePool[0].name], { evs: { ...blankStats(), hp: 20, defense: 20, specialDefense: 26 } }),
+    buildSlot('reveal-foe-b', specialTargetB, [specialTargetB.movePool[0].name], { evs: { ...blankStats(), hp: 20, specialDefense: 24, defense: 22 } }),
+  ],
+);
+assert.equal(revealBattle.opponent.units[1].revealed, false, 'Opponent bench Pokemon should stay hidden before they are switched in.');
+revealBattle.opponent.units[0].currentHp = 1;
+revealBattle = withMockRandom([0.1, 0.1, 0.1], () => resolveTurn(revealBattle, [{ type: 'move', actor: 0, moveId: earthquakeChoiceId, target: 0 }]));
+assert.equal(revealBattle.opponent.units[1].revealed, true, 'Opponent bench Pokemon should become revealed after they first switch into battle.');
 
 if (failures.length) {
   throw new Error(`Stat range audit failed for ${failures.length} entries.\n${failures.slice(0, 24).join('\n')}`);
@@ -547,7 +604,7 @@ const summary = [
   `Verified global EV limits: 66 total points, 32 max per stat.`,
   `Verified item clause sanitization for manual teams and AI-generated teams.`,
   `Verified damage engine produces live damage output under the Champions EV model.`,
-  `Verified simulator rules for chained Protect odds, rain-locked Thunder accuracy, Snarl spread debuffs, Earthquake ally collateral, forced-thaw freeze timing, Disable move locks, Calm Mind and Nasty Plot boosts, Trick Room toggling, and Mega weather ordering.`,
+  `Verified simulator rules for chained Protect odds, rain-locked Thunder accuracy, Snarl spread debuffs, Earthquake ally collateral, forced-thaw freeze timing, Rest sleep timing, Disable and Torment move locks, weather field timers, opponent reveal state, Calm Mind and Nasty Plot boosts, Trick Room toggling, and Mega weather ordering.`,
   warnings.length ? `Source-data warnings: ${warnings.length} HP floor rows on the scraped form pages disagree with fixed 31 IV policy, so the app keeps the fixed-IV result intentionally.` : 'Source-data warnings: none.',
 ];
 

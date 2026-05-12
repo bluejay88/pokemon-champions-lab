@@ -1,4 +1,4 @@
-import { startTransition, useDeferredValue, useEffect, useMemo, useState } from 'react';
+import { startTransition, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
 import { analyzeTeam, archetypeLibrary, describeBuildRole, generateTeamPlans, recommendMoveIds, suggestArchetypesForCore, validateLockedPokemonInputs } from './lib/ai';
 import {
   applyEffortValue,
@@ -50,6 +50,8 @@ import type {
   LayoutMode,
   PokemonBuild,
   PokemonEntry,
+  SimulatorMatchRecord,
+  SimulatorTurnReview,
   TeamAnalysis,
   Team,
 } from './types';
@@ -67,6 +69,8 @@ type ChoiceDraft = {
   target: number;
   switchTarget: number;
 };
+
+type AnnouncerStyle = 'Arena' | 'Championship' | 'Analyst';
 
 type StatusBadgeTone = 'burn' | 'freeze' | 'paralysis' | 'poison' | 'sleep' | 'toxic';
 type StatusBadge = {
@@ -165,6 +169,226 @@ const simulatorLeadMoveNames = new Set([
   'Encore',
   'Taunt',
 ]);
+
+const announcerScripts: Record<
+  'preview' | 'turn' | 'switch' | 'hit' | 'super' | 'resist' | 'miss' | 'status' | 'protect' | 'ko' | 'finish' | 'star',
+  string[]
+> = {
+  preview: [
+    'Welcome back to Pokemon Champions Lab. Team preview is live and the pressure starts right now.',
+    'Six species are on the board, and every choice at preview can decide the next four turns.',
+    'This matchup already hints at speed control, positioning, and a very real late-game race.',
+    'The crowd is studying the preview screen and searching for the hidden tech.',
+    'Viewers can expect a tactical opener with both sides threatening immediate pressure.',
+    'Keep an eye on {pokemon}; that could become the hinge point of the whole battle.',
+    'That preview shows multiple lines of attack, and neither side can afford a sloppy lead.',
+    'The chess match begins before turn one, and the preview is giving us plenty to talk about.',
+    'This could become a weather war, a positioning fight, or a clean offensive sprint.',
+    'One key question at preview: which four are actually coming to the field?',
+    'The matchup grid is loaded with options, and the mind games are already underway.',
+    'You can feel the tension building as both sides lock in their bring-four plans.',
+  ],
+  turn: [
+    'Turn {turn} is underway, and both sides are racing the clock.',
+    'The move timer is active. Every second matters now.',
+    'We are live on turn {turn}, and the next click could swing the entire game.',
+    'Decision time on turn {turn}. Positioning, damage, and nerves all matter here.',
+    'This is where preparation meets execution on turn {turn}.',
+    'The timer is ticking, and both sides need a clean choice right now.',
+    'Turn {turn} is loaded with options, but only one line survives contact.',
+    'No wasted motions on turn {turn}; this battle is tightening fast.',
+    'The field is set, the clock is moving, and turn {turn} demands precision.',
+    'A huge turn is developing here, and both sides need to commit.',
+  ],
+  switch: [
+    '{pokemon} hits the field and changes the entire look of the position.',
+    'A fresh switch from {pokemon}, and the momentum might be changing hands.',
+    '{pokemon} enters with purpose, and the crowd knows this slot matters.',
+    'That switch to {pokemon} opens a new line immediately.',
+    '{pokemon} takes the stage, and now the matchup shifts.',
+    'A key reposition brings in {pokemon}, and that could reshape the turn.',
+    '{pokemon} is now on the field, and the battle state just got more complicated.',
+    'There is the reveal. {pokemon} is in, and now both sides have to adapt.',
+  ],
+  hit: [
+    '{pokemon} lands {move}, and that is a clean connection.',
+    '{pokemon} fires off {move} and puts real pressure on {target}.',
+    'Direct hit from {pokemon}. {move} finds its mark.',
+    '{move} connects from {pokemon}, and the tempo is rising.',
+    '{pokemon} does not miss the moment. {move} lands.',
+    'That is a sharp strike from {pokemon}, and {target} felt all of it.',
+    '{pokemon} commits to {move}, and the hit comes through.',
+    'A well-timed {move} from {pokemon} lands right where it needed to.',
+    '{pokemon} converts the turn with a successful {move}.',
+    '{move} lands from {pokemon}, and that is meaningful board damage.',
+    'The attack is on target, and {pokemon} delivers with {move}.',
+    '{pokemon} threads the hit with {move} and keeps the pressure high.',
+  ],
+  super: [
+    'That was super effective, and the damage reflects it.',
+    'A brutal type advantage there, and {target} paid for it.',
+    'That is exactly the matchup {pokemon} wanted. Super effective damage!',
+    'Massive connection. The typing lined up perfectly for {pokemon}.',
+    'Super effective pressure from {pokemon}, and this field just tilted hard.',
+    'No doubt about it, {move} struck for premium damage.',
+    '{target} could not stomach that hit. The typing was all wrong.',
+    'That is a huge swing off type advantage alone.',
+    'Super effective damage from {pokemon}, and the crowd is awake now.',
+    'A perfect punish. {move} found the exact weakness it needed.',
+  ],
+  resist: [
+    '{target} resists the hit and keeps some breathing room.',
+    'Not very effective, but {pokemon} still keeps the pressure on.',
+    '{target} absorbs the blow better than expected.',
+    'That resistance matters. {target} stays standing with a little extra space.',
+    'The damage is tempered by typing, and {target} survives the exchange.',
+    '{target} shrugs off part of that hit thanks to the matchup.',
+  ],
+  miss: [
+    '{pokemon} misses with {move}, and that is a costly miss.',
+    '{move} does not connect, and the whole turn just changed.',
+    'A miss from {pokemon}, and the door swings open.',
+    'That attack goes wide, and the crowd reacts instantly.',
+    '{pokemon} cannot find the target with {move}.',
+    'No damage there. {move} misses at a critical time.',
+    'The accuracy check fails, and {pokemon} will hate that one.',
+    '{move} misses, and this battle gets another twist.',
+  ],
+  status: [
+    '{target} picks up a status, and that could echo for multiple turns.',
+    'A major status lands on {target}, and now the timer really starts.',
+    '{target} is under pressure from a fresh status condition.',
+    'That status changes the math for every turn after this one.',
+    '{pokemon} adds long-term pressure with that status line.',
+    'A smart utility sequence there, and {target} now has to manage the condition.',
+    '{target} is now compromised, and the follow-up lines get much stronger.',
+    'Status pressure is online, and that can decide endgames in a hurry.',
+  ],
+  protect: [
+    '{pokemon} shuts the door with a protective line.',
+    'Protection comes through, and the attack window closes.',
+    '{pokemon} reads the pressure and blocks it out.',
+    'That defensive timing from {pokemon} could buy a huge turn.',
+    'A clean shield from {pokemon}, and now the pacing changes.',
+    '{pokemon} protects successfully and denies the immediate punish.',
+  ],
+  ko: [
+    '{target} goes down, and that is a massive knockout.',
+    'Knockout confirmed. {pokemon} wins the exchange decisively.',
+    'That is a KO, and the battle state just snapped into a new shape.',
+    '{target} falls, and the momentum surges toward {pokemon}.',
+    '{pokemon} secures the knockout and opens the door for the next wave.',
+    'A huge removal there. {target} is out of the battle.',
+    'The crowd erupts as {target} drops from the field.',
+    'That knockout will be remembered if this battle stays close.',
+    '{pokemon} converts pressure into a clean finish.',
+    'One more down, and the numbers game starts to matter.',
+  ],
+  finish: [
+    'The battle is over, and {winner} claims the win.',
+    '{winner} closes it out and takes the match in style.',
+    'That is your winner: {winner}. A composed finish from start to end.',
+    '{winner} seals the result and walks away with the victory.',
+    'It is finished. {winner} stands tall when the dust settles.',
+    '{winner} wins the battle, and the final sequence was clinical.',
+    'That is the closing bell. {winner} takes the set.',
+    '{winner} gets the job done and secures the result.',
+  ],
+  star: [
+    'Star of the battle: {pokemon}. That Pokemon delivered when it mattered most.',
+    '{pokemon} was the standout performer of the match.',
+    'Give a spotlight to {pokemon}; that was a difference-making performance.',
+    '{pokemon} put in the work and earns player-of-the-game honors.',
+    'The effort chart points straight at {pokemon} as the battle star.',
+    '{pokemon} was the engine behind the win and deserves the callout.',
+  ],
+};
+
+function pickLine(lines: string[]) {
+  return lines[Math.floor(Math.random() * lines.length)] ?? lines[0] ?? '';
+}
+
+function fillAnnouncerLine(template: string, replacements: Record<string, string | number | null | undefined>) {
+  return Object.entries(replacements).reduce((line, [key, value]) => line.replaceAll(`{${key}}`, String(value ?? '')), template);
+}
+
+function titleCaseFieldLabel(value: string) {
+  return value.charAt(0).toUpperCase() + value.slice(1);
+}
+
+function weatherFieldLabel(state: SimulatorBattleState) {
+  return state.environment.weather === 'clear' || state.weatherTurns <= 0
+    ? 'Clear'
+    : `${titleCaseFieldLabel(state.environment.weather)} (${state.weatherTurns} turn${state.weatherTurns === 1 ? '' : 's'})`;
+}
+
+function terrainFieldLabel(state: SimulatorBattleState) {
+  return state.environment.terrain === 'none' || state.terrainTurns <= 0
+    ? 'None'
+    : `${titleCaseFieldLabel(state.environment.terrain)} (${state.terrainTurns} turn${state.terrainTurns === 1 ? '' : 's'})`;
+}
+
+function sleepTimerMeta(unit: SimUnit) {
+  if (unit.build.status !== 'sleep') {
+    return null;
+  }
+
+  if (unit.sleepSource === 'rest') {
+    const lockedTurnsRemaining = Math.max(0, 2 - unit.sleepTurns);
+    return lockedTurnsRemaining > 0
+      ? {
+          label: `Rest ${lockedTurnsRemaining} left`,
+          title: `Rest sleep is active. ${lockedTurnsRemaining} forced sleep turn${lockedTurnsRemaining === 1 ? '' : 's'} remain before the next wake check.`,
+          note: `Rest sleep is active. ${lockedTurnsRemaining} forced sleep turn${lockedTurnsRemaining === 1 ? '' : 's'} remain before this Pokemon can wake.`,
+        }
+      : {
+          label: 'Wake next',
+          title: 'Rest sleep has reached its final lock. This Pokemon will wake on its next move attempt.',
+          note: 'Rest sleep has reached its final lock. This Pokemon will wake on its next move attempt.',
+        };
+  }
+
+  if (unit.sleepTurns === 0) {
+    return {
+      label: 'Sleep locked',
+      title: 'First sleep turn: this Pokemon cannot move. The next move attempt has a 33.3% wake chance, and wake is guaranteed on turn 3.',
+      note: 'First sleep turn: this Pokemon cannot move. The next move attempt has a 33.3% wake chance, and wake is guaranteed on turn 3.',
+    };
+  }
+
+  if (unit.sleepTurns === 1) {
+    return {
+      label: 'Wake 33%',
+      title: 'Second sleep turn: the next move attempt has a 33.3% chance to wake. If it fails, wake is guaranteed on turn 3.',
+      note: 'Second sleep turn: the next move attempt has a 33.3% chance to wake. If it fails, wake is guaranteed on turn 3.',
+    };
+  }
+
+  return {
+    label: 'Wake next',
+    title: 'Sleep has reached its guaranteed wake turn.',
+    note: 'Sleep has reached its guaranteed wake turn.',
+  };
+}
+
+function freezeTimerMeta(unit: SimUnit) {
+  if (unit.build.status !== 'freeze') {
+    return null;
+  }
+
+  const guaranteedTurnsRemaining = Math.max(0, 3 - unit.freezeTurns);
+  return guaranteedTurnsRemaining > 1
+    ? {
+        label: `Thaw <=${guaranteedTurnsRemaining}`,
+        title: `Freeze is active. This Pokemon has a 25% thaw chance on each move attempt and is guaranteed to thaw within ${guaranteedTurnsRemaining} more attempt${guaranteedTurnsRemaining === 1 ? '' : 's'}.`,
+        note: `Freeze is active. This Pokemon has a 25% thaw chance on each move attempt and is guaranteed to thaw within ${guaranteedTurnsRemaining} more move attempts.`,
+      }
+    : {
+        label: 'Thaw next',
+        title: 'Freeze is on its final guaranteed turn. This Pokemon will thaw on its next move attempt if it has not already thawed earlier.',
+        note: 'Freeze is on its final guaranteed turn. This Pokemon will thaw on its next move attempt if it has not already thawed earlier.',
+      };
+}
 
 function copyBuild(build: PokemonBuild): PokemonBuild {
   return {
@@ -479,7 +703,20 @@ function simulatorBringSummary(team: Team, format: BattleFormat, bringOrder: num
 }
 
 function simulatorStatusBadge(unit: SimUnit): StatusBadge | null {
-  return unit.build.status === 'healthy' ? null : simulatorStatusBadges[unit.build.status];
+  if (unit.build.status === 'healthy') {
+    return null;
+  }
+
+  const baseBadge = simulatorStatusBadges[unit.build.status];
+  const sleepMeta = sleepTimerMeta(unit);
+  if (sleepMeta) {
+    return { ...baseBadge, title: sleepMeta.title };
+  }
+  const freezeMeta = freezeTimerMeta(unit);
+  if (freezeMeta) {
+    return { ...baseBadge, title: freezeMeta.title };
+  }
+  return baseBadge;
 }
 
 function simulatorBattleTags(unit: SimUnit) {
@@ -508,6 +745,32 @@ function simulatorBattleTags(unit: SimUnit) {
       label: `Disable ${unit.disableTurns}`,
       tone: 'negative',
       title: `${disabledMove} cannot be selected while Disable is active.`,
+    });
+  }
+  if (unit.tormentActive) {
+    tags.push({
+      key: 'torment',
+      label: 'Torment',
+      tone: 'warning',
+      title: 'Torment is active. This Pokemon cannot select the same move it used last turn until it switches out.',
+    });
+  }
+  const sleepMeta = sleepTimerMeta(unit);
+  if (sleepMeta) {
+    tags.push({
+      key: 'sleep-progress',
+      label: sleepMeta.label,
+      tone: 'warning',
+      title: sleepMeta.title,
+    });
+  }
+  const freezeMeta = freezeTimerMeta(unit);
+  if (freezeMeta) {
+    tags.push({
+      key: 'freeze-progress',
+      label: freezeMeta.label,
+      tone: 'warning',
+      title: freezeMeta.title,
     });
   }
 
@@ -549,16 +812,360 @@ function simulatorRestrictionNotes(unit: SimUnit) {
     const disabledMove = unit.pokemon.movePool.find((move) => move.id === unit.disabledMoveId)?.name ?? 'the disabled move';
     notes.push(`${disabledMove} is disabled for ${unit.disableTurns} more turn${unit.disableTurns === 1 ? '' : 's'}.`);
   }
+  if (unit.tormentActive) {
+    notes.push('Torment is active until this Pokemon switches out, so it cannot repeat the last move it used.');
+  }
   if (unit.build.status === 'freeze') {
-    notes.push('Freeze uses the current Champions rule set here: 25% thaw chance on each move attempt, guaranteed thaw by frozen turn 3.');
+    notes.push(freezeTimerMeta(unit)?.note ?? 'Freeze uses the current Champions rule set here: 25% thaw chance on each move attempt, guaranteed thaw by frozen turn 3.');
   }
   if (unit.build.status === 'sleep') {
-    notes.push('Sleep uses the current Champions rule set here: wake checks begin on sleep turn 2 and wake is guaranteed by sleep turn 3.');
+    notes.push(sleepTimerMeta(unit)?.note ?? 'Sleep uses the current Champions rule set here: wake checks begin on sleep turn 2 and wake is guaranteed by turn 3.');
   }
   if (unit.build.status === 'paralysis') {
     notes.push('Paralysis uses the current Champions rate here: 12.5% full paralysis with Speed reduced to half.');
   }
+  if (!legalMovesForUnit(unit).length) {
+    notes.push('No legal move is currently available because the active lock effects overlap. Switch if possible, or wait for the restriction to clear.');
+  }
   return notes;
+}
+
+function pickPreferredMaleVoice() {
+  if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
+    return null;
+  }
+
+  const voices = window.speechSynthesis.getVoices();
+  const maleKeywords = ['david', 'guy', 'brian', 'mark', 'male', 'daniel', 'alex'];
+  return (
+    voices.find((voice) => maleKeywords.some((keyword) => voice.name.toLowerCase().includes(keyword)) && voice.lang.toLowerCase().startsWith('en')) ??
+    voices.find((voice) => voice.lang.toLowerCase().startsWith('en')) ??
+    voices[0] ??
+    null
+  );
+}
+
+function speakAnnouncerLines(lines: string[], rate: number) {
+  if (typeof window === 'undefined' || !('speechSynthesis' in window) || !lines.length) {
+    return;
+  }
+
+  const synth = window.speechSynthesis;
+  synth.cancel();
+  const voice = pickPreferredMaleVoice();
+  for (const line of lines.slice(0, 2)) {
+    const utterance = new SpeechSynthesisUtterance(line);
+    utterance.rate = rate;
+    utterance.pitch = 0.92;
+    utterance.volume = 1;
+    if (voice) {
+      utterance.voice = voice;
+    }
+    synth.speak(utterance);
+  }
+}
+
+function battlePerformanceScore(unit: SimUnit) {
+  return unit.damageDealt + unit.knockouts * 120 + unit.turnsActive * 8 + (unit.megaEvolved ? 12 : 0);
+}
+
+function topBattlePerformers(battle: SimulatorBattleState) {
+  return [...battle.player.units, ...battle.opponent.units]
+    .filter((unit) => unit.pokemon)
+    .map((unit) => ({
+      name: unit.pokemon.displayName,
+      score: battlePerformanceScore(unit),
+    }))
+    .sort((left, right) => right.score - left.score);
+}
+
+function buildSimulatorMatchRecord(
+  battle: SimulatorBattleState,
+  teamName: string,
+  announcerEnabled: boolean,
+  timerEnabled: boolean,
+  battleLog: string[],
+  turnReviews: SimulatorTurnReview[],
+): SimulatorMatchRecord {
+  const performers = topBattlePerformers(battle);
+  return {
+    id: makeId('match'),
+    playedAt: new Date().toISOString(),
+    format: battle.format,
+    teamName,
+    result: battle.winner === 'player' ? 'Win' : 'Loss',
+    turns: Math.max(1, battle.turn - 1),
+    opponentPreview: battle.opponent.units.map((unit) => unit.basePokemon.displayName),
+    starPokemon: performers[0]?.name ?? null,
+    topPerformers: performers.slice(0, 3).map((entry) => entry.name),
+    announcerEnabled,
+    timerEnabled,
+    battleLog,
+    turnReviews,
+  };
+}
+
+function battleRecordSummary(history: SimulatorMatchRecord[]) {
+  const wins = history.filter((record) => record.result === 'Win').length;
+  const losses = history.length - wins;
+  const winRate = history.length ? Math.round((wins / history.length) * 100) : 0;
+  const averageTurns = history.length ? (history.reduce((sum, record) => sum + record.turns, 0) / history.length).toFixed(1) : '0.0';
+  let currentStreak = 0;
+  let bestStreak = 0;
+  for (const record of history) {
+    if (record.result === 'Win') {
+      currentStreak += 1;
+      bestStreak = Math.max(bestStreak, currentStreak);
+    } else {
+      currentStreak = 0;
+    }
+  }
+
+  const growthChart = history.slice(-12).map((record, index, recent) => {
+    const segment = recent.slice(0, index + 1);
+    const segmentWins = segment.filter((entry) => entry.result === 'Win').length;
+    return {
+      ...record,
+      cumulativeWinRate: Math.round((segmentWins / segment.length) * 100),
+    };
+  });
+
+  return {
+    wins,
+    losses,
+    winRate,
+    averageTurns,
+    bestStreak,
+    growthChart,
+  };
+}
+
+function simulatorCurrentBuild(unit: SimUnit): PokemonBuild {
+  return {
+    ...unit.build,
+    useMega: unit.megaEvolved,
+    currentHpPercent: Math.max(1, Math.round((unit.currentHp / unit.maxHp) * 100)),
+  };
+}
+
+function bestProjectedChoice(battle: SimulatorBattleState, unit: SimUnit) {
+  let best:
+    | {
+        moveId: string;
+        moveName: string;
+        targetName: string;
+        averageDamage: number;
+        averagePercent: number;
+        koSummary: string;
+      }
+    | null = null;
+
+  for (const move of legalMovesForUnit(unit)) {
+    if (move.category === 'Status') {
+      continue;
+    }
+
+    for (const enemyIndex of battle.opponent.active) {
+      const defender = battle.opponent.units[enemyIndex];
+      if (!defender || defender.fainted) {
+        continue;
+      }
+
+      const result = calculateDamage(
+        simulatorCurrentBuild(unit),
+        simulatorCurrentBuild(defender),
+        move,
+        {
+          ...battle.environment,
+          reflect: battle.opponent.reflectTurns > 0,
+          lightScreen: battle.opponent.lightScreenTurns > 0,
+        },
+      );
+      if (!result) {
+        continue;
+      }
+
+      if (!best || result.averageDamage > best.averageDamage) {
+        best = {
+          moveId: move.id,
+          moveName: move.name,
+          targetName: defender.pokemon.displayName,
+          averageDamage: result.averageDamage,
+          averagePercent: result.averagePercent,
+          koSummary: result.koSummary,
+        };
+      }
+    }
+  }
+
+  return best;
+}
+
+function chosenProjection(battle: SimulatorBattleState, unit: SimUnit, choice: SimulatorChoice) {
+  if (choice.type === 'switch') {
+    return null;
+  }
+
+  const move = legalMovesForUnit(unit).find((entry) => entry.id === choice.moveId) ?? unit.pokemon.movePool.find((entry) => entry.id === choice.moveId) ?? null;
+  const targetIndex = battle.opponent.active[choice.target];
+  const defender = typeof targetIndex === 'number' ? battle.opponent.units[targetIndex] ?? null : null;
+  if (!move || !defender || move.category === 'Status') {
+    return null;
+  }
+
+  const result = calculateDamage(
+    simulatorCurrentBuild(unit),
+    simulatorCurrentBuild(defender),
+    move,
+    {
+      ...battle.environment,
+      reflect: battle.opponent.reflectTurns > 0,
+      lightScreen: battle.opponent.lightScreenTurns > 0,
+    },
+  );
+  if (!result) {
+    return null;
+  }
+
+  return {
+    moveName: move.name,
+    targetName: defender.pokemon.displayName,
+    averageDamage: result.averageDamage,
+    averagePercent: result.averagePercent,
+    koSummary: result.koSummary,
+  };
+}
+
+function buildTurnReviewEntry(battle: SimulatorBattleState, actor: number, choice: SimulatorChoice): SimulatorTurnReview | null {
+  const unitIndex = battle.player.active[actor];
+  const unit = typeof unitIndex === 'number' ? battle.player.units[unitIndex] ?? null : null;
+  if (!unit || unit.fainted) {
+    return null;
+  }
+
+  const chosenAction =
+    choice.type === 'switch'
+      ? `Switched to ${battle.player.units[choice.target]?.pokemon.displayName ?? 'a bench option'}`
+      : `${choice.type === 'mega' ? 'Mega Evolved and used' : 'Used'} ${unit.pokemon.movePool.find((move) => move.id === choice.moveId)?.name ?? 'a move'}`;
+  const bestChoice = bestProjectedChoice(battle, unit);
+  const chosen = chosenProjection(battle, unit, choice);
+
+  if (!bestChoice) {
+    return {
+      turn: battle.turn,
+      pokemon: unit.pokemon.displayName,
+      chosenAction,
+      betterAction: null,
+      outcomeDelta: 'This turn leaned on utility or positioning, so no stronger immediate damage line clearly stood out.',
+    };
+  }
+
+  const damageGap = Math.round(bestChoice.averageDamage - (chosen?.averageDamage ?? 0));
+  if (
+    choice.type !== 'switch' &&
+    chosen &&
+    bestChoice.moveId === choice.moveId &&
+    Math.abs(damageGap) <= 12
+  ) {
+    return {
+      turn: battle.turn,
+      pokemon: unit.pokemon.displayName,
+      chosenAction,
+      betterAction: null,
+      outcomeDelta: `The selected line stayed close to optimal pressure at about ${Math.round(chosen.averagePercent)}% projected damage into ${chosen.targetName}.`,
+    };
+  }
+
+  return {
+    turn: battle.turn,
+    pokemon: unit.pokemon.displayName,
+    chosenAction,
+    betterAction: `${bestChoice.moveName} into ${bestChoice.targetName}`,
+    outcomeDelta:
+      choice.type === 'switch'
+        ? `Projected alternative pressure was roughly ${Math.round(bestChoice.averagePercent)}% into ${bestChoice.targetName}, with ${bestChoice.koSummary}.`
+        : `Projected upgrade was about ${Math.max(0, damageGap)} more damage into ${bestChoice.targetName}, with ${bestChoice.koSummary}.`,
+  };
+}
+
+function announcerStyleLine(style: AnnouncerStyle, line: string) {
+  if (style === 'Championship') {
+    return `Championship call: ${line}`;
+  }
+  if (style === 'Analyst') {
+    return `Analyst desk: ${line}`;
+  }
+  return line;
+}
+
+function announcerLinesFromBattleUpdate(previous: SimulatorBattleState | null, current: SimulatorBattleState, style: AnnouncerStyle) {
+  const lines: string[] = [];
+  const previousLength = previous?.log.length ?? 0;
+  const newEntries = current.log.slice(0, Math.max(0, current.log.length - previousLength)).reverse();
+
+  for (const entry of newEntries) {
+    let line: string | null = null;
+    const switchMatch = entry.match(/sent out (.+)\.$/i);
+    const hitMatch = entry.match(/^(.+?) used (.+?) on (.+?) for (\d+) damage\.$/);
+    const superMatch = entry.match(/^It's super effective against (.+)\.$/);
+    const resistMatch = entry.match(/^(.+?) resisted the hit\.$/);
+    const missMatch = entry.match(/^(.+?)'s (.+?) missed (.+?)\.$/);
+    const statusMatch = entry.match(/^(.+?) was afflicted by (.+?) \((.+?)\)\.$/);
+    const koMatch = entry.match(/^(.+?) was knocked out\.$/);
+    const turnMatch = entry.match(/^Turn (\d+) ended\./);
+
+    if (hitMatch) {
+      line = fillAnnouncerLine(pickLine(announcerScripts.hit), { pokemon: hitMatch[1], move: hitMatch[2], target: hitMatch[3] });
+    } else if (superMatch) {
+      line = fillAnnouncerLine(pickLine(announcerScripts.super), { target: superMatch[1] });
+    } else if (resistMatch) {
+      line = fillAnnouncerLine(pickLine(announcerScripts.resist), { target: resistMatch[1] });
+    } else if (missMatch) {
+      line = fillAnnouncerLine(pickLine(announcerScripts.miss), { pokemon: missMatch[1], move: missMatch[2], target: missMatch[3] });
+    } else if (statusMatch) {
+      line = fillAnnouncerLine(pickLine(announcerScripts.status), { pokemon: statusMatch[2], target: statusMatch[1] });
+    } else if (koMatch) {
+      line = fillAnnouncerLine(pickLine(announcerScripts.ko), { target: koMatch[1], pokemon: koMatch[1] });
+    } else if (switchMatch) {
+      line = fillAnnouncerLine(pickLine(announcerScripts.switch), { pokemon: switchMatch[1] });
+    } else if (/blocked .+ with|braced itself with|set Quick Guard|set Wide Guard/i.test(entry)) {
+      line = fillAnnouncerLine(pickLine(announcerScripts.protect), { pokemon: entry.split(' ')[0] });
+    } else if (turnMatch) {
+      line = fillAnnouncerLine(pickLine(announcerScripts.turn), { turn: Number(turnMatch[1]) + 1 });
+    } else if (/Mega Evolved|set .* terrain|changed the weather|called in snow|twisted the dimensions|returned the dimensions to normal/i.test(entry)) {
+      line = entry;
+    } else if (/woke up|thawed out|is fully paralyzed|is asleep|is frozen solid/i.test(entry)) {
+      line = entry;
+    }
+
+    if (line) {
+      lines.push(announcerStyleLine(style, line));
+    }
+  }
+
+  if (current.winner) {
+    const performers = topBattlePerformers(current);
+    lines.push(
+      announcerStyleLine(
+        style,
+        fillAnnouncerLine(pickLine(announcerScripts.finish), {
+          winner: current.winner === 'player' ? current.player.name : current.opponent.name,
+        }),
+      ),
+    );
+    if (performers[0]) {
+      lines.push(
+        announcerStyleLine(
+          style,
+          fillAnnouncerLine(pickLine(announcerScripts.star), {
+            pokemon: performers[0].name,
+          }),
+        ),
+      );
+    }
+  }
+
+  return lines;
 }
 
 function App() {
@@ -584,10 +1191,24 @@ function App() {
   const [simBringOrder, setSimBringOrder] = useState<number[]>([]);
   const [simBattle, setSimBattle] = useState<SimulatorBattleState | null>(null);
   const [simChoiceDrafts, setSimChoiceDrafts] = useState<Record<number, ChoiceDraft>>({});
+  const [simTurnTimerEnabled, setSimTurnTimerEnabled] = useState(false);
+  const [simTurnClock, setSimTurnClock] = useState(30);
+  const [simTurnNotice, setSimTurnNotice] = useState<string | null>(null);
+  const [simAnnouncerEnabled, setSimAnnouncerEnabled] = useState(false);
+  const [simAnnouncerStyle, setSimAnnouncerStyle] = useState<AnnouncerStyle>('Arena');
+  const [simAnnouncerRate, setSimAnnouncerRate] = useState(1);
+  const [simAnnouncerFeed, setSimAnnouncerFeed] = useState<string[]>([]);
+  const [simTurnReviews, setSimTurnReviews] = useState<SimulatorTurnReview[]>([]);
   const [simCountdown, setSimCountdown] = useState(0);
   const [simPreviewMessage, setSimPreviewMessage] = useState<string | null>(null);
   const [lastSavedAt, setLastSavedAt] = useState<string | null>(null);
   const [saveMessage, setSaveMessage] = useState('Autosave ready');
+  const [selectedReplayId, setSelectedReplayId] = useState<string | null>(null);
+  const simBattleRef = useRef<SimulatorBattleState | null>(null);
+  const simChoiceDraftsRef = useRef<Record<number, ChoiceDraft>>({});
+  const simTurnReviewsRef = useRef<SimulatorTurnReview[]>([]);
+  const previousBattleRef = useRef<SimulatorBattleState | null>(null);
+  const recordedBattleKeyRef = useRef<string | null>(null);
 
   const team = activeTeamFromState(state);
   const analysis = analyzeTeam(team);
@@ -617,6 +1238,11 @@ function App() {
   const coreArchetypeSuggestions = suggestArchetypesForCore(lockedNamesFromValidations(aiLockedValidations), aiFormat);
   const selectedSlotBlockedItemIds = useMemo(() => teammateItemIds(team, selectedSlotIndex), [team, selectedSlotIndex]);
   const saveStatusLabel = lastSavedAt ? `${saveMessage} at ${new Date(lastSavedAt).toLocaleTimeString()}` : 'Local autosave is ready.';
+  const profileHistorySummary = battleRecordSummary(state.profile.matchHistory);
+  const selectedReplay =
+    state.profile.matchHistory.find((record) => record.id === selectedReplayId) ??
+    state.profile.matchHistory[state.profile.matchHistory.length - 1] ??
+    null;
 
   const selectedResult = attackerMoveResults.find(({ move }) => move.id === selectedDamageMoveId)?.result ?? null;
 
@@ -648,6 +1274,99 @@ function App() {
     return () => window.clearInterval(handle);
   }, [simPreview]);
 
+  useEffect(() => {
+    simBattleRef.current = simBattle;
+  }, [simBattle]);
+
+  useEffect(() => {
+    simChoiceDraftsRef.current = simChoiceDrafts;
+  }, [simChoiceDrafts]);
+
+  useEffect(() => {
+    simTurnReviewsRef.current = simTurnReviews;
+  }, [simTurnReviews]);
+
+  useEffect(() => {
+    if (!simBattle) {
+      previousBattleRef.current = null;
+      recordedBattleKeyRef.current = null;
+      setSimTurnClock(30);
+      return;
+    }
+
+    if (simBattle.stage === 'battle' && !simBattle.winner) {
+      pushAnnouncerLines([
+        announcerStyleLine(simAnnouncerStyle, fillAnnouncerLine(pickLine(announcerScripts.turn), { turn: simBattle.turn })),
+      ]);
+    }
+
+    const previousBattle = previousBattleRef.current;
+    const commentaryLines = announcerLinesFromBattleUpdate(previousBattle, simBattle, simAnnouncerStyle);
+    if (commentaryLines.length) {
+      pushAnnouncerLines(commentaryLines);
+    }
+
+    if (simBattle.winner) {
+      const battleKey = `${simBattle.winner}-${simBattle.turn}-${simBattle.player.units.map((unit) => unit.pokemon.id).join('|')}-${simBattle.opponent.units.map((unit) => unit.pokemon.id).join('|')}`;
+      if (recordedBattleKeyRef.current !== battleKey) {
+        const record = buildSimulatorMatchRecord(
+          simBattle,
+          team.name,
+          simAnnouncerEnabled,
+          simTurnTimerEnabled,
+          [...simBattle.log].reverse(),
+          simTurnReviewsRef.current,
+        );
+        setState((current) => ({
+          ...current,
+          profile: {
+            ...current.profile,
+            matchHistory: [...current.profile.matchHistory, record].slice(-80),
+          },
+        }));
+        setSelectedReplayId(record.id);
+        recordedBattleKeyRef.current = battleKey;
+      }
+    }
+
+    previousBattleRef.current = simBattle;
+  }, [simBattle, simAnnouncerEnabled, simAnnouncerStyle, simTurnTimerEnabled, team.name]);
+
+  useEffect(() => {
+    if (!simBattle || simBattle.stage !== 'battle' || simBattle.winner || !simTurnTimerEnabled) {
+      setSimTurnClock(30);
+      return;
+    }
+
+    setSimTurnClock(30);
+    const intervalHandle = window.setInterval(() => {
+      setSimTurnClock((current) => Math.max(0, current - 1));
+    }, 1000);
+    const timeoutHandle = window.setTimeout(() => {
+      resolveSimulatorTurn(true);
+    }, 30_000);
+
+    return () => {
+      window.clearInterval(intervalHandle);
+      window.clearTimeout(timeoutHandle);
+    };
+  }, [simBattle?.turn, simBattle?.stage, simBattle?.winner, simTurnTimerEnabled]);
+
+  useEffect(() => {
+    if (!simBattle || simBattle.stage !== 'battle' || simBattle.winner || !simAnnouncerEnabled || !simTurnTimerEnabled) {
+      return;
+    }
+
+    if ([20, 10, 5].includes(simTurnClock)) {
+      pushAnnouncerLines([
+        announcerStyleLine(
+          simAnnouncerStyle,
+          `${fillAnnouncerLine(pickLine(announcerScripts.turn), { turn: simBattle.turn })} ${simTurnClock} seconds remain on the move clock.`,
+        ),
+      ]);
+    }
+  }, [simTurnClock, simBattle, simAnnouncerEnabled, simTurnTimerEnabled, simAnnouncerStyle]);
+
   function updateState(mutator: (draft: ReturnType<typeof createDefaultState>) => ReturnType<typeof createDefaultState>) {
     setState((current) => mutator(current));
   }
@@ -656,6 +1375,113 @@ function App() {
     saveState(state);
     setLastSavedAt(new Date().toISOString());
     setSaveMessage(message);
+  }
+
+  function pushAnnouncerLines(lines: string[]) {
+    const nextLines = lines.filter(Boolean);
+    if (!simAnnouncerEnabled || !nextLines.length) {
+      return;
+    }
+
+    setSimAnnouncerFeed((current) => [...nextLines.slice().reverse(), ...current].slice(0, 14));
+    speakAnnouncerLines(nextLines, simAnnouncerRate);
+  }
+
+  function buildSimulatorChoices(
+    battle: SimulatorBattleState,
+    drafts: Record<number, ChoiceDraft>,
+    timedOut = false,
+  ) {
+    const requiredActors = battle.player.active
+      .map((unitIndex, actor) => ({ unitIndex, actor }))
+      .filter(({ unitIndex }) => {
+        const unit = battle.player.units[unitIndex];
+        return unit && !unit.fainted;
+      })
+      .map(({ actor }) => actor);
+
+    const notices: string[] = [];
+    const choices: SimulatorChoice[] = [];
+    const reviews: SimulatorTurnReview[] = [];
+
+    for (const actor of requiredActors) {
+      const unit = battle.player.units[battle.player.active[actor]];
+      if (!unit) {
+        continue;
+      }
+
+      const legalMoves = legalMovesForUnit(unit);
+      const fallbackMove = legalMoves[0] ?? unit.pokemon.movePool.find((move) => unit.build.moveIds.includes(move.id)) ?? unit.pokemon.movePool[0] ?? null;
+      const randomTarget = battle.opponent.active.length ? Math.floor(Math.random() * battle.opponent.active.length) : 0;
+      const draft = drafts[actor];
+      let choice: SimulatorChoice;
+
+      if (draft?.type === 'switch') {
+        const switchIsLegal = battle.player.bench.includes(draft.switchTarget) && !battle.player.units[draft.switchTarget]?.fainted;
+        if (switchIsLegal) {
+          choice = {
+            type: 'switch',
+            actor,
+            target: draft.switchTarget,
+          } satisfies SimulatorChoice;
+        } else {
+          choice = {
+            type: 'move',
+            actor,
+            moveId: fallbackMove?.id ?? '',
+            target: randomTarget,
+          } satisfies SimulatorChoice;
+        }
+      } else if (draft && fallbackMove) {
+        const selectedMove = legalMoves.find((move) => move.id === draft.moveId) ?? fallbackMove;
+        choice = {
+          type: draft.type,
+          actor,
+          moveId: selectedMove.id,
+          target: draft.target,
+        } satisfies SimulatorChoice;
+      } else {
+        choice = {
+          type: 'move',
+          actor,
+          moveId: fallbackMove?.id ?? '',
+          target: randomTarget,
+        } satisfies SimulatorChoice;
+      }
+
+      const wasAutoSelected =
+        timedOut &&
+        (!draft || (draft.type !== 'switch' && !legalMoves.some((move) => move.id === draft.moveId)));
+      if (wasAutoSelected) {
+        notices.push(`Your ${unit.pokemon.displayName} move was randomly selected due to no selection made.`);
+      }
+
+      choices.push(choice);
+      const review = buildTurnReviewEntry(battle, actor, choice);
+      if (review) {
+        reviews.push(review);
+      }
+    }
+
+    return {
+      choices,
+      notices,
+      reviews,
+    };
+  }
+
+  function resolveSimulatorTurn(timedOut = false) {
+    const currentBattle = simBattleRef.current;
+    if (!currentBattle || currentBattle.stage !== 'battle') {
+      return;
+    }
+
+    const { choices, notices, reviews } = buildSimulatorChoices(currentBattle, simChoiceDraftsRef.current, timedOut);
+    const nextBattle = resolveTurn(currentBattle, choices);
+    setSimBattle(nextBattle);
+    setSimChoiceDrafts({});
+    setSimTurnReviews((current) => [...current, ...reviews]);
+    setSimTurnNotice(notices.length ? notices.join(' ') : null);
   }
 
   function enforceManualItemClause(nextTeam: Team, preferredSlotIndex?: number) {
@@ -867,6 +1693,10 @@ function App() {
     setSimBattle(null);
     setSimBringOrder([]);
     setSimChoiceDrafts({});
+    setSimTurnReviews([]);
+    setSimAnnouncerFeed([]);
+    setSimTurnNotice(null);
+    setSelectedReplayId(null);
     setSelectedSlotIndex(0);
   }
 
@@ -886,6 +1716,22 @@ function App() {
     setSimPreviewMessage(null);
     setSimBattle(null);
     setSimChoiceDrafts({});
+    setSimTurnReviews([]);
+    setSimAnnouncerFeed([]);
+    setSimTurnNotice(null);
+    if (simAnnouncerEnabled) {
+      const spotlight = filledSlotIndices(opponentTeam)
+        .slice(0, 2)
+        .map((slotIndex) => {
+          const build = opponentTeam.slots[slotIndex];
+          return (selectedPokemon(build) ?? resolvePokemonForm(build))?.displayName ?? 'that threat';
+        })
+        .join(' and ');
+      pushAnnouncerLines([
+        announcerStyleLine(simAnnouncerStyle, fillAnnouncerLine(pickLine(announcerScripts.preview), { pokemon: spotlight || 'the preview board' })),
+        announcerStyleLine(simAnnouncerStyle, fillAnnouncerLine(pickLine(announcerScripts.preview), { pokemon: spotlight || 'the opening core' })),
+      ]);
+    }
   }
 
   function toggleBringIndex(slotIndex: number) {
@@ -919,6 +1765,8 @@ function App() {
     setSimPreview(null);
     setSimPreviewMessage(null);
     setSimChoiceDrafts({});
+    setSimTurnClock(30);
+    setSimTurnNotice(null);
   }
 
   function updateChoiceDraft(actor: number, partial: Partial<ChoiceDraft>) {
@@ -937,48 +1785,7 @@ function App() {
   }
 
   function submitSimTurn() {
-    if (!simBattle || simBattle.stage !== 'battle') {
-      return;
-    }
-
-    const requiredActors = simBattle.player.active
-      .map((unitIndex, actor) => ({ unitIndex, actor }))
-      .filter(({ unitIndex }) => {
-        const unit = simBattle.player.units[unitIndex];
-        return unit && !unit.fainted;
-      })
-      .map(({ actor }) => actor);
-
-    const choices: SimulatorChoice[] = requiredActors.map((actor) => {
-      const draft = simChoiceDrafts[actor];
-      if (!draft) {
-        const unit = simBattle.player.units[simBattle.player.active[actor]];
-        return {
-          type: 'move',
-          actor,
-          moveId: unit?.build.moveIds[0] ?? '',
-          target: 0,
-        } satisfies SimulatorChoice;
-      }
-
-      if (draft.type === 'switch') {
-        return {
-          type: 'switch',
-          actor,
-          target: draft.switchTarget,
-        } satisfies SimulatorChoice;
-      }
-
-      return {
-        type: draft.type,
-        actor,
-        moveId: draft.moveId,
-        target: draft.target,
-      } satisfies SimulatorChoice;
-    });
-
-    setSimBattle((current) => (current ? resolveTurn(current, choices) : current));
-    setSimChoiceDrafts({});
+    resolveSimulatorTurn(false);
   }
 
   return (
@@ -1681,12 +2488,35 @@ function App() {
                   ))}
                 </select>
               </label>
+              <div className="control-grid two">
+                <ToggleField label="30s Turn Timer" checked={simTurnTimerEnabled} onChange={setSimTurnTimerEnabled} />
+                <ToggleField label="Announcer" checked={simAnnouncerEnabled} onChange={setSimAnnouncerEnabled} />
+              </div>
+              {simAnnouncerEnabled ? (
+                <div className="control-grid two">
+                  <label className="field">
+                    <span>Announcer Style</span>
+                    <select value={simAnnouncerStyle} onChange={(event) => setSimAnnouncerStyle(event.target.value as AnnouncerStyle)}>
+                      {(['Arena', 'Championship', 'Analyst'] as AnnouncerStyle[]).map((style) => (
+                        <option key={style} value={style}>{style}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="field">
+                    <span>Male Announcer Speed</span>
+                    <input type="range" min={0.85} max={1.15} step={0.05} value={simAnnouncerRate} onChange={(event) => setSimAnnouncerRate(Number(event.target.value))} />
+                    <small>{simAnnouncerRate.toFixed(2)}x speech speed</small>
+                  </label>
+                </div>
+              ) : null}
               <button className="action-button primary" onClick={startSimulatorPreview}>Generate Viable Opponent</button>
               <div className="notes-list compact-scroll">
                 <div className="note-row">The simulator uses the live roster, your saved spreads, the current damage engine, and a battle sandbox with targeting, switching, preview order, and AI decisions.</div>
                 <div className="note-row">Opponent preview now behaves like ranked team preview: you see all six species, but their items, abilities, and moves stay hidden until battle actions reveal them.</div>
                 <div className="note-row">Mega-capable Pokemon can now choose a dedicated Mega Evolve action, trigger their Mega ability before moving, and only one Mega can be used per side in each battle.</div>
                 <div className="note-row">Preview stays visible for 60 seconds so you can plan your four before the battle opens, then the AI secretly locks its own four when the battle starts.</div>
+                <div className="note-row">{simTurnTimerEnabled ? 'Turn timer is armed. If a player slot is left without a valid selection when 30 seconds expires, the app will auto-pick a random move and random live target for that Pokemon.' : 'Turn timer is off. Resolve turns manually at your own pace.'}</div>
+                <div className="note-row">{simAnnouncerEnabled ? 'Announcer is on with a male-voice speech pass, preview reads, live hit and KO calls, turn-clock reminders, and a post-game star performer callout.' : 'Announcer is off. Toggle it on to hear preview commentary, move calls, KO hype, and post-game highlights.'}</div>
               </div>
             </div>
 
@@ -1748,12 +2578,22 @@ function App() {
                     <BattleSideView side={simBattle.opponent} format={simBattle.format} />
                     <div className="sim-center-column">
                       <div className="result-grid">
-                        <InfoStat label="Weather" value={simBattle.environment.weather} />
-                        <InfoStat label="Terrain" value={simBattle.environment.terrain} />
+                        <InfoStat label="Weather" value={weatherFieldLabel(simBattle)} />
+                        <InfoStat label="Terrain" value={terrainFieldLabel(simBattle)} />
                         <InfoStat label="Trick Room" value={simBattle.trickRoomTurns ? `${simBattle.trickRoomTurns} turns` : 'Off'} />
+                        <InfoStat label="Gravity" value={simBattle.gravityTurns ? `${simBattle.gravityTurns} turns` : 'Off'} />
                         <InfoStat label="Your Tailwind" value={simBattle.player.tailwindTurns ? `${simBattle.player.tailwindTurns}` : 'Off'} />
                         <InfoStat label="AI Tailwind" value={simBattle.opponent.tailwindTurns ? `${simBattle.opponent.tailwindTurns}` : 'Off'} />
+                        <InfoStat label="Move Clock" value={simTurnTimerEnabled && !simBattle.winner ? `${simTurnClock}s` : 'Off'} />
                       </div>
+                      {simTurnNotice ? <div className="note-row compact-note">{simTurnNotice}</div> : null}
+                      {simAnnouncerEnabled ? (
+                        <div className="notes-list compact-scroll announcer-feed">
+                          {simAnnouncerFeed.length ? simAnnouncerFeed.map((line, index) => (
+                            <div key={`${line}-${index}`} className="note-row compact-note announcer-line">{line}</div>
+                          )) : <div className="note-row compact-note">Announcer is standing by for preview reads, live hit calls, KO updates, and the final star-player segment.</div>}
+                        </div>
+                      ) : null}
                       <div className="notes-list scroll-stack sim-log">
                         {simBattle.log.slice(0, 16).map((entry, index) => (
                           <div key={`${entry}-${index}`} className="note-row">{entry}</div>
@@ -1822,7 +2662,7 @@ function App() {
                                 <>
                                   <label className="field">
                                     <span>{effectiveDraftType === 'mega' ? 'Move After Mega' : 'Move'}</span>
-                                    <select value={selectedMoveId} onChange={(event) => updateChoiceDraft(actor, { moveId: event.target.value })}>
+                                    <select value={selectedMoveId} onChange={(event) => updateChoiceDraft(actor, { moveId: event.target.value })} disabled={!legalMoves.length}>
                                       {legalMoves.map((move) => {
                                         return <option key={move.id} value={move.id}>{move.name}</option>;
                                       })}
@@ -1842,6 +2682,11 @@ function App() {
                                       {note}
                                     </div>
                                   ))}
+                                  {!legalMoves.length ? (
+                                    <div className="note-row compact-note">
+                                      No legal move is currently available under the active locks. If the turn timer expires here, the sandbox will attempt a fallback line automatically.
+                                    </div>
+                                  ) : null}
                                   {effectiveDraftType === 'mega' && unit.megaPokemon ? (
                                     <div className="note-row compact-note">
                                       {unit.basePokemon.displayName} will Mega Evolve into {unit.megaPokemon.displayName} before acting this turn.
@@ -1912,26 +2757,76 @@ function App() {
             </div>
 
             <div className="panel tall">
-              <SectionHeader title="Save Data" subtitle="Everything in this app is stored in local browser storage for the current machine." />
-              <div className="notes-list scroll-stack">
+              <SectionHeader title="Battle Growth" subtitle="Track your simulator reps, win rate trend, and the Pokemon that keep carrying your battles." />
+              <div className="result-grid">
+                <InfoStat label="Matches" value={`${state.profile.matchHistory.length}`} />
+                <InfoStat label="Wins" value={`${profileHistorySummary.wins}`} />
+                <InfoStat label="Losses" value={`${profileHistorySummary.losses}`} />
+                <InfoStat label="Win Rate" value={`${profileHistorySummary.winRate}%`} />
+                <InfoStat label="Best Streak" value={`${profileHistorySummary.bestStreak}`} />
+                <InfoStat label="Avg Turns" value={profileHistorySummary.averageTurns} />
+              </div>
+              <div className="notes-list scroll-stack growth-chart-list">
+                {profileHistorySummary.growthChart.length ? profileHistorySummary.growthChart.map((record) => (
+                  <button key={record.id} className={selectedReplay?.id === record.id ? 'saved-team-card active growth-row' : 'saved-team-card growth-row'} onClick={() => setSelectedReplayId(record.id)}>
+                    <div className="growth-row-copy">
+                      <strong>{new Date(record.playedAt).toLocaleDateString()} - {record.result}</strong>
+                      <small>{record.teamName} | {record.format} | Star: {record.starPokemon ?? 'None logged'}</small>
+                    </div>
+                    <div className="growth-row-bar">
+                      <div className="growth-row-track">
+                        <div className="growth-row-fill" style={{ width: `${record.cumulativeWinRate}%` }} />
+                      </div>
+                      <span>{record.cumulativeWinRate}% trend</span>
+                    </div>
+                  </button>
+                )) : (
+                  <div className="note-row">No simulator matches logged yet. Run battles in the Simulator to build a growth chart and replay library.</div>
+                )}
+              </div>
+            </div>
+
+            <div className="panel tall">
+              <SectionHeader title="Replay + Coaching" subtitle="Review full match logs, then study the turns where a stronger line was available." />
+              {selectedReplay ? (
+                <>
+                  <div className="result-grid">
+                    <InfoStat label="Result" value={selectedReplay.result} />
+                    <InfoStat label="Format" value={selectedReplay.format} />
+                    <InfoStat label="Star" value={selectedReplay.starPokemon ?? 'None'} />
+                    <InfoStat label="Timer" value={selectedReplay.timerEnabled ? '30s On' : 'Off'} />
+                    <InfoStat label="Announcer" value={selectedReplay.announcerEnabled ? 'On' : 'Off'} />
+                    <InfoStat label="Turns" value={`${selectedReplay.turns}`} />
+                  </div>
+                  <div className="notes-list compact-scroll replay-stack">
+                    <div className="note-row"><strong>Opponent Preview:</strong> {selectedReplay.opponentPreview.join(', ')}</div>
+                    <div className="note-row"><strong>Top Performers:</strong> {selectedReplay.topPerformers.join(', ') || 'No standout logged'}</div>
+                    {selectedReplay.turnReviews.map((review, index) => (
+                      <div key={`${selectedReplay.id}-review-${index}`} className="note-row">
+                        <strong>{`Turn ${review.turn} - ${review.pokemon}`}</strong> {review.chosenAction}. {review.betterAction ? `Better line: ${review.betterAction}.` : 'No clearly stronger line flagged.'} {review.outcomeDelta}
+                      </div>
+                    ))}
+                    {selectedReplay.battleLog.map((entry, index) => (
+                      <div key={`${selectedReplay.id}-log-${index}`} className="note-row">{entry}</div>
+                    ))}
+                  </div>
+                </>
+              ) : (
+                <div className="empty-state">
+                  <strong>No replay selected yet.</strong>
+                  <span>Your next simulator battle will appear here with replay logs and turn-by-turn coaching notes.</span>
+                </div>
+              )}
+              <div className="notes-list">
                 <div className="note-row">Profile saved: {state.profile.trainerName || 'Not yet named'}</div>
                 <div className="note-row">Teams saved: {state.teams.length}</div>
                 <div className="note-row">Last local save: {lastSavedAt ? new Date(lastSavedAt).toLocaleString() : 'Waiting for first autosave'}</div>
                 <div className="note-row">Current roster source pages: {dataset.sourcePages.length}</div>
-                <div className="note-row">Layout mode: {state.profile.layoutMode}</div>
-                <div className="note-row">Resizable panels: {state.profile.resizablePanels ? 'On' : 'Off'}</div>
-                <div className="note-row">Community usage labels currently blend April-May 2026 Game8 usage and tier snapshots with local fallback scoring where public data is thin.</div>
+                <div className="note-row">Layout mode: {state.profile.layoutMode} | Resizable panels: {state.profile.resizablePanels ? 'On' : 'Off'}</div>
               </div>
-              <button className="action-button" onClick={() => persistNow('Full local save updated')}>Save Everything</button>
-              <button className="action-button danger" onClick={resetEverything}>Clear Local Save</button>
-            </div>
-
-            <div className="panel tall">
-              <SectionHeader title="What Still Needs Depth" subtitle="Current implementation opinion on the next layers worth adding." />
-              <div className="notes-list scroll-stack">
-                  <div className="note-row">The battle sandbox now covers preview, bringing four, switching, hazards, chained Protect rules, Quick Guard, Wide Guard, spread-target damage, live Mega Evolution turns, Tailwind, Trick Room, redirection, Encore, Disable, Taunt, Reflect, Light Screen, Safeguard, Gravity, and major switch-in abilities like Intimidate and weather setters.</div>
-                <div className="note-row">Status timing now follows the current Champions-style rules in the app: freeze can thaw at 25% per move attempt and always by the third turn, paralysis uses a 12.5% full-paralysis rate, and sleep can wake on turn two and always clears by turn three.</div>
-                <div className="note-row">Rare abilities and truly bespoke move scripts still exist at the edge of the roster, so the next best upgrade after this pass is a broader rare-effect table for one-off abilities, delayed effects, and niche end-of-turn interactions.</div>
+              <div className="team-actions">
+                <button className="action-button" onClick={() => persistNow('Full local save updated')}>Save Everything</button>
+                <button className="action-button danger" onClick={resetEverything}>Clear Local Save</button>
               </div>
             </div>
           </section>
@@ -2017,6 +2912,17 @@ function PokemonSpriteFrame({
         </span>
       ) : null}
       {syntheticMega ? <span className="mega-pill">Mega</span> : null}
+    </div>
+  );
+}
+
+function HiddenBenchFrame({ size = 'tiny' }: { size?: 'tiny' | 'mini' | 'standard' }) {
+  return (
+    <div className={`sprite-shell ${size} pokeball-shell`} aria-label="Hidden opponent backline slot">
+      <span className="pokeball-half pokeball-top" />
+      <span className="pokeball-half pokeball-bottom" />
+      <span className="pokeball-band" />
+      <span className="pokeball-core" />
     </div>
   );
 }
@@ -2135,10 +3041,12 @@ function BattleSideView({ side, format, friendly = false }: { side: SimulatorBat
       <div className="battle-bench-row">
         {side.bench.map((unitIndex) => {
           const unit = side.units[unitIndex];
+          const concealed = !friendly && !unit?.revealed;
           return unit ? (
-            <div key={unit.pokemon.id} className="battle-bench-card">
-              <PokemonSpriteFrame pokemon={unit.pokemon} size="tiny" statusBadge={simulatorStatusBadge(unit)} />
-              <small>{unit.pokemon.displayName}</small>
+            <div key={`${unit.pokemon.id}-${unitIndex}`} className={concealed ? 'battle-bench-card hidden-bench-card' : 'battle-bench-card'}>
+              {concealed ? <HiddenBenchFrame size="tiny" /> : <PokemonSpriteFrame pokemon={unit.pokemon} size="tiny" statusBadge={simulatorStatusBadge(unit)} />}
+              <small>{concealed ? 'Hidden backline' : unit.pokemon.displayName}</small>
+              {concealed ? <span>Reveals on first switch-in.</span> : null}
             </div>
           ) : null;
         })}

@@ -1102,6 +1102,54 @@ button {
   image-rendering: -webkit-optimize-contrast;
 }
 
+.pokeball-shell {
+  position: relative;
+  overflow: hidden;
+}
+
+.pokeball-half,
+.pokeball-band,
+.pokeball-core {
+  position: absolute;
+  pointer-events: none;
+}
+
+.pokeball-half {
+  left: 0;
+  width: 100%;
+  height: 50%;
+}
+
+.pokeball-top {
+  top: 0;
+  background: linear-gradient(180deg, #ff6f74, #d63f4a);
+}
+
+.pokeball-bottom {
+  bottom: 0;
+  background: linear-gradient(180deg, #f8fbff, #cfdceb);
+}
+
+.pokeball-band {
+  top: calc(50% - 4px);
+  left: 0;
+  width: 100%;
+  height: 8px;
+  background: rgba(7, 17, 31, 0.92);
+}
+
+.pokeball-core {
+  top: 50%;
+  left: 50%;
+  width: 18px;
+  height: 18px;
+  transform: translate(-50%, -50%);
+  border-radius: 999px;
+  border: 4px solid rgba(7, 17, 31, 0.92);
+  background: #f7fbff;
+  box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.16);
+}
+
 .status-badge {
   position: absolute;
   left: 8px;
@@ -1483,6 +1531,11 @@ button {
   text-align: center;
 }
 
+.hidden-bench-card span {
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+
 .sim-center-column {
   padding: 20px;
   display: grid;
@@ -1523,6 +1576,58 @@ button {
   border-radius: 16px;
   line-height: 1.55;
   background: rgba(255, 255, 255, 0.03);
+}
+
+.announcer-feed {
+  max-height: 220px;
+}
+
+.announcer-line {
+  border-color: rgba(255, 186, 109, 0.22);
+  background: rgba(255, 186, 109, 0.08);
+}
+
+.growth-chart-list,
+.replay-stack {
+  max-height: 420px;
+}
+
+.growth-row {
+  width: 100%;
+  display: grid;
+  gap: 10px;
+}
+
+.growth-row-copy {
+  display: grid;
+  gap: 4px;
+}
+
+.growth-row-bar {
+  display: grid;
+  gap: 8px;
+}
+
+.growth-row-track {
+  position: relative;
+  width: 100%;
+  height: 12px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.growth-row-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, rgba(102, 216, 165, 0.92), rgba(94, 199, 255, 0.9));
+}
+
+.growth-row-bar span {
+  display: inline-block;
+  margin-top: 10px;
+  color: var(--muted);
+  font-size: 0.78rem;
 }
 
 .info-card.compact {

@@ -144,6 +144,30 @@ export interface Team {
   updatedAt: string;
 }
 
+export interface SimulatorMatchRecord {
+  id: string;
+  playedAt: string;
+  format: BattleFormat;
+  teamName: string;
+  result: 'Win' | 'Loss';
+  turns: number;
+  opponentPreview: string[];
+  starPokemon: string | null;
+  topPerformers: string[];
+  announcerEnabled: boolean;
+  timerEnabled: boolean;
+  battleLog: string[];
+  turnReviews: SimulatorTurnReview[];
+}
+
+export interface SimulatorTurnReview {
+  turn: number;
+  pokemon: string;
+  chosenAction: string;
+  betterAction: string | null;
+  outcomeDelta: string;
+}
+
 export interface Profile {
   trainerName: string;
   favoriteFormat: BattleFormat;
@@ -151,6 +175,7 @@ export interface Profile {
   offMetaBias: number;
   layoutMode: LayoutMode;
   resizablePanels: boolean;
+  matchHistory: SimulatorMatchRecord[];
 }
 
 export interface EnvironmentState {

@@ -476,6 +476,7 @@ export function createDefaultState(): AppState {
       offMetaBias: 50,
       layoutMode: 'Auto',
       resizablePanels: true,
+      matchHistory: [],
     },
     teams: [team],
     activeTeamId: team.id,
