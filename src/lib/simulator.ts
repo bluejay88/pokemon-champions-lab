@@ -985,7 +985,7 @@ function simultaneousSwitchInOrder(state: SimulatorBattleState) {
   return queued;
 }
 
-function legalMovesForUnit(unit: SimUnit) {
+export function legalMovesForUnit(unit: SimUnit) {
   const fullMoveList = unit.build.moveIds
     .map((moveId) => findMove(unit, moveId))
     .filter((move): move is PokemonMove => move !== null);

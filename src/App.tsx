@@ -1,5 +1,5 @@
 import { startTransition, useDeferredValue, useEffect, useMemo, useState } from 'react';
-import { analyzeTeam, archetypeLibrary, describeBuildRole, generateTeamPlans, recommendMoveIds, suggestArchetypesForCore } from './lib/ai';
+import { analyzeTeam, archetypeLibrary, describeBuildRole, generateTeamPlans, recommendMoveIds, suggestArchetypesForCore, validateLockedPokemonInputs } from './lib/ai';
 import {
   applyEffortValue,
   battleFormats,
@@ -40,7 +40,7 @@ import {
 } from './lib/champions';
 import { calculateDamage, summaryForResult } from './lib/damage';
 import { clearState, loadState, saveState } from './lib/storage';
-import { advancePreviewToBattle, createSimulatorBattle, resolveTurn } from './lib/simulator';
+import { advancePreviewToBattle, createSimulatorBattle, legalMovesForUnit, resolveTurn } from './lib/simulator';
 import { getMoveUsageInsight, getPokemonUsageInsight, getPopularPresetPatch, getPopularPresetSummary } from './lib/usage';
 import type {
   BattleFormat,
@@ -53,7 +53,7 @@ import type {
   TeamAnalysis,
   Team,
 } from './types';
-import type { SimulatorBattleState, SimulatorChoice } from './lib/simulator';
+import type { SimUnit, SimulatorBattleState, SimulatorChoice } from './lib/simulator';
 
 type SimulatorPreviewState = {
   format: BattleFormat;
@@ -68,6 +68,19 @@ type ChoiceDraft = {
   switchTarget: number;
 };
 
+type StatusBadgeTone = 'burn' | 'freeze' | 'paralysis' | 'poison' | 'sleep' | 'toxic';
+type StatusBadge = {
+  label: string;
+  tone: StatusBadgeTone;
+  title: string;
+};
+type BattleTag = {
+  key: string;
+  label: string;
+  tone: 'neutral' | 'positive' | 'negative' | 'warning';
+  title: string;
+};
+
 const appTabs: { id: BattleTab; label: string; short: string; description: string }[] = [
   { id: 'team-builder', label: 'Team Builder', short: 'Build', description: 'Craft, label, and save up to ten squads.' },
   { id: 'damage-lab', label: 'Damage Lab', short: 'Calc', description: 'Run both-way damage lines with items and Mega toggles.' },
@@ -80,6 +93,39 @@ const appTabs: { id: BattleTab; label: string; short: string; description: strin
 
 const brandPokemonIcons = ['Bellibolt', 'Jolteon', 'Sableye', 'Gengar', 'Mega Alakazam', 'Mega Clefable', 'Garchomp'];
 const layoutModes: LayoutMode[] = ['Auto', 'Stretch', 'Focus'];
+const pokemonTypeOptions = ['Any', ...[...new Set(dataset.pokemon.flatMap((pokemon) => pokemon.types))].sort()];
+const simulatorStatusBadges: Record<Exclude<PokemonBuild['status'], 'healthy'>, StatusBadge> = {
+  burn: {
+    label: 'BRN',
+    tone: 'burn',
+    title: 'Burned: chip damage each turn and physical damage is reduced unless another effect overrides it.',
+  },
+  freeze: {
+    label: 'FRZ',
+    tone: 'freeze',
+    title: 'Frozen: per current Champions rules, the user has a 25% thaw chance on each move attempt and always thaws by the third frozen turn.',
+  },
+  paralysis: {
+    label: 'PAR',
+    tone: 'paralysis',
+    title: 'Paralyzed: per current Champions rules, Speed is halved and there is a 12.5% chance of full paralysis on move attempt.',
+  },
+  poison: {
+    label: 'PSN',
+    tone: 'poison',
+    title: 'Poisoned: standard end-of-turn poison chip applies unless an immunity or healing effect overrides it.',
+  },
+  sleep: {
+    label: 'SLP',
+    tone: 'sleep',
+    title: 'Asleep: per current Champions rules, wake checks start on turn 2 of sleep and wake is guaranteed by turn 3.',
+  },
+  toxic: {
+    label: 'TOX',
+    tone: 'toxic',
+    title: 'Badly Poisoned: escalating poison chip is tracked turn by turn unless an immunity or healing effect overrides it.',
+  },
+};
 const simulatorSupportMoveNames = new Set([
   'Protect',
   'Detect',
@@ -255,6 +301,31 @@ function planSignature(plan: GeneratedTeamPlan | null) {
     .join('|');
 }
 
+function lockedNamesFromValidations(validations: ReturnType<typeof validateLockedPokemonInputs>) {
+  return validations
+    .map((validation) => {
+      if (!validation.input.trim()) {
+        return null;
+      }
+      return validation.isValid
+        ? validation.matchedPokemon?.baseSpecies ?? null
+        : validation.autoReplacement?.baseSpecies ?? null;
+    })
+    .filter((name): name is string => Boolean(name));
+}
+
+function displayNamesFromValidations(validations: ReturnType<typeof validateLockedPokemonInputs>, fallbackValues: string[]) {
+  return validations.map((validation, index) => {
+    if (!validation.input.trim()) {
+      return '';
+    }
+    if (validation.isValid) {
+      return validation.matchedPokemon?.displayName ?? fallbackValues[index] ?? validation.input.trim();
+    }
+    return validation.autoReplacement?.displayName ?? fallbackValues[index] ?? validation.input.trim();
+  });
+}
+
 function randomOpponentTeam(format: BattleFormat, offMetaBias: number) {
   const archetype = archetypeLibrary[Math.floor(Math.random() * archetypeLibrary.length)] ?? archetypeLibrary[0];
   const plans = generateTeamPlans(archetype.id, format, offMetaBias, [], 6, true);
@@ -399,6 +470,89 @@ function simulatorBringSummary(team: Team, format: BattleFormat, bringOrder: num
     : `Doubles leads: ${leads[0]} and ${leads[1]}. Select ${4 - bringOrder.length} more Pokemon for the backline.`;
 }
 
+function simulatorStatusBadge(unit: SimUnit): StatusBadge | null {
+  return unit.build.status === 'healthy' ? null : simulatorStatusBadges[unit.build.status];
+}
+
+function simulatorBattleTags(unit: SimUnit) {
+  const tags: BattleTag[] = [];
+  if (unit.tauntTurns > 0) {
+    tags.push({
+      key: 'taunt',
+      label: `Taunt ${unit.tauntTurns}`,
+      tone: 'warning',
+      title: 'Status moves are blocked while Taunt is active.',
+    });
+  }
+  if (unit.encoreTurns > 0 && unit.encoreMoveId) {
+    const encoreMove = unit.pokemon.movePool.find((move) => move.id === unit.encoreMoveId)?.name ?? 'Locked move';
+    tags.push({
+      key: 'encore',
+      label: `Encore ${unit.encoreTurns}`,
+      tone: 'warning',
+      title: `Encore is locking this Pokemon into ${encoreMove}.`,
+    });
+  }
+  if (unit.disableTurns > 0 && unit.disabledMoveId) {
+    const disabledMove = unit.pokemon.movePool.find((move) => move.id === unit.disabledMoveId)?.name ?? 'a move';
+    tags.push({
+      key: 'disable',
+      label: `Disable ${unit.disableTurns}`,
+      tone: 'negative',
+      title: `${disabledMove} cannot be selected while Disable is active.`,
+    });
+  }
+
+  const stageTags: Array<[keyof Pick<PokemonBuild, 'attackStage' | 'defenseStage' | 'specialAttackStage' | 'specialDefenseStage' | 'speedStage' | 'accuracyStage' | 'evasionStage'>, string]> = [
+    ['attackStage', 'Atk'],
+    ['defenseStage', 'Def'],
+    ['specialAttackStage', 'SpA'],
+    ['specialDefenseStage', 'SpD'],
+    ['speedStage', 'Spe'],
+    ['accuracyStage', 'Acc'],
+    ['evasionStage', 'Eva'],
+  ];
+  for (const [field, label] of stageTags) {
+    const value = unit.build[field];
+    if (!value) {
+      continue;
+    }
+    tags.push({
+      key: field,
+      label: `${label} ${value > 0 ? `+${value}` : value}`,
+      tone: value > 0 ? 'positive' : 'negative',
+      title: `${label} stage is currently ${value > 0 ? `+${value}` : value}.`,
+    });
+  }
+
+  return tags;
+}
+
+function simulatorRestrictionNotes(unit: SimUnit) {
+  const notes: string[] = [];
+  if (unit.tauntTurns > 0) {
+    notes.push(`Taunt is active for ${unit.tauntTurns} more turn${unit.tauntTurns === 1 ? '' : 's'}, so status moves are blocked.`);
+  }
+  if (unit.encoreTurns > 0 && unit.encoreMoveId) {
+    const encoreMove = unit.pokemon.movePool.find((move) => move.id === unit.encoreMoveId)?.name ?? 'the encored move';
+    notes.push(`Encore is active for ${unit.encoreTurns} more turn${unit.encoreTurns === 1 ? '' : 's'}, so this slot is locked into ${encoreMove} unless another restriction overrides it.`);
+  }
+  if (unit.disableTurns > 0 && unit.disabledMoveId) {
+    const disabledMove = unit.pokemon.movePool.find((move) => move.id === unit.disabledMoveId)?.name ?? 'the disabled move';
+    notes.push(`${disabledMove} is disabled for ${unit.disableTurns} more turn${unit.disableTurns === 1 ? '' : 's'}.`);
+  }
+  if (unit.build.status === 'freeze') {
+    notes.push('Freeze uses the current Champions rule set here: 25% thaw chance on each move attempt, guaranteed thaw by frozen turn 3.');
+  }
+  if (unit.build.status === 'sleep') {
+    notes.push('Sleep uses the current Champions rule set here: wake checks begin on sleep turn 2 and wake is guaranteed by sleep turn 3.');
+  }
+  if (unit.build.status === 'paralysis') {
+    notes.push('Paralysis uses the current Champions rate here: 12.5% full paralysis with Speed reduced to half.');
+  }
+  return notes;
+}
+
 function App() {
   const [state, setState] = useState(() => loadState());
   const [activeTab, setActiveTab] = useState<BattleTab>('team-builder');
@@ -416,6 +570,7 @@ function App() {
   const [aiRandomMode, setAiRandomMode] = useState(false);
   const [generatedPlans, setGeneratedPlans] = useState<GeneratedTeamPlan[]>([]);
   const [selectedGeneratedPlanId, setSelectedGeneratedPlanId] = useState<string | null>(null);
+  const [aiBuilderMessage, setAiBuilderMessage] = useState<string | null>(null);
   const [simFormat, setSimFormat] = useState<BattleFormat>(() => activeTeamFromState(loadState()).format);
   const [simPreview, setSimPreview] = useState<SimulatorPreviewState | null>(null);
   const [simBringOrder, setSimBringOrder] = useState<number[]>([]);
@@ -450,7 +605,8 @@ function App() {
     [attackerBuild, defenderBuild, defenderMoves, environment],
   );
   const selectedGeneratedPlan = generatedPlans.find((plan) => plan.id === selectedGeneratedPlanId) ?? generatedPlans[0] ?? null;
-  const coreArchetypeSuggestions = suggestArchetypesForCore(aiLockedNames.filter(Boolean), aiFormat);
+  const aiLockedValidations = useMemo(() => validateLockedPokemonInputs(aiLockedNames, aiFormat), [aiLockedNames, aiFormat]);
+  const coreArchetypeSuggestions = suggestArchetypesForCore(lockedNamesFromValidations(aiLockedValidations), aiFormat);
   const selectedSlotBlockedItemIds = useMemo(() => teammateItemIds(team, selectedSlotIndex), [team, selectedSlotIndex]);
   const saveStatusLabel = lastSavedAt ? `${saveMessage} at ${new Date(lastSavedAt).toLocaleTimeString()}` : 'Local autosave is ready.';
 
@@ -598,12 +754,34 @@ function App() {
   }
 
   function runAiBuilder() {
+    const validations = aiLockedValidations;
+    const unresolved = validations.filter((validation) => validation.input.trim() && !validation.isValid && !validation.autoReplacement);
+    if (unresolved.length) {
+      setAiBuilderMessage(`The AI Builder needs live Champions roster matches before it can lock every requested core. Check the replacement suggestions beneath those inputs.`);
+      return;
+    }
+
+    const resolvedLockedNames = lockedNamesFromValidations(validations);
+    const nextLockedNames = displayNamesFromValidations(validations, aiLockedNames);
+    if (nextLockedNames.some((name, index) => name !== aiLockedNames[index])) {
+      setAiLockedNames(nextLockedNames);
+    }
+
+    const replacementNotes = validations
+      .filter((validation) => validation.input.trim() && !validation.isValid && validation.autoReplacement)
+      .map((validation) => `${validation.input.trim()} -> ${validation.autoReplacement?.displayName}`);
+    setAiBuilderMessage(
+      replacementNotes.length
+        ? `The AI Builder kept your locked core legal with live Champions replacements: ${replacementNotes.join(', ')}.`
+        : 'Locked core validated against the live Champions dex.',
+    );
+
     startTransition(() => {
       const plans = generateTeamPlans(
         selectedArchetype,
         aiFormat,
         state.profile.offMetaBias,
-        aiLockedNames.filter((name) => name.trim()),
+        resolvedLockedNames,
         aiVariantCount,
         aiRandomMode,
       );
@@ -634,6 +812,38 @@ function App() {
       return nextTeam;
     });
     setActiveTab('team-builder');
+  }
+
+  function saveGeneratedPlanAsTeam(plan = selectedGeneratedPlan) {
+    if (!plan) {
+      return;
+    }
+
+    if (state.teams.length >= 10) {
+      setLastSavedAt(new Date().toISOString());
+      setSaveMessage('Team cap reached. Remove or duplicate a team before saving another AI draft.');
+      return;
+    }
+
+    const nextTeam = sanitizeTeamForChampions(buildTeamFromPlan(plan));
+    const existingNames = new Set(state.teams.map((entry) => entry.name));
+    let nextName = nextTeam.name.trim() || `AI Team ${state.teams.length + 1}`;
+    let suffix = 2;
+    while (existingNames.has(nextName)) {
+      nextName = `${nextTeam.name.trim() || 'AI Team'} ${suffix}`;
+      suffix += 1;
+    }
+    nextTeam.name = nextName;
+
+    setState((current) => ({
+      ...current,
+      teams: [...current.teams, nextTeam],
+      activeTeamId: nextTeam.id,
+    }));
+    setSelectedSlotIndex(0);
+    setActiveTab('team-builder');
+    setLastSavedAt(new Date().toISOString());
+    setSaveMessage(`Saved ${nextTeam.name} to your team list`);
   }
 
   function resetEverything() {
@@ -1203,12 +1413,45 @@ function App() {
                 </select>
               </label>
               <div className="locked-team-stack">
-                {aiLockedNames.map((name, index) => (
-                  <label key={index} className="field">
-                    <span>{index === 0 ? 'Favorite / Core Pokemon' : `Additional Pokemon ${index}`}</span>
-                    <input value={name} onChange={(event) => setAiLockedNames((current) => current.map((entry, currentIndex) => (currentIndex === index ? event.target.value : entry)))} placeholder={index === 0 ? 'Mandatory core like Garchomp, Castform, or Mega Gengar' : 'Optional locked teammate'} />
-                  </label>
-                ))}
+                {aiLockedNames.map((name, index) => {
+                  const validation = aiLockedValidations[index];
+                  const hasInput = Boolean(name.trim());
+                  return (
+                    <div key={index} className="locked-input-card">
+                      <label className="field">
+                        <span>{index === 0 ? 'Favorite / Core Pokemon' : `Additional Pokemon ${index}`}</span>
+                        <input value={name} onChange={(event) => setAiLockedNames((current) => current.map((entry, currentIndex) => (currentIndex === index ? event.target.value : entry)))} placeholder={index === 0 ? 'Mandatory core like Garchomp, Castform, or Mega Gengar' : 'Optional locked teammate'} />
+                      </label>
+                      {hasInput ? (
+                        <div className={validation.isValid ? 'validation-banner valid' : 'validation-banner invalid'}>
+                          <strong>{validation.isValid ? 'Live Dex Match' : 'Replacement Guard Rail'}</strong>
+                          <small>{validation.message}</small>
+                        </div>
+                      ) : null}
+                      {!validation.isValid && validation.suggestions.length ? (
+                        <div className="replacement-card-list">
+                          {validation.suggestions.map((suggestion) => (
+                            <button
+                              key={`${index}-${suggestion.pokemon.id}`}
+                              className="replacement-card"
+                              onClick={() =>
+                                setAiLockedNames((current) => current.map((entry, currentIndex) => (
+                                  currentIndex === index ? suggestion.pokemon.displayName : entry
+                                )))
+                              }
+                            >
+                              <div>
+                                <strong>{suggestion.pokemon.displayName}</strong>
+                                <small>{suggestion.pokemon.types.join(' / ')} · {suggestion.usageLabel}</small>
+                              </div>
+                              <span>{suggestion.reason}</span>
+                            </button>
+                          ))}
+                        </div>
+                      ) : null}
+                    </div>
+                  );
+                })}
               </div>
               <label className="field">
                 <span>Generated Team Count</span>
@@ -1230,6 +1473,7 @@ function App() {
               <button className="action-button primary ai-build-button" onClick={runAiBuilder}>
                 {aiRandomMode ? `Generate ${aiVariantCount} Random Teams` : `Generate ${aiVariantCount} Team Plans`}
               </button>
+              {aiBuilderMessage ? <div className="validation-banner info"><strong>AI Builder Update</strong><small>{aiBuilderMessage}</small></div> : null}
 
               <div className="notes-list scroll-stack compact-scroll">
                 {coreArchetypeSuggestions.map((note) => (
@@ -1308,6 +1552,9 @@ function App() {
                       </div>
 
                       <div className="team-actions">
+                        <button className="action-button primary" onClick={() => saveGeneratedPlanAsTeam(selectedGeneratedPlan)} disabled={state.teams.length >= 10}>
+                          {state.teams.length >= 10 ? 'Team List Full (10/10)' : 'Save as New Team'}
+                        </button>
                         <button className="action-button primary" onClick={() => applyGeneratedPlan(selectedGeneratedPlan)}>Apply to Active Team</button>
                         <button className="action-button" onClick={() => { applyGeneratedPlan(selectedGeneratedPlan); setActiveTab('analyzer'); }}>Apply + Analyze</button>
                         <button className="action-button" onClick={() => { applyGeneratedPlan(selectedGeneratedPlan); setActiveTab('simulator'); }}>Apply + Sim</button>
@@ -1491,35 +1738,59 @@ function App() {
                             return null;
                           }
 
+                          const legalMoves = legalMovesForUnit(unit);
+                          const switchTargets = simBattle.player.bench.filter((benchIndex) => !simBattle.player.units[benchIndex]?.fainted);
                           const draft = simChoiceDrafts[actor] ?? {
                             type: 'move' as const,
-                            moveId: unit.build.moveIds[0] ?? '',
+                            moveId: legalMoves[0]?.id ?? unit.build.moveIds[0] ?? '',
                             target: 0,
-                            switchTarget: simBattle.player.bench[0] ?? 0,
+                            switchTarget: switchTargets[0] ?? 0,
                           };
                           const canMegaEvolve = Boolean(unit.megaPokemon && !unit.megaEvolved && !simBattle.player.megaUsed);
                           const otherMegaReserved = Object.entries(simChoiceDrafts).some(([draftActor, entry]) => Number(draftActor) !== actor && entry.type === 'mega');
                           const allowMegaOption = canMegaEvolve && (!otherMegaReserved || draft.type === 'mega');
+                          const canSwitch = switchTargets.length > 0;
+                          const statusBadge = simulatorStatusBadge(unit);
+                          const battleTags = simulatorBattleTags(unit);
+                          const effectiveDraftType = draft.type === 'switch' && !canSwitch ? 'move' : draft.type;
+                          const selectedMoveId = legalMoves.some((move) => move.id === draft.moveId) ? draft.moveId : legalMoves[0]?.id ?? '';
+                          const restrictionNotes = simulatorRestrictionNotes(unit);
 
                           return (
                             <div key={`${unit.pokemon.id}-${actor}`} className="subpanel sim-action-card">
                               <SectionHeader title={unit.pokemon.displayName} subtitle={describeBuildRole(unit.build, simBattle.format)} compact />
+                              {battleTags.length || statusBadge ? (
+                                <div className="battle-tag-row action-tag-row">
+                                  {battleTags.map((tag) => (
+                                    <span key={tag.key} className={`battle-tag battle-tag-${tag.tone}`} title={tag.title}>
+                                      {tag.label}
+                                    </span>
+                                  ))}
+                                  {statusBadge ? (
+                                    <span
+                                      className={`battle-tag battle-tag-${statusBadge.tone === 'sleep' ? 'warning' : 'neutral'}`}
+                                      title={statusBadge.title}
+                                    >
+                                      Status {statusBadge.label}
+                                    </span>
+                                  ) : null}
+                                </div>
+                              ) : null}
                               <label className="field">
                                 <span>Action</span>
-                                <select value={draft.type} onChange={(event) => updateChoiceDraft(actor, { type: event.target.value as ChoiceDraft['type'] })}>
+                                <select value={effectiveDraftType} onChange={(event) => updateChoiceDraft(actor, { type: event.target.value as ChoiceDraft['type'] })}>
                                   <option value="move">Move</option>
                                   {allowMegaOption ? <option value="mega">Mega Evolve</option> : null}
-                                  <option value="switch">Switch</option>
+                                  {canSwitch ? <option value="switch">Switch</option> : null}
                                 </select>
                               </label>
-                              {draft.type !== 'switch' ? (
+                              {effectiveDraftType !== 'switch' ? (
                                 <>
                                   <label className="field">
-                                    <span>{draft.type === 'mega' ? 'Move After Mega' : 'Move'}</span>
-                                    <select value={draft.moveId} onChange={(event) => updateChoiceDraft(actor, { moveId: event.target.value })}>
-                                      {unit.build.moveIds.map((moveId) => {
-                                        const move = unit.pokemon.movePool.find((entry) => entry.id === moveId);
-                                        return <option key={moveId} value={moveId}>{move?.name ?? 'Move'}</option>;
+                                    <span>{effectiveDraftType === 'mega' ? 'Move After Mega' : 'Move'}</span>
+                                    <select value={selectedMoveId} onChange={(event) => updateChoiceDraft(actor, { moveId: event.target.value })}>
+                                      {legalMoves.map((move) => {
+                                        return <option key={move.id} value={move.id}>{move.name}</option>;
                                       })}
                                     </select>
                                   </label>
@@ -1532,7 +1803,12 @@ function App() {
                                       })}
                                     </select>
                                   </label>
-                                  {draft.type === 'mega' && unit.megaPokemon ? (
+                                  {restrictionNotes.map((note) => (
+                                    <div key={note} className="note-row compact-note">
+                                      {note}
+                                    </div>
+                                  ))}
+                                  {effectiveDraftType === 'mega' && unit.megaPokemon ? (
                                     <div className="note-row compact-note">
                                       {unit.basePokemon.displayName} will Mega Evolve into {unit.megaPokemon.displayName} before acting this turn.
                                     </div>
@@ -1542,7 +1818,7 @@ function App() {
                                 <label className="field">
                                   <span>Switch To</span>
                                   <select value={draft.switchTarget} onChange={(event) => updateChoiceDraft(actor, { switchTarget: Number(event.target.value) })}>
-                                    {simBattle.player.bench.filter((benchIndex) => !simBattle.player.units[benchIndex]?.fainted).map((benchIndex) => (
+                                    {switchTargets.map((benchIndex) => (
                                       <option key={benchIndex} value={benchIndex}>{simBattle.player.units[benchIndex]?.pokemon.displayName}</option>
                                     ))}
                                   </select>
@@ -1679,7 +1955,17 @@ function ToggleField({ label, checked, onChange }: { label: string; checked: boo
   );
 }
 
-function PokemonSpriteFrame({ pokemon, size = 'standard', label }: { pokemon: PokemonEntry | null; size?: 'mini' | 'tiny' | 'standard' | 'pokedex'; label?: string }) {
+function PokemonSpriteFrame({
+  pokemon,
+  size = 'standard',
+  label,
+  statusBadge = null,
+}: {
+  pokemon: PokemonEntry | null;
+  size?: 'mini' | 'tiny' | 'standard' | 'pokedex';
+  label?: string;
+  statusBadge?: StatusBadge | null;
+}) {
   const sprite = displaySpriteForPokemon(pokemon);
   const syntheticMega = usesMegaSpriteFallback(pokemon);
   const className = `sprite-shell ${size}${syntheticMega ? ' mega-fallback' : ''}`;
@@ -1691,6 +1977,11 @@ function PokemonSpriteFrame({ pokemon, size = 'standard', label }: { pokemon: Po
   return (
     <div className={className}>
       <img src={sprite} alt={pokemon?.displayName ?? label ?? 'Pokemon'} className="sprite-image" />
+      {statusBadge ? (
+        <span className={`status-badge status-${statusBadge.tone}`} title={statusBadge.title}>
+          {statusBadge.label}
+        </span>
+      ) : null}
       {syntheticMega ? <span className="mega-pill">Mega</span> : null}
     </div>
   );
@@ -1707,11 +1998,22 @@ function BattleSideView({ side, format, friendly = false }: { side: SimulatorBat
             return null;
           }
 
+          const statusBadge = simulatorStatusBadge(unit);
+          const battleTags = simulatorBattleTags(unit);
           return (
             <div key={`${unit.pokemon.id}-${index}`} className="battle-card">
-              <PokemonSpriteFrame pokemon={unit.pokemon} size="standard" />
+              <PokemonSpriteFrame pokemon={unit.pokemon} size="standard" statusBadge={statusBadge} />
               <strong>{unit.pokemon.displayName}</strong>
               <small>{friendly ? describeBuildRole(unit.build, format) : 'Opponent set hidden'}</small>
+              {battleTags.length ? (
+                <div className="battle-tag-row">
+                  {battleTags.map((tag) => (
+                    <span key={tag.key} className={`battle-tag battle-tag-${tag.tone}`} title={tag.title}>
+                      {tag.label}
+                    </span>
+                  ))}
+                </div>
+              ) : null}
               <div className="hp-bar">
                 <div className="hp-fill" style={{ width: `${Math.max(0, (unit.currentHp / unit.maxHp) * 100)}%` }} />
               </div>
@@ -1725,7 +2027,7 @@ function BattleSideView({ side, format, friendly = false }: { side: SimulatorBat
           const unit = side.units[unitIndex];
           return unit ? (
             <div key={unit.pokemon.id} className="battle-bench-card">
-              <PokemonSpriteFrame pokemon={unit.pokemon} size="tiny" />
+              <PokemonSpriteFrame pokemon={unit.pokemon} size="tiny" statusBadge={simulatorStatusBadge(unit)} />
               <small>{unit.pokemon.displayName}</small>
             </div>
           ) : null;
@@ -1751,12 +2053,23 @@ function BuildEditor({
   blockedItemIds?: Set<string>;
 }) {
   const [search, setSearch] = useState('');
+  const [primaryTypeFilter, setPrimaryTypeFilter] = useState('Any');
+  const [secondaryTypeFilter, setSecondaryTypeFilter] = useState('Any');
   const deferredSearch = useDeferredValue(search);
   const normalizedBuild = normalizeBuildForChampions(build);
   const basePokemon = selectedPokemon(normalizedBuild);
   const activePokemon = resolvePokemonForm(normalizedBuild);
   const megaForm = basePokemon ? findMegaForm(basePokemon) : null;
-  const filteredPokemon = dataset.pokemon.filter((entry) => pickerLabel(entry).toLowerCase().includes(deferredSearch.toLowerCase()));
+  const filteredPokemon = useMemo(
+    () =>
+      dataset.pokemon.filter((entry) => {
+        const matchesSearch = pickerLabel(entry).toLowerCase().includes(deferredSearch.toLowerCase());
+        const matchesPrimary = primaryTypeFilter === 'Any' || entry.types.includes(primaryTypeFilter);
+        const matchesSecondary = secondaryTypeFilter === 'Any' || entry.types.includes(secondaryTypeFilter);
+        return matchesSearch && matchesPrimary && matchesSecondary;
+      }),
+    [deferredSearch, primaryTypeFilter, secondaryTypeFilter],
+  );
   const effectiveBuild = activePokemon ? { ...normalizedBuild, moveIds: normalizeMoveSelection(normalizedBuild, activePokemon) } : normalizedBuild;
   const stats = activePokemon ? buildStats(activePokemon.baseStats, effectiveBuild.evs, effectiveBuild.natureId) : null;
   const availableItems = availableItemsForPokemon(basePokemon ?? activePokemon);
@@ -1765,6 +2078,7 @@ function BuildEditor({
   const effortUsed = totalEffortPoints(effectiveBuild.evs);
   const effortRemaining = Math.max(0, totalEffortBudget - effortUsed);
   const blockedItemNames = [...blockedItemIds].map((itemId) => getItemById(itemId)?.name).filter((name): name is string => Boolean(name));
+  const activeTypeFilters = [primaryTypeFilter, secondaryTypeFilter].filter((type) => type !== 'Any');
 
   function patch(partial: Partial<PokemonBuild>) {
     onChange(normalizeBuildForChampions({
@@ -1804,8 +2118,35 @@ function BuildEditor({
         <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search the current Champions roster..." />
       </label>
 
+      <div className="control-grid three type-filter-grid">
+        <label className="field">
+          <span>Type Filter A</span>
+          <select value={primaryTypeFilter} onChange={(event) => setPrimaryTypeFilter(event.target.value)}>
+            {pokemonTypeOptions.map((type) => (
+              <option key={type} value={type}>{type}</option>
+            ))}
+          </select>
+        </label>
+        <label className="field">
+          <span>Type Filter B</span>
+          <select value={secondaryTypeFilter} onChange={(event) => setSecondaryTypeFilter(event.target.value)}>
+            {pokemonTypeOptions.map((type) => (
+              <option key={type} value={type}>{type}</option>
+            ))}
+          </select>
+        </label>
+        <button className="action-button" onClick={() => { setPrimaryTypeFilter('Any'); setSecondaryTypeFilter('Any'); }}>
+          Clear Type Filters
+        </button>
+      </div>
+
+      <div className="picker-filter-summary">
+        <span>{filteredPokemon.length} Pokemon match the current search and type filters.</span>
+        {activeTypeFilters.length ? <small>Active filters: {activeTypeFilters.join(' + ')}</small> : <small>Showing the full live Champions roster.</small>}
+      </div>
+
       <div className="picker-list scroll-stack compact-scroll">
-        {filteredPokemon.slice(0, condensed ? 10 : 14).map((entry) => (
+        {filteredPokemon.length ? filteredPokemon.slice(0, condensed ? 10 : 14).map((entry) => (
           <button key={entry.id} className={entry.id === activePokemon?.id ? 'picker-row active' : 'picker-row'} onClick={() => onChange(prepareBuildForPokemon(effectiveBuild, entry.id, format))}>
             <PokemonSpriteFrame pokemon={entry} size="tiny" />
             <div>
@@ -1814,7 +2155,12 @@ function BuildEditor({
             </div>
             <UsagePill insight={getPokemonUsageInsight(entry, format)} small />
           </button>
-        ))}
+        )) : (
+          <div className="empty-inline-state">
+            <strong>No live roster matches.</strong>
+            <span>Try clearing one of the type filters or broadening the Pokemon search text.</span>
+          </div>
+        )}
       </div>
 
       <div className="control-grid two">

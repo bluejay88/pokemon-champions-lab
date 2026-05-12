@@ -37,6 +37,22 @@ import type {
   UsageLabel,
 } from '../types';
 
+export type PokemonReplacementSuggestion = {
+  pokemon: PokemonEntry;
+  reason: string;
+  usageLabel: UsageLabel;
+};
+
+export type PokemonInputValidation = {
+  input: string;
+  normalizedInput: string;
+  isValid: boolean;
+  matchedPokemon: PokemonEntry | null;
+  autoReplacement: PokemonEntry | null;
+  message: string;
+  suggestions: PokemonReplacementSuggestion[];
+};
+
 const setupMoves = ['Swords Dance', 'Dragon Dance', 'Calm Mind', 'Nasty Plot', 'Bulk Up', 'Coil'];
 const speedControlMoves = ['Tailwind', 'Thunder Wave', 'Icy Wind', 'Trick Room', 'Rain Dance', 'Sunny Day'];
 const hazardMoves = ['Stealth Rock', 'Spikes', 'Toxic Spikes', 'Sticky Web'];
@@ -50,6 +66,15 @@ const supportMoves = ['Helping Hand', 'Encore', 'Taunt', 'Will-O-Wisp', 'Haze'];
 const spreadMoveNames = ['Earthquake', 'Rock Slide', 'Heat Wave', 'Sludge Wave', 'Muddy Water', 'Eruption', 'Sparkling Aria'];
 const priorityMoves = ['Fake Out', 'Bullet Punch', 'Sucker Punch', 'Extreme Speed', 'Aqua Jet', 'Ice Shard'];
 const offMetaMascots = new Set(['Castform', 'Chimecho', 'Dedenne', 'Emolga', 'Diggersby', 'Bellibolt', 'Aromatisse', 'Sableye', 'Jolteon']);
+const replacementProfiles: Record<string, { fallbackNames: string[]; preferredTypes: string[]; preferredRoles: string[]; preferredMoves: string[]; summary: string }> = {
+  cinderace: {
+    fallbackNames: ['Arcanine', 'Incineroar', 'Charizard', 'Houndoom'],
+    preferredTypes: ['Fire'],
+    preferredRoles: ['pivot', 'breaker', 'support', 'priority'],
+    preferredMoves: ['Will-O-Wisp', 'U-turn', 'Sucker Punch', 'Fake Out', 'Flare Blitz'],
+    summary: 'Fast Fire attacker / pivot replacements from the live Champions dex.',
+  },
+};
 
 type VariantConfig = {
   id: string;
@@ -154,21 +179,81 @@ const variantLibrary: VariantConfig[] = [
   },
 ];
 
+function normalizedNameKey(value: string) {
+  return value.toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+function baseRosterPokemon(pokemon: PokemonEntry | null) {
+  if (!pokemon) {
+    return null;
+  }
+
+  if (!pokemon.isMega) {
+    return pokemon;
+  }
+
+  return dataset.pokemon.find((entry) => entry.baseSpecies === pokemon.baseSpecies && !entry.isMega) ?? pokemon;
+}
+
 function lookupPokemonByName(name: string) {
   if (!name.trim()) {
     return null;
   }
 
-  return (
+  const normalizedInput = normalizedNameKey(name.trim());
+  const found = (
     findPokemonByName(name.trim()) ??
     dataset.pokemon.find((entry) => entry.displayName.toLowerCase() === name.trim().toLowerCase()) ??
     dataset.pokemon.find((entry) => entry.baseSpecies.toLowerCase() === name.trim().toLowerCase()) ??
+    dataset.pokemon.find((entry) => normalizedNameKey(entry.displayName) === normalizedInput) ??
+    dataset.pokemon.find((entry) => normalizedNameKey(entry.baseSpecies) === normalizedInput) ??
     null
   );
+
+  return baseRosterPokemon(found);
 }
 
 function usageRank(label: UsageLabel) {
   return { OU: 4, UU: 3, RU: 2, NU: 1 }[label];
+}
+
+function bigrams(value: string) {
+  const normalized = normalizedNameKey(value);
+  if (normalized.length <= 2) {
+    return [normalized];
+  }
+
+  const pairs: string[] = [];
+  for (let index = 0; index < normalized.length - 1; index += 1) {
+    pairs.push(normalized.slice(index, index + 2));
+  }
+  return pairs;
+}
+
+function nameSimilarity(left: string, right: string) {
+  const a = normalizedNameKey(left);
+  const b = normalizedNameKey(right);
+  if (!a || !b) {
+    return 0;
+  }
+  if (a === b) {
+    return 1;
+  }
+  if (a.includes(b) || b.includes(a)) {
+    return 0.82;
+  }
+
+  const leftBigrams = bigrams(a);
+  const rightBigrams = bigrams(b);
+  const rightSet = new Set(rightBigrams);
+  let overlap = 0;
+  for (const pair of leftBigrams) {
+    if (rightSet.has(pair)) {
+      overlap += 1;
+    }
+  }
+
+  return (2 * overlap) / (leftBigrams.length + rightBigrams.length);
 }
 
 function scoreFromPokemon(pokemon: PokemonEntry) {
@@ -391,6 +476,166 @@ function detectRoles(pokemon: PokemonEntry, format: BattleFormat) {
   if (format === 'Doubles' && names.has('Helping Hand')) roles.add('support');
 
   return roles;
+}
+
+function roleLabel(role: string) {
+  switch (role) {
+    case 'hazards':
+      return 'hazard pressure';
+    case 'hazard-control':
+      return 'hazard control';
+    case 'speed-control':
+      return 'speed control';
+    case 'setup':
+      return 'setup pressure';
+    case 'recovery':
+      return 'sustain';
+    case 'pivot':
+      return 'pivot play';
+    case 'fake-out':
+      return 'Fake Out tempo';
+    case 'redirection':
+      return 'redirection support';
+    case 'screens':
+      return 'screen support';
+    case 'support':
+      return 'support utility';
+    case 'spread':
+      return 'spread damage';
+    case 'priority':
+      return 'priority cleanup';
+    case 'protect':
+      return 'Protect cycling';
+    case 'breaker':
+      return 'breaker pressure';
+    default:
+      return role.replace(/-/g, ' ');
+  }
+}
+
+function replacementReason(
+  pokemon: PokemonEntry,
+  format: BattleFormat,
+  preferredTypes: string[],
+  preferredRoles: string[],
+  preferredMoves: string[],
+  similarityScore: number,
+) {
+  const reasons: string[] = [];
+  const roles = detectRoles(pokemon, format);
+  const moveNames = new Set(pokemon.movePool.map((move) => move.name));
+  const typeOverlap = preferredTypes.filter((type) => pokemon.types.includes(type));
+  const roleOverlap = preferredRoles.filter((role) => roles.has(role));
+  const moveOverlap = preferredMoves.filter((move) => moveNames.has(move));
+
+  if (typeOverlap.length) {
+    reasons.push(`shares ${typeOverlap.join('/')} typing`);
+  }
+  if (roleOverlap.length) {
+    reasons.push(`keeps ${roleLabel(roleOverlap[0])}`);
+  }
+  if (moveOverlap.length) {
+    reasons.push(`offers ${moveOverlap.slice(0, 2).join(' or ')}`);
+  }
+  if (!reasons.length && similarityScore >= 0.48) {
+    reasons.push('is the closest live dex name match');
+  }
+  if (!reasons.length) {
+    reasons.push(`${describeBuildRole(buildForPokemon(pokemon, format), format).toLowerCase()} fits the current roster well`);
+  }
+
+  return `${pokemon.displayName} ${reasons.join(' and ')}.`;
+}
+
+function rankedReplacementCandidates(input: string, format: BattleFormat) {
+  const normalizedInput = normalizedNameKey(input);
+  const profile = replacementProfiles[normalizedInput] ?? null;
+  const preferredTypes = profile?.preferredTypes ?? [];
+  const preferredRoles = profile?.preferredRoles ?? [];
+  const preferredMoves = profile?.preferredMoves ?? [];
+
+  return dataset.pokemon
+    .filter((pokemon) => !pokemon.isMega)
+    .map((pokemon) => {
+      const roles = detectRoles(pokemon, format);
+      const moveNames = new Set(pokemon.movePool.map((move) => move.name));
+      const nameScore = Math.max(
+        nameSimilarity(input, pokemon.displayName) * 42,
+        nameSimilarity(input, pokemon.baseSpecies) * 38,
+      );
+      const typeScore = preferredTypes.reduce((sum, type) => sum + (pokemon.types.includes(type) ? 16 : 0), 0);
+      const roleScore = preferredRoles.reduce((sum, role) => sum + (roles.has(role) ? 14 : 0), 0);
+      const moveScore = preferredMoves.reduce((sum, move) => sum + (moveNames.has(move) ? 6 : 0), 0);
+      const fallbackIndex = profile ? profile.fallbackNames.findIndex((name) => name === pokemon.baseSpecies) : -1;
+      const fallbackBonus = fallbackIndex >= 0 ? 42 - fallbackIndex * 4 : 0;
+      const usageBonus = usageRank(getPokemonUsageInsight(pokemon, format).label) * 2;
+      const totalScore = nameScore + typeScore + roleScore + moveScore + fallbackBonus + usageBonus;
+
+      return {
+        pokemon,
+        score: totalScore,
+        reason: replacementReason(pokemon, format, preferredTypes, preferredRoles, preferredMoves, nameScore / 42),
+        usageLabel: getPokemonUsageInsight(pokemon, format).label,
+      };
+    })
+    .sort((left, right) => right.score - left.score)
+    .slice(0, 4)
+    .map(({ pokemon, reason, usageLabel }) => ({
+      pokemon,
+      reason,
+      usageLabel,
+    }));
+}
+
+export function validateLockedPokemonInput(input: string, format: BattleFormat): PokemonInputValidation {
+  const trimmed = input.trim();
+  const normalizedInput = normalizedNameKey(trimmed);
+
+  if (!trimmed) {
+    return {
+      input,
+      normalizedInput,
+      isValid: false,
+      matchedPokemon: null,
+      autoReplacement: null,
+      message: 'Open slot. Leave this empty if you do not want to lock another Pokemon.',
+      suggestions: [],
+    };
+  }
+
+  const matchedPokemon = lookupPokemonByName(trimmed);
+  if (matchedPokemon) {
+    return {
+      input,
+      normalizedInput,
+      isValid: true,
+      matchedPokemon,
+      autoReplacement: matchedPokemon,
+      message: `${matchedPokemon.displayName} is available in the live Champions dex and can be locked into generated teams.`,
+      suggestions: [],
+    };
+  }
+
+  const suggestions = rankedReplacementCandidates(trimmed, format);
+  const autoReplacement = suggestions[0]?.pokemon ?? null;
+  const profile = replacementProfiles[normalizedInput] ?? null;
+  const message = autoReplacement
+    ? `${trimmed} is not in the current Champions dex. ${autoReplacement.displayName} is the closest live fit${profile ? ` for ${profile.summary.toLowerCase()}` : ''}.`
+    : `${trimmed} is not in the current Champions dex, so this slot needs a live roster replacement before the AI can lock it cleanly.`;
+
+  return {
+    input,
+    normalizedInput,
+    isValid: false,
+    matchedPokemon: null,
+    autoReplacement,
+    message,
+    suggestions,
+  };
+}
+
+export function validateLockedPokemonInputs(inputs: string[], format: BattleFormat) {
+  return inputs.map((input) => validateLockedPokemonInput(input, format));
 }
 
 export function describeBuildRole(build: PokemonBuild, format: BattleFormat) {
