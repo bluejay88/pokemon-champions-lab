@@ -289,9 +289,10 @@ async function handleForfeit(payload: ArenaPayload) {
 }
 
 export default async function handler(request: Request) {
+  let action: string | undefined;
   try {
     const payload = (await request.json()) as ArenaPayload;
-    const action = payload.action;
+    action = payload.action;
 
     if (action === 'heartbeat') {
       return jsonResponse(await handleHeartbeat(payload.sessionId));
@@ -326,6 +327,20 @@ export default async function handler(request: Request) {
 
     return jsonResponse({ error: 'Unsupported arena action.' }, 400);
   } catch (error) {
+    if (action === 'history') {
+      return jsonResponse({
+        history: [],
+        authExpired: true,
+        error: error instanceof Error ? error.message : 'Arena request failed.',
+      });
+    }
+    if (action === 'get-room') {
+      return jsonResponse({
+        room: null,
+        authExpired: true,
+        error: error instanceof Error ? error.message : 'Arena request failed.',
+      });
+    }
     return jsonResponse(
       {
         error: error instanceof Error ? error.message : 'Arena request failed.',

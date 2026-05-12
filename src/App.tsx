@@ -2006,7 +2006,7 @@ function App() {
     let mounted = true;
     const poll = async () => {
       const latest = await fetchOnlineRoom({ account: onlineAccount, code: pvpRoom.code });
-      if (mounted && latest) {
+      if (mounted) {
         setPvpRoom(latest);
       }
     };
