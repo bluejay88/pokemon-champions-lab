@@ -6,7 +6,7 @@ import {
   type SimulatorBattleState,
   type SimulatorChoice,
 } from './simulator';
-import { createTeam, makeId, sanitizeTeamForChampions } from './champions';
+import { createTeam, makeId, resolvePokemonForm, sanitizeTeamForChampions, selectedPokemon } from './champions';
 import type { BattleFormat, OnlineBattleAccount, OnlineBattleRoomHistoryEntry, OnlinePresenceStats, PokemonEntry, Team } from '../types';
 
 export type OnlineSeat = 'host' | 'guest';
@@ -217,7 +217,7 @@ function seatForPlayer(room: OnlineBattleRoomState, playerId: string): OnlineSea
 function filledSlotIndices(team: Team) {
   return team.slots
     .map((slot, index) => ({ slot, index }))
-    .filter(({ slot }) => Boolean(slot.pokemonId))
+    .filter(({ slot }) => Boolean(selectedPokemon(slot) ?? resolvePokemonForm(slot)))
     .map(({ index }) => index);
 }
 
@@ -392,6 +392,12 @@ function startRoomBattle(room: OnlineBattleRoomState) {
   hostTeam.format = room.format;
   guestTeam.format = room.format;
   room.battle = advancePreviewToBattle(createSimulatorBattle(room.format, hostTeam, room.hostBringOrder, guestTeam, room.guestBringOrder, null));
+  if (room.battle.player.units.length !== room.hostBringOrder.length) {
+    throw new Error('One or more selected host Pokemon are no longer legal in the current Champions roster. Re-open preview and lock a fresh bring order.');
+  }
+  if (room.battle.opponent.units.length !== room.guestBringOrder.length) {
+    throw new Error('One or more selected guest Pokemon are no longer legal in the current Champions roster. Re-open preview and lock a fresh bring order.');
+  }
   room.stage = room.battle.winner ? 'finished' : 'battle';
   room.deadlineAt = room.battle.winner ? null : new Date(Date.now() + room.timerSeconds * 1000).toISOString();
   room.pendingHostChoices = null;
@@ -406,9 +412,7 @@ function maybeResolvePendingTurn(room: OnlineBattleRoomState) {
   }
 
   const deadlineReached = room.deadlineAt ? Date.now() >= new Date(room.deadlineAt).getTime() : false;
-  const hostReady = Boolean(room.pendingHostChoices);
-  const guestReady = Boolean(room.pendingGuestChoices);
-  if (!((hostReady && guestReady) || deadlineReached)) {
+  if (!deadlineReached) {
     return room;
   }
 
@@ -528,7 +532,16 @@ export function submitTurnChoicesState(room: OnlineBattleRoomState, playerId: st
   setSeatChoices(room, seat, choices);
   room.updatedAt = nowIso();
   room.lastActionSummary = `${seat === 'host' ? room.hostTrainerName : room.guestTrainerName ?? 'Opponent'} locked their turn choices.`;
-  return maybeResolvePendingTurn(room);
+  const nextRoom = maybeResolvePendingTurn(room);
+  if (
+    nextRoom.stage === 'battle'
+    && nextRoom.pendingHostChoices
+    && nextRoom.pendingGuestChoices
+    && nextRoom.deadlineAt
+  ) {
+    nextRoom.lastActionSummary = 'Both players are locked in. The move clock keeps running until the timer expires, then the turn resolves together.';
+  }
+  return nextRoom;
 }
 
 export function forfeitRoomState(room: OnlineBattleRoomState, playerId: string) {
@@ -813,7 +826,10 @@ async function tryRemote<T>(action: string, payload: Record<string, unknown>) {
 
 export async function heartbeatPresence(sessionId: string) {
   try {
-    const remote = await tryRemote<{ stats: OnlinePresenceStats }>('heartbeat', { sessionId });
+    const remote = await tryRemote<{ stats: OnlinePresenceStats; remoteUnavailable?: boolean }>('heartbeat', { sessionId });
+    if (remote.remoteUnavailable) {
+      throw new Error('Remote heartbeat unavailable.');
+    }
     return remote.stats;
   } catch {
     return localPresenceHeartbeat(sessionId);

@@ -316,18 +316,18 @@ const announcerScripts: Record<
   super: [
     'That was super effective, and the damage reflects it.',
     'A brutal type advantage there, and {target} paid for it.',
-    'That is exactly the matchup {pokemon} wanted. Super effective damage!',
-    'Massive connection. The typing lined up perfectly for {pokemon}.',
-    'Super effective pressure from {pokemon}, and this field just tilted hard.',
-    'No doubt about it, {move} struck for premium damage.',
+    'That is exactly the matchup the attacker wanted. Super effective damage!',
+    'Massive connection. The typing lined up perfectly for that hit.',
+    'Super effective pressure there, and this field just tilted hard.',
+    'No doubt about it, that strike landed for premium damage.',
     '{target} could not stomach that hit. The typing was all wrong.',
     'That is a huge swing off type advantage alone.',
-    'Super effective damage from {pokemon}, and the crowd is awake now.',
-    'A perfect punish. {move} found the exact weakness it needed.',
+    'Super effective damage there, and the crowd is awake now.',
+    'A perfect punish. That move found the exact weakness it needed.',
   ],
   resist: [
     '{target} resists the hit and keeps some breathing room.',
-    'Not very effective, but {pokemon} still keeps the pressure on.',
+    'Not very effective, but the attacker still keeps the pressure on.',
     '{target} absorbs the blow better than expected.',
     'That resistance matters. {target} stays standing with a little extra space.',
     'The damage is tempered by typing, and {target} survives the exchange.',
@@ -348,8 +348,8 @@ const announcerScripts: Record<
     'A major status lands on {target}, and now the timer really starts.',
     '{target} is under pressure from a fresh status condition.',
     'That status changes the math for every turn after this one.',
-    '{pokemon} adds long-term pressure with that status line.',
-    'A smart utility sequence there, and {target} now has to manage the condition.',
+    '{source} adds long-term pressure by applying {status}.',
+    'A smart utility sequence there, and {target} now has to manage {status}.',
     '{target} is now compromised, and the follow-up lines get much stronger.',
     'Status pressure is online, and that can decide endgames in a hurry.',
   ],
@@ -384,12 +384,12 @@ const announcerScripts: Record<
     '{winner} gets the job done and secures the result.',
   ],
   star: [
-    'Star of the battle: {pokemon}. That Pokemon delivered when it mattered most.',
-    '{pokemon} was the standout performer of the match.',
-    'Give a spotlight to {pokemon}; that was a difference-making performance.',
+    'Pokemon of the Game: {pokemon}. That Pokemon delivered when it mattered most.',
+    '{pokemon} was the standout performer and earns Pokemon of the Game honors.',
+    'Give a spotlight to {pokemon}; that is your Pokemon of the Game.',
     '{pokemon} put in the work and earns player-of-the-game honors.',
-    'The effort chart points straight at {pokemon} as the battle star.',
-    '{pokemon} was the engine behind the win and deserves the callout.',
+    'The effort chart points straight at {pokemon} as the Pokemon of the Game.',
+    '{pokemon} was the engine behind the win and deserves the Pokemon of the Game callout.',
   ],
 };
 
@@ -787,8 +787,14 @@ function randomOpponentTeam(format: BattleFormat, offMetaBias: number) {
   return buildTeamFromPlan(plans[Math.floor(Math.random() * plans.length)] ?? plans[0]);
 }
 
+function usablePokemonForBuild(build: PokemonBuild) {
+  return selectedPokemon(build) ?? resolvePokemonForm(build);
+}
+
 function filledSlotIndices(team: Team) {
-  return team.slots.map((slot, index) => (slot.pokemonId ? index : -1)).filter((index) => index >= 0);
+  return team.slots
+    .map((slot, index) => (usablePokemonForBuild(slot) ? index : -1))
+    .filter((index) => index >= 0);
 }
 
 function knownMovesForBuild(build: PokemonBuild, pokemon: PokemonEntry | null) {
@@ -1187,18 +1193,54 @@ function pickPreferredMaleVoice() {
   );
 }
 
-function speakAnnouncerLines(lines: string[], rate: number) {
+const announcerSpeechReplacements: Array<[RegExp, string]> = [
+  [/\bSpA\b/g, 'special attack'],
+  [/\bSpD\b/g, 'special defense'],
+  [/\bAtk\b/g, 'attack'],
+  [/\bDef\b/g, 'defense'],
+  [/\bSpe\b/g, 'speed'],
+  [/\bHP\b/g, 'H P'],
+  [/\bvs\.\b/gi, 'versus'],
+  [/Ting-Lu/g, 'Ting Loo'],
+  [/Chien-Pao/g, 'Chee-en Pow'],
+  [/Wo-Chien/g, 'Woe Chee-en'],
+  [/Chi-Yu/g, 'Chee Yoo'],
+  [/Farigiraf/g, 'Fah-ridge-uh-raff'],
+  [/Archaludon/g, 'Ar-ka-loo-don'],
+  [/Bellibolt/g, 'Bell-ee-bolt'],
+  [/Sinistcha/g, 'Sin-iss-cha'],
+  [/Meowscarada/g, 'Meow-skah-rah-duh'],
+  [/Ogerpon/g, 'Oh-ger-pon'],
+  [/Enamorus/g, 'Eh-na-more-us'],
+  [/Gholdengo/g, 'Goal-den-go'],
+  [/Amoonguss/g, 'Uh-moon-gus'],
+  [/Urshifu/g, 'Ur-shee-foo'],
+  [/Hydreigon/g, 'High-dry-gon'],
+  [/Rillaboom/g, 'Rill-uh-boom'],
+  [/Sneasler/g, 'Sneez-ler'],
+];
+
+function speechFriendlyText(line: string) {
+  return announcerSpeechReplacements.reduce((nextLine, [pattern, replacement]) => nextLine.replace(pattern, replacement), line);
+}
+
+function speakAnnouncerLines(lines: string[], rate: number, interrupt = false) {
   if (typeof window === 'undefined' || !('speechSynthesis' in window) || !lines.length) {
     return;
   }
 
   const synth = window.speechSynthesis;
-  synth.cancel();
+  if (synth.speaking && !interrupt) {
+    return;
+  }
+  if (interrupt) {
+    synth.cancel();
+  }
   const voice = pickPreferredMaleVoice();
   for (const line of lines.slice(0, 2)) {
-    const utterance = new SpeechSynthesisUtterance(line);
+    const utterance = new SpeechSynthesisUtterance(speechFriendlyText(line));
     utterance.rate = rate;
-    utterance.pitch = 0.92;
+    utterance.pitch = 0.96;
     utterance.volume = 1;
     if (voice) {
       utterance.voice = voice;
@@ -1306,6 +1348,10 @@ function BattleMusicPlayer({
   return <span className="youtube-audio-player" aria-hidden="true" />;
 }
 
+function battleUnitDisplayName(unit: SimUnit) {
+  return unit.build.nickname.trim() || unit.pokemon.displayName;
+}
+
 function battlePerformanceScore(unit: SimUnit) {
   return unit.damageDealt + unit.knockouts * 120 + unit.turnsActive * 8 + (unit.megaEvolved ? 12 : 0);
 }
@@ -1314,7 +1360,7 @@ function topBattlePerformers(battle: SimulatorBattleState) {
   return [...battle.player.units, ...battle.opponent.units]
     .filter((unit) => unit.pokemon)
     .map((unit) => ({
-      name: unit.pokemon.displayName,
+      name: battleUnitDisplayName(unit),
       score: battlePerformanceScore(unit),
     }))
     .sort((left, right) => right.score - left.score);
@@ -1557,7 +1603,7 @@ function announcerStyleLine(style: AnnouncerStyle, line: string) {
 }
 
 function announcerUnitName(unit: SimUnit) {
-  return unit.build.nickname.trim() || unit.pokemon.displayName;
+  return battleUnitDisplayName(unit);
 }
 
 function announcerReplaceCustomNames(line: string, battle: SimulatorBattleState) {
@@ -1631,7 +1677,7 @@ function announcerLinesFromBattleUpdate(previous: SimulatorBattleState | null, c
     } else if (missMatch) {
       line = fillAnnouncerLine(pickLine(announcerScripts.miss), { pokemon: missMatch[1], move: missMatch[2], target: missMatch[3] });
     } else if (statusMatch) {
-      line = fillAnnouncerLine(pickLine(announcerScripts.status), { pokemon: statusMatch[2], target: statusMatch[1] });
+      line = fillAnnouncerLine(pickLine(announcerScripts.status), { source: statusMatch[2], status: statusMatch[3], target: statusMatch[1] });
     } else if (koMatch) {
       line = fillAnnouncerLine(pickLine(announcerScripts.ko), { target: koMatch[1], pokemon: koMatch[1] });
     } else if (switchMatch) {
@@ -1706,6 +1752,7 @@ function App() {
   const [simTurnTimerEnabled, setSimTurnTimerEnabled] = useState(false);
   const [simTurnClock, setSimTurnClock] = useState(30);
   const [simTurnNotice, setSimTurnNotice] = useState<string | null>(null);
+  const [simChoicesLocked, setSimChoicesLocked] = useState(false);
   const [simAnnouncerEnabled, setSimAnnouncerEnabled] = useState(false);
   const [simAnnouncerStyle, setSimAnnouncerStyle] = useState<AnnouncerStyle>('Arena');
   const [simAnnouncerRate, setSimAnnouncerRate] = useState(1);
@@ -1738,6 +1785,7 @@ function App() {
   const pvpRoomRef = useRef<OnlineBattleRoomView | null>(null);
   const simChoiceDraftsRef = useRef<Record<number, ChoiceDraft>>({});
   const simTurnReviewsRef = useRef<SimulatorTurnReview[]>([]);
+  const simChoicesLockedRef = useRef(false);
   const previousBattleRef = useRef<SimulatorBattleState | null>(null);
   const previousPvpBattleRef = useRef<SimulatorBattleState | null>(null);
   const recordedBattleKeyRef = useRef<string | null>(null);
@@ -1875,6 +1923,10 @@ function App() {
   }, [simTurnReviews]);
 
   useEffect(() => {
+    simChoicesLockedRef.current = simChoicesLocked;
+  }, [simChoicesLocked]);
+
+  useEffect(() => {
     let mounted = true;
     const tick = async () => {
       const nextStats = await heartbeatPresence(onlineSessionId);
@@ -1911,7 +1963,7 @@ function App() {
     const previousBattle = previousBattleRef.current;
     const commentaryLines = announcerLinesFromBattleUpdate(previousBattle, simBattle, simAnnouncerStyle);
     if (commentaryLines.length) {
-      pushAnnouncerLines(commentaryLines);
+      pushAnnouncerLines(commentaryLines, Boolean(simBattle.winner));
     }
 
     if (simBattle.winner) {
@@ -1957,7 +2009,7 @@ function App() {
       const pvpLines = announcerLinesFromBattleUpdate(previousPvpBattleRef.current, pvpRoom.battle, 'Arena');
       if (pvpAnnouncerEnabled && pvpLines.length) {
         setPvpAnnouncerFeed((current) => [...pvpLines.slice().reverse(), ...current].slice(0, 16));
-        speakAnnouncerLines(pvpLines, 1);
+        speakAnnouncerLines(pvpLines, 1, Boolean(pvpRoom.battle.winner));
       }
 
       if (pvpRoom.stage === 'finished' && pvpRoom.battle.winner) {
@@ -1986,10 +2038,10 @@ function App() {
             },
           }));
           setSelectedReplayId(record.id);
-          if (pvpAnnouncerEnabled) {
-            const winnerLine = announcerStyleLine('Arena', `${pvpRoom.winnerName ?? 'The winner'} closes the battle and takes the room.`);
-            setPvpAnnouncerFeed((current) => [winnerLine, ...current].slice(0, 16));
-            speakAnnouncerLines([winnerLine], 1);
+          if (pvpAnnouncerEnabled && !pvpLines.length) {
+            const wrapUpLines = announcerLinesFromBattleUpdate(null, pvpRoom.battle, 'Arena');
+            setPvpAnnouncerFeed((current) => [...wrapUpLines.slice().reverse(), ...current].slice(0, 16));
+            speakAnnouncerLines(wrapUpLines, 1, true);
           }
           recordedPvpBattleKeyRef.current = battleKey;
         }
@@ -2065,15 +2117,17 @@ function App() {
   useEffect(() => {
     if (!simBattle || simBattle.stage !== 'battle' || simBattle.winner || !simTurnTimerEnabled) {
       setSimTurnClock(30);
+      setSimChoicesLocked(false);
       return;
     }
 
     setSimTurnClock(30);
+    setSimChoicesLocked(false);
     const intervalHandle = window.setInterval(() => {
       setSimTurnClock((current) => Math.max(0, current - 1));
     }, 1000);
     const timeoutHandle = window.setTimeout(() => {
-      resolveSimulatorTurn(true);
+      resolveSimulatorTurn(!simChoicesLockedRef.current);
     }, 30_000);
 
     return () => {
@@ -2142,14 +2196,14 @@ function App() {
     setSaveMessage(message);
   }
 
-  function pushAnnouncerLines(lines: string[]) {
+  function pushAnnouncerLines(lines: string[], interrupt = false) {
     const nextLines = lines.filter(Boolean);
     if (!simAnnouncerEnabled || !nextLines.length) {
       return;
     }
 
     setSimAnnouncerFeed((current) => [...nextLines.slice().reverse(), ...current].slice(0, 14));
-    speakAnnouncerLines(nextLines, simAnnouncerRate);
+    speakAnnouncerLines(nextLines, simAnnouncerRate, interrupt);
   }
 
   function buildSimulatorChoices(
@@ -2245,6 +2299,7 @@ function App() {
     const nextBattle = resolveTurn(currentBattle, choices);
     setSimBattle(nextBattle);
     setSimChoiceDrafts({});
+    setSimChoicesLocked(false);
     setSimTurnReviews((current) => [...current, ...reviews]);
     setSimTurnNotice(notices.length ? notices.join(' ') : null);
   }
@@ -2390,9 +2445,6 @@ function App() {
         : plans[0] ?? null;
       setGeneratedPlans(plans);
       setSelectedGeneratedPlanId(preferredPlan?.id ?? null);
-      if (aiRandomMode && preferredPlan) {
-        applyGeneratedPlan(preferredPlan);
-      }
     });
   }
 
@@ -2465,6 +2517,7 @@ function App() {
     setSimBattle(null);
     setSimBringOrder([]);
     setSimChoiceDrafts({});
+    setSimChoicesLocked(false);
     setSimTurnReviews([]);
     setSimAnnouncerFeed([]);
     setSimTurnNotice(null);
@@ -2488,6 +2541,7 @@ function App() {
     setSimPreviewMessage(null);
     setSimBattle(null);
     setSimChoiceDrafts({});
+    setSimChoicesLocked(false);
     setSimTurnReviews([]);
     setSimAnnouncerFeed([]);
     setSimTurnNotice(null);
@@ -2534,12 +2588,21 @@ function App() {
     playerTeam.format = simPreview.format;
     const opponentOrder = chooseOpponentBringOrder(simPreview.format, simPreview.opponentTeam, playerTeam, simBringOrder);
     const battle = advancePreviewToBattle(createSimulatorBattle(simPreview.format, playerTeam, simBringOrder, simPreview.opponentTeam, opponentOrder, simPreview.previewEndsAt));
+    if (battle.player.units.length !== simBringOrder.length) {
+      setSimPreviewMessage(`One of the selected player slots no longer maps to a legal Champions Pokemon. Re-lock your four and try again.`);
+      return;
+    }
+    if (battle.opponent.units.length !== opponentOrder.length) {
+      setSimPreviewMessage(`The generated opponent preview drifted out of sync. Generate a fresh opponent and try again.`);
+      return;
+    }
     battle.player.name = state.profile.trainerName.trim() || 'Player';
     battle.opponent.name = 'Arena AI';
     setSimBattle(battle);
     setSimPreview(null);
     setSimPreviewMessage(null);
     setSimChoiceDrafts({});
+    setSimChoicesLocked(false);
     setSimTurnClock(30);
     setSimTurnNotice(null);
   }
@@ -2575,6 +2638,11 @@ function App() {
   }
 
   function submitSimTurn() {
+    if (simTurnTimerEnabled && simBattle?.stage === 'battle' && !simBattle.winner) {
+      setSimChoicesLocked(true);
+      setSimTurnNotice('Choices locked in. The announcer will keep the countdown going until the move clock expires, then the turn will resolve.');
+      return;
+    }
     resolveSimulatorTurn(false);
   }
 
@@ -2711,7 +2779,7 @@ function App() {
       });
       setPvpRoom(room);
       setPvpChoiceDrafts({});
-      setPvpMessage(notices[0] ?? 'Turn submitted.');
+      setPvpMessage(notices[0] ?? room.lastActionSummary ?? 'Turn submitted.');
     } catch (error) {
       setPvpMessage(error instanceof Error ? error.message : 'Could not submit the turn.');
     }
@@ -3526,8 +3594,8 @@ function App() {
                 <div className="note-row">Opponent preview now behaves like ranked team preview: you see all six species, but their items, abilities, and moves stay hidden until battle actions reveal them.</div>
                 <div className="note-row">Mega-capable Pokemon can now choose a dedicated Mega Evolve action, trigger their Mega ability before moving, and only one Mega can be used per side in each battle.</div>
                 <div className="note-row">Preview stays visible for 60 seconds so you can plan your four before the battle opens, then the AI secretly locks its own four when the battle starts.</div>
-                <div className="note-row">{simTurnTimerEnabled ? 'Turn timer is armed. If a player slot is left without a valid selection when 30 seconds expires, the app will auto-pick a random move and random live target for that Pokemon.' : 'Turn timer is off. Resolve turns manually at your own pace.'}</div>
-                <div className="note-row">{simAnnouncerEnabled ? 'Announcer is on with a male-voice speech pass, preview reads, live hit and KO calls, turn-clock reminders, and a post-game star performer callout.' : 'Announcer is off. Toggle it on to hear preview commentary, move calls, KO hype, and post-game highlights.'}</div>
+                  <div className="note-row">{simTurnTimerEnabled ? 'Turn timer is armed. Locking choices early does not skip the clock; the full 30-second window still runs so the announcer can work the turn before the board resolves. Any slot left without a valid choice at zero will be auto-filled with a random legal line.' : 'Turn timer is off. Resolve turns manually at your own pace.'}</div>
+                  <div className="note-row">{simAnnouncerEnabled ? 'Announcer is on with a male-voice speech pass, preview reads, live hit and KO calls, turn-clock reminders, winner reveals, and a Pokemon of the Game spotlight.' : 'Announcer is off. Toggle it on to hear preview commentary, move calls, KO hype, and post-game highlights.'}</div>
               </div>
             </div>
 
@@ -3768,14 +3836,16 @@ function App() {
                         })}
                       </div>
                       <div className="team-actions">
-                        <button className="action-button primary" onClick={submitSimTurn}>Resolve Turn</button>
-                        <button className="action-button" onClick={() => { setSimBattle(null); setSimChoiceDrafts({}); }}>End Simulation</button>
+                        <button className="action-button primary" onClick={submitSimTurn} disabled={simTurnTimerEnabled && simChoicesLocked}>
+                          {simTurnTimerEnabled ? (simChoicesLocked ? 'Choices Locked' : 'Lock Turn') : 'Resolve Turn'}
+                        </button>
+                        <button className="action-button" onClick={() => { setSimBattle(null); setSimChoiceDrafts({}); setSimChoicesLocked(false); }}>End Simulation</button>
                       </div>
                     </>
                   ) : (
                     <div className="team-actions">
-                      <button className="action-button primary" onClick={() => { setSimBattle(null); setSimChoiceDrafts({}); startSimulatorPreview(); }}>Run Another Match</button>
-                      <button className="action-button" onClick={() => { setSimBattle(null); setSimChoiceDrafts({}); }}>Close Simulator</button>
+                      <button className="action-button primary" onClick={() => { setSimBattle(null); setSimChoiceDrafts({}); setSimChoicesLocked(false); startSimulatorPreview(); }}>Run Another Match</button>
+                      <button className="action-button" onClick={() => { setSimBattle(null); setSimChoiceDrafts({}); setSimChoicesLocked(false); }}>Close Simulator</button>
                     </div>
                   )}
                 </>

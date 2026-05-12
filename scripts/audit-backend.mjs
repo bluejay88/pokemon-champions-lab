@@ -154,7 +154,7 @@ const {
 const { calculateDamage } = damage;
 const { generateTeamPlans } = ai;
 const { buildMoveParitySummary, moveParityForMove } = moveParity;
-const { createRoomState, forfeitRoomState, joinRoomState, submitBringOrderState, submitTurnChoicesState } = online;
+const { createRoomState, forfeitRoomState, joinRoomState, submitBringOrderState, submitTurnChoicesState, touchRoomState } = online;
 const { advancePreviewToBattle, createSimulatorBattle, legalMovesForUnit, randomChoicesForSide, resolveTurn } = simulator;
 
 const statKeys = ['hp', 'attack', 'defense', 'specialAttack', 'specialDefense', 'speed'];
@@ -795,9 +795,23 @@ let forfeitAuditRoom = createRoomState(hostAccount, auditHostTeam, 'Singles', 'g
 forfeitAuditRoom = joinRoomState(forfeitAuditRoom, guestAccount, auditGuestTeam, 'gen4-champion', true);
 forfeitAuditRoom = submitBringOrderState(forfeitAuditRoom, hostAccount.playerId, [0, 1, 2, 3]);
 forfeitAuditRoom = submitBringOrderState(forfeitAuditRoom, guestAccount.playerId, [0, 1, 2, 3]);
+assert.equal(forfeitAuditRoom.battle?.player.units.length, 4, 'A locked bring-four should always produce four usable player units in battle.');
+assert.equal(forfeitAuditRoom.battle?.opponent.units.length, 4, 'A locked bring-four should always produce four usable opponent units in battle.');
 forfeitAuditRoom = forfeitRoomState(forfeitAuditRoom, guestAccount.playerId);
 assert.equal(forfeitAuditRoom.winnerSeat, 'host', 'Forfeit should award the win to the non-forfeiting player.');
 assert.equal(forfeitAuditRoom.resultReason, 'forfeit', 'Forfeit results should be tagged clearly in PvP room state.');
+
+let deadlineAuditRoom = createRoomState(hostAccount, auditHostTeam, 'Singles', 'gen5-final', true);
+deadlineAuditRoom = joinRoomState(deadlineAuditRoom, guestAccount, auditGuestTeam, 'gen4-champion', true);
+deadlineAuditRoom = submitBringOrderState(deadlineAuditRoom, hostAccount.playerId, [0, 1, 2, 3]);
+deadlineAuditRoom = submitBringOrderState(deadlineAuditRoom, guestAccount.playerId, [0, 1, 2, 3]);
+const deadlineAuditTurn = deadlineAuditRoom.battle?.turn ?? 0;
+deadlineAuditRoom = submitTurnChoicesState(deadlineAuditRoom, hostAccount.playerId, randomChoicesForSide(deadlineAuditRoom.battle, 'player'));
+deadlineAuditRoom = submitTurnChoicesState(deadlineAuditRoom, guestAccount.playerId, randomChoicesForSide(deadlineAuditRoom.battle, 'opponent'));
+assert.equal(deadlineAuditRoom.battle?.turn, deadlineAuditTurn, 'PvP turn resolution should wait for the move clock even when both players lock early.');
+deadlineAuditRoom.deadlineAt = new Date(Date.now() - 1000).toISOString();
+deadlineAuditRoom = touchRoomState(deadlineAuditRoom);
+assert.equal(deadlineAuditRoom.battle?.turn, deadlineAuditTurn + 1, 'PvP turn resolution should advance as soon as the move clock expires.');
 
 let onlineBattleHostWins = 0;
 let onlineBattleGuestWins = 0;
@@ -844,7 +858,7 @@ const summary = [
   `Verified move-parity registry coverage at ${paritySummary.coveredPercent}% across ${paritySummary.total} Champions moves, with ${paritySummary.explicit} explicit hooks tagged in the report.`,
   `Verified damage engine produces live damage output under the Champions EV model, including Doubles spread reduction, Aurora Veil, Helping Hand, Magic Room, and Wonder Room checks.`,
   `Verified simulator rules for chained Protect odds, ally-target support hooks, rain-locked Thunder accuracy, Snarl spread debuffs, Earthquake ally collateral, Sticky Web and Toxic Spikes switch-in hooks, forced-thaw freeze timing, Rest sleep timing, Disable and Torment move locks, weather field timers, opponent reveal state, Calm Mind and Nasty Plot boosts, Trick Room toggling, and Mega weather ordering.`,
-  `Verified shared PvP room logic, including bring-four lock-in, live turn resolution, forfeit handling, and 50 automated room-code battle simulations (${onlineBattleHostWins} host wins / ${onlineBattleGuestWins} guest wins).`,
+  `Verified shared PvP room logic, including bring-four lock-in, full roster integrity, deadline-based turn resolution, forfeit handling, and 50 automated room-code battle simulations (${onlineBattleHostWins} host wins / ${onlineBattleGuestWins} guest wins).`,
   warnings.length ? `Source-data warnings: ${warnings.length} HP floor rows on the scraped form pages disagree with fixed 31 IV policy, so the app keeps the fixed-IV result intentionally.` : 'Source-data warnings: none.',
 ];
 

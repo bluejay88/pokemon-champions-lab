@@ -327,6 +327,17 @@ export default async function handler(request: Request) {
 
     return jsonResponse({ error: 'Unsupported arena action.' }, 400);
   } catch (error) {
+    if (action === 'heartbeat') {
+      return jsonResponse({
+        stats: {
+          activeUsers: 0,
+          totalVisits: 0,
+          activeBattles: 0,
+        },
+        remoteUnavailable: true,
+        error: error instanceof Error ? error.message : 'Arena request failed.',
+      });
+    }
     if (action === 'history') {
       return jsonResponse({
         history: [],
