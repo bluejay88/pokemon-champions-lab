@@ -58,7 +58,6 @@ import type { SimulatorBattleState, SimulatorChoice } from './lib/simulator';
 type SimulatorPreviewState = {
   format: BattleFormat;
   opponentTeam: Team;
-  opponentOrder: number[];
   previewEndsAt: number;
 };
 
@@ -81,6 +80,45 @@ const appTabs: { id: BattleTab; label: string; short: string; description: strin
 
 const brandPokemonIcons = ['Bellibolt', 'Jolteon', 'Sableye', 'Gengar', 'Mega Alakazam', 'Mega Clefable', 'Garchomp'];
 const layoutModes: LayoutMode[] = ['Auto', 'Stretch', 'Focus'];
+const simulatorSupportMoveNames = new Set([
+  'Protect',
+  'Detect',
+  'Wide Guard',
+  'Quick Guard',
+  'Tailwind',
+  'Trick Room',
+  'Helping Hand',
+  'Follow Me',
+  'Rage Powder',
+  'Spore',
+  'Thunder Wave',
+  'Encore',
+  'Disable',
+  'Fake Out',
+  'Icy Wind',
+  'Snarl',
+  'Will-O-Wisp',
+  'Reflect',
+  'Light Screen',
+  'Safeguard',
+  'Taunt',
+  'Swords Dance',
+  'Calm Mind',
+  'Nasty Plot',
+  'Dragon Dance',
+]);
+const simulatorLeadMoveNames = new Set([
+  'Fake Out',
+  'Tailwind',
+  'Trick Room',
+  'Spore',
+  'Follow Me',
+  'Rage Powder',
+  'Icy Wind',
+  'Snarl',
+  'Encore',
+  'Taunt',
+]);
 
 function copyBuild(build: PokemonBuild): PokemonBuild {
   return {
@@ -225,6 +263,92 @@ function randomOpponentTeam(format: BattleFormat, offMetaBias: number) {
 
 function filledSlotIndices(team: Team) {
   return team.slots.map((slot, index) => (slot.pokemonId ? index : -1)).filter((index) => index >= 0);
+}
+
+function knownMovesForBuild(build: PokemonBuild, pokemon: PokemonEntry | null) {
+  if (!pokemon) {
+    return [];
+  }
+
+  return build.moveIds.map((moveId) => pokemon.movePool.find((move) => move.id === moveId)).filter(isMoveEntry);
+}
+
+function bestAverageDamagePercent(attackerBuild: PokemonBuild, defenderBuild: PokemonBuild) {
+  const attacker = resolvePokemonForm(attackerBuild);
+  if (!attacker) {
+    return 0;
+  }
+
+  return knownMovesForBuild(attackerBuild, attacker).reduce((best, move) => {
+    const result = calculateDamage(attackerBuild, defenderBuild, move, defaultEnvironment);
+    return Math.max(best, result?.averagePercent ?? 0);
+  }, 0);
+}
+
+function simulatorSupportScore(build: PokemonBuild, pokemon: PokemonEntry | null, format: BattleFormat) {
+  const moves = knownMovesForBuild(build, pokemon);
+  return moves.reduce((score, move) => {
+    let next = score;
+    if (simulatorSupportMoveNames.has(move.name)) {
+      next += format === 'Doubles' ? 11 : 8;
+    }
+    if (simulatorLeadMoveNames.has(move.name)) {
+      next += format === 'Doubles' ? 8 : 5;
+    }
+    if (move.category === 'Status') {
+      next += 2;
+    }
+    if (move.name === 'Protect' && format === 'Doubles') {
+      next += 4;
+    }
+    return next;
+  }, 0);
+}
+
+function chooseOpponentBringOrder(format: BattleFormat, opponentTeam: Team, playerTeam: Team, playerOrder: number[]) {
+  const playerBuilds = playerOrder.map((slotIndex) => playerTeam.slots[slotIndex]).filter((build) => Boolean(build?.pokemonId));
+  const candidateScores = filledSlotIndices(opponentTeam)
+    .map((slotIndex) => {
+      const build = opponentTeam.slots[slotIndex];
+      const pokemon = resolvePokemonForm(build);
+      if (!pokemon) {
+        return null;
+      }
+
+      const stats = buildStats(pokemon.baseStats, build.evs, build.natureId);
+      const speedScore = stats.speed * 0.12;
+      const supportScore = simulatorSupportScore(build, pokemon, format);
+      const trickRoomLeadBias = knownMovesForBuild(build, pokemon).some((move) => move.name === 'Trick Room')
+        ? Math.max(0, 180 - stats.speed) * 0.18
+        : 0;
+      const offense =
+        playerBuilds.reduce((total, defenderBuild) => total + bestAverageDamagePercent(build, defenderBuild), 0) /
+        Math.max(1, playerBuilds.length);
+      const defense =
+        playerBuilds.reduce((total, attackerBuild) => total + Math.max(0, 100 - bestAverageDamagePercent(attackerBuild, build)), 0) /
+        Math.max(1, playerBuilds.length);
+      const megaBonus = build.useMega || getItemById(build.itemId)?.category === 'mega-stone' ? 12 : 0;
+      const totalScore = offense * 0.62 + defense * 0.34 + supportScore + speedScore + megaBonus;
+      const leadScore = offense * 0.46 + defense * 0.18 + supportScore * 1.22 + speedScore + trickRoomLeadBias;
+
+      return {
+        slotIndex,
+        totalScore,
+        leadScore,
+      };
+    })
+    .filter((entry): entry is { slotIndex: number; totalScore: number; leadScore: number } => Boolean(entry))
+    .sort((left, right) => right.totalScore - left.totalScore);
+
+  const chosen = candidateScores.slice(0, 4);
+  if (format === 'Singles') {
+    return [...chosen].sort((left, right) => right.leadScore - left.leadScore).map((entry) => entry.slotIndex);
+  }
+
+  const openingPair = [...chosen].sort((left, right) => right.leadScore - left.leadScore).slice(0, 2);
+  const openingSet = new Set(openingPair.map((entry) => entry.slotIndex));
+  const backline = chosen.filter((entry) => !openingSet.has(entry.slotIndex)).sort((left, right) => right.totalScore - left.totalScore);
+  return [...openingPair, ...backline].map((entry) => entry.slotIndex);
 }
 
 function roleSummary(team: Team) {
@@ -506,11 +630,9 @@ function App() {
     }
 
     const opponentTeam = randomOpponentTeam(simFormat, state.profile.offMetaBias);
-    const opponentOrder = filledSlotIndices(opponentTeam).slice(0, 4);
     setSimPreview({
       format: simFormat,
       opponentTeam,
-      opponentOrder,
       previewEndsAt: Date.now() + 60_000,
     });
     setSimBringOrder([]);
@@ -537,7 +659,8 @@ function App() {
 
     const playerTeam = cloneTeam(team);
     playerTeam.format = simPreview.format;
-    const battle = advancePreviewToBattle(createSimulatorBattle(simPreview.format, playerTeam, simBringOrder, simPreview.opponentTeam, simPreview.opponentOrder, simPreview.previewEndsAt));
+    const opponentOrder = chooseOpponentBringOrder(simPreview.format, simPreview.opponentTeam, playerTeam, simBringOrder);
+    const battle = advancePreviewToBattle(createSimulatorBattle(simPreview.format, playerTeam, simBringOrder, simPreview.opponentTeam, opponentOrder, simPreview.previewEndsAt));
     setSimBattle(battle);
     setSimPreview(null);
     setSimChoiceDrafts({});
@@ -1243,8 +1366,9 @@ function App() {
               <button className="action-button primary" onClick={startSimulatorPreview}>Generate Viable Opponent</button>
               <div className="notes-list compact-scroll">
                 <div className="note-row">The simulator uses the live roster, your saved spreads, the current damage engine, and a battle sandbox with targeting, switching, preview order, and AI decisions.</div>
+                <div className="note-row">Opponent preview now behaves like ranked team preview: you see all six species, but their items, abilities, and moves stay hidden until battle actions reveal them.</div>
                 <div className="note-row">Mega-capable Pokemon can now choose a dedicated Mega Evolve action, trigger their Mega ability before moving, and only one Mega can be used per side in each battle.</div>
-                <div className="note-row">Preview stays visible for 60 seconds so you can plan your four before the battle opens.</div>
+                <div className="note-row">Preview stays visible for 60 seconds so you can plan your four before the battle opens, then the AI secretly locks its own four when the battle starts.</div>
               </div>
             </div>
 
@@ -1258,7 +1382,7 @@ function App() {
                       <div className="sim-team-preview">
                         {filledSlotIndices(team).map((slotIndex) => {
                           const build = team.slots[slotIndex];
-                          const pokemon = resolvePokemonForm(build);
+                          const pokemon = selectedPokemon(build) ?? resolvePokemonForm(build);
                           const selected = simBringOrder.includes(slotIndex);
                           return (
                             <button key={build.id} className={selected ? 'sim-team-card active' : 'sim-team-card'} onClick={() => toggleBringIndex(slotIndex)}>
@@ -1273,17 +1397,16 @@ function App() {
                     </div>
 
                     <div className="subpanel">
-                      <SectionHeader title="Opponent Preview" subtitle="AI-generated viable team" compact />
+                      <SectionHeader title="Opponent Preview" subtitle="All 6 species revealed. Set details stay hidden." compact />
                       <div className="sim-team-preview">
-                        {simPreview.opponentOrder.map((orderIndex, index) => {
-                          const build = simPreview.opponentTeam.slots[orderIndex];
-                          const pokemon = resolvePokemonForm(build);
+                        {filledSlotIndices(simPreview.opponentTeam).map((slotIndex) => {
+                          const build = simPreview.opponentTeam.slots[slotIndex];
+                          const pokemon = selectedPokemon(build) ?? resolvePokemonForm(build);
                           return (
-                            <div key={`${build.id}-${index}`} className="sim-team-card static">
+                            <div key={build.id} className="sim-team-card static">
                               <PokemonSpriteFrame pokemon={pokemon} size="standard" />
-                              <strong>{pokemon?.displayName ?? `Slot ${index + 1}`}</strong>
-                              <small>{describeBuildRole(build, simFormat)}</small>
-                              <UsagePill insight={getPokemonUsageInsight(pokemon, simFormat)} small />
+                              <strong>{pokemon?.displayName ?? `Slot ${slotIndex + 1}`}</strong>
+                              <small>Moveset, item, and ability hidden until battle.</small>
                             </div>
                           );
                         })}
@@ -1547,7 +1670,7 @@ function BattleSideView({ side, format, friendly = false }: { side: SimulatorBat
             <div key={`${unit.pokemon.id}-${index}`} className="battle-card">
               <PokemonSpriteFrame pokemon={unit.pokemon} size="standard" />
               <strong>{unit.pokemon.displayName}</strong>
-              <small>{describeBuildRole(unit.build, format)}</small>
+              <small>{friendly ? describeBuildRole(unit.build, format) : 'Opponent set hidden'}</small>
               <div className="hp-bar">
                 <div className="hp-fill" style={{ width: `${Math.max(0, (unit.currentHp / unit.maxHp) * 100)}%` }} />
               </div>
