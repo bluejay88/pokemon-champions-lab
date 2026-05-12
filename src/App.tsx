@@ -56,6 +56,7 @@ import {
 } from './lib/online';
 import { clearState, listStoredProfiles, loadState, saveState } from './lib/storage';
 import { buildMoveParitySummary, moveParityForMove } from './lib/moveParity';
+import { buildAbilityParitySummary } from './lib/abilityParity';
 import { advancePreviewToBattle, createSimulatorBattle, legalMovesForUnit, resolveTurn } from './lib/simulator';
 import { getMoveUsageInsight, getPokemonUsageInsight, getPopularPresetPatch, getPopularPresetSummary } from './lib/usage';
 import type {
@@ -247,6 +248,7 @@ const simulatorAutoTargetMoves = new Set([
   'Spikes',
   'Stealth Rock',
   'Sticky Web',
+  'Struggle',
   'Sunny Day',
   'Swords Dance',
   'Tailwind',
@@ -362,15 +364,15 @@ const announcerScripts: Record<
     '{pokemon} protects successfully and denies the immediate punish.',
   ],
   ko: [
-    '{target} goes down, and that is a massive knockout.',
-    'Knockout confirmed. {pokemon} wins the exchange decisively.',
-    'That is a KO, and the battle state just snapped into a new shape.',
-    '{target} falls, and the momentum surges toward {pokemon}.',
-    '{pokemon} secures the knockout and opens the door for the next wave.',
-    'A huge removal there. {target} is out of the battle.',
+    '{target} goes down to {attacker} using {move}, and that is a massive knockout.',
+    'Knockout confirmed. {attacker} wins the exchange decisively with {move}.',
+    'That is a KO from {attacker} with {move}, and the battle state just snapped into a new shape.',
+    '{target} falls after taking {move}, and the momentum surges toward {attacker}.',
+    '{attacker} secures the knockout with {move} and opens the door for the next wave.',
+    'A huge removal there. {target} is out of the battle after {move}.',
     'The crowd erupts as {target} drops from the field.',
-    'That knockout will be remembered if this battle stays close.',
-    '{pokemon} converts pressure into a clean finish.',
+    'That knockout from {attacker} using {move} will be remembered if this battle stays close.',
+    '{attacker} converts pressure into a clean finish with {move}.',
     'One more down, and the numbers game starts to matter.',
   ],
   finish: [
@@ -797,6 +799,12 @@ function filledSlotIndices(team: Team) {
     .filter((index) => index >= 0);
 }
 
+function livingTargetSlots(side: SimulatorBattleState['player']) {
+  return side.active
+    .map((unitIndex, targetIndex) => ({ unit: side.units[unitIndex], targetIndex }))
+    .filter((entry): entry is { unit: SimUnit; targetIndex: number } => Boolean(entry.unit && !entry.unit.fainted));
+}
+
 function knownMovesForBuild(build: PokemonBuild, pokemon: PokemonEntry | null) {
   if (!pokemon) {
     return [];
@@ -950,6 +958,23 @@ function simulatorStatusBadge(unit: SimUnit): StatusBadge | null {
 
 function simulatorBattleTags(unit: SimUnit) {
   const tags: BattleTag[] = [];
+  const legalMoves = legalMovesForUnit(unit);
+  if (unit.rechargeTurns > 0) {
+    tags.push({
+      key: 'recharge',
+      label: 'Recharge',
+      tone: 'warning',
+      title: `${unit.rechargeMoveName ?? 'The last move'} has locked this Pokemon into a recharge turn.`,
+    });
+  }
+  if (unit.chargingTurns > 0 && unit.chargingMoveName) {
+    tags.push({
+      key: 'charging',
+      label: `${unit.chargingMoveName} Charge`,
+      tone: 'warning',
+      title: `${unit.chargingMoveName} is charging now and will fire on the next action if this Pokemon is not interrupted.`,
+    });
+  }
   if (unit.tauntTurns > 0) {
     tags.push({
       key: 'taunt',
@@ -1058,6 +1083,14 @@ function simulatorBattleTags(unit: SimUnit) {
       title: freezeMeta.title,
     });
   }
+  if (legalMoves.some((move) => move.id === 'struggle')) {
+    tags.push({
+      key: 'struggle-lock',
+      label: 'Struggle Lock',
+      tone: 'negative',
+      title: 'All normal move options are locked, so this Pokemon is forced to Struggle until a restriction ends.',
+    });
+  }
 
   const stageTags: Array<[keyof Pick<PokemonBuild, 'attackStage' | 'defenseStage' | 'specialAttackStage' | 'specialDefenseStage' | 'speedStage' | 'accuracyStage' | 'evasionStage'>, string]> = [
     ['attackStage', 'Atk'],
@@ -1086,6 +1119,12 @@ function simulatorBattleTags(unit: SimUnit) {
 
 function simulatorRestrictionNotes(unit: SimUnit) {
   const notes: string[] = [];
+  if (unit.rechargeTurns > 0) {
+    notes.push(`${unit.rechargeMoveName ?? 'The previous move'} has forced a recharge turn, so this Pokemon cannot attack or switch out right now.`);
+  }
+  if (unit.chargingTurns > 0 && unit.chargingMoveName) {
+    notes.push(`${unit.chargingMoveName} is already charging. This Pokemon is committed to that move on its next action unless it is interrupted first.`);
+  }
   if (unit.tauntTurns > 0) {
     notes.push(`Taunt is active for ${unit.tauntTurns} more turn${unit.tauntTurns === 1 ? '' : 's'}, so status moves are blocked.`);
   }
@@ -1130,7 +1169,10 @@ function simulatorRestrictionNotes(unit: SimUnit) {
   if (unit.build.status === 'paralysis') {
     notes.push('Paralysis uses the current Champions rate here: 12.5% full paralysis with Speed reduced to half.');
   }
-  if (!legalMovesForUnit(unit).length) {
+  const legalMoves = legalMovesForUnit(unit);
+  if (legalMoves.some((move) => move.id === 'struggle')) {
+    notes.push('All normal move options are locked, so this Pokemon is Struggle-locked until one of the active restrictions clears.');
+  } else if (!legalMoves.length && unit.rechargeTurns <= 0 && unit.chargingTurns <= 0) {
     notes.push('No legal move is currently available because the active lock effects overlap. Switch if possible, or wait for the restriction to clear.');
   }
   return notes;
@@ -1171,6 +1213,9 @@ function simulatorTargetNote(move: PokemonMove | null, format: BattleFormat, all
   if (targetMode === 'auto') {
     if (move.name === 'Aurora Veil') {
       return 'Aurora Veil applies to your side automatically and only works while snow is active.';
+    }
+    if (move.name === 'Struggle') {
+      return 'Struggle targets a random live opposing slot automatically here.';
     }
     return `${move.name} resolves automatically here, so no opponent target slot is needed.`;
   }
@@ -1665,7 +1710,8 @@ function announcerLinesFromBattleUpdate(previous: SimulatorBattleState | null, c
     const resistMatch = entry.match(/^(.+?) resisted the hit\.$/);
     const missMatch = entry.match(/^(.+?)'s (.+?) missed (.+?)\.$/);
     const statusMatch = entry.match(/^(.+?) was afflicted by (.+?) \((.+?)\)\.$/);
-    const koMatch = entry.match(/^(.+?) was knocked out\.$/);
+    const koMatch = entry.match(/^(.+?) was knocked out by (.+?) using (.+?)\.$/);
+    const legacyKoMatch = entry.match(/^(.+?) was knocked out\.$/);
     const turnMatch = entry.match(/^Turn (\d+) ended\./);
 
     if (hitMatch) {
@@ -1679,7 +1725,9 @@ function announcerLinesFromBattleUpdate(previous: SimulatorBattleState | null, c
     } else if (statusMatch) {
       line = fillAnnouncerLine(pickLine(announcerScripts.status), { source: statusMatch[2], status: statusMatch[3], target: statusMatch[1] });
     } else if (koMatch) {
-      line = fillAnnouncerLine(pickLine(announcerScripts.ko), { target: koMatch[1], pokemon: koMatch[1] });
+      line = fillAnnouncerLine(pickLine(announcerScripts.ko), { target: koMatch[1], attacker: koMatch[2], move: koMatch[3], pokemon: koMatch[2] });
+    } else if (legacyKoMatch) {
+      line = fillAnnouncerLine(pickLine(announcerScripts.ko), { target: legacyKoMatch[1], attacker: 'the attacker', move: 'the finishing move', pokemon: 'the attacker' });
     } else if (switchMatch) {
       line = fillAnnouncerLine(pickLine(announcerScripts.switch), { pokemon: switchMatch[1] });
     } else if (/blocked .+ with|braced itself with|set Quick Guard|set Wide Guard/i.test(entry)) {
@@ -1840,6 +1888,7 @@ function App() {
   const profileReady = Boolean(state.profile.trainerName.trim());
   const storedProfiles = useMemo(() => listStoredProfiles(), [state.profile.trainerName, lastSavedAt]);
   const overallMoveParity = useMemo(() => buildMoveParitySummary(dataset.moves), []);
+  const overallAbilityParity = useMemo(() => buildAbilityParitySummary(dataset.pokemon), []);
   const selectedMoveParityEntries = useMemo(
     () => selectedPokedexPokemon.movePool.map((move) => moveParityForMove(move)),
     [selectedPokedexPokemon],
@@ -2230,8 +2279,14 @@ function App() {
       }
 
       const legalMoves = legalMovesForUnit(unit);
-      const fallbackMove = legalMoves[0] ?? unit.pokemon.movePool.find((move) => unit.build.moveIds.includes(move.id)) ?? unit.pokemon.movePool[0] ?? null;
-      const randomTarget = battle.opponent.active.length ? Math.floor(Math.random() * battle.opponent.active.length) : 0;
+      const fallbackMove =
+        legalMoves[0]
+        ?? unit.pokemon.movePool.find((move) => move.id === unit.chargingMoveId)
+        ?? unit.pokemon.movePool.find((move) => unit.build.moveIds.includes(move.id))
+        ?? unit.pokemon.movePool[0]
+        ?? null;
+      const liveTargets = livingTargetSlots(battle.opponent);
+      const randomTarget = liveTargets[Math.floor(Math.random() * Math.max(1, liveTargets.length))]?.targetIndex ?? 0;
       const draft = drafts[actor];
       let choice: SimulatorChoice;
 
@@ -2253,11 +2308,12 @@ function App() {
         }
       } else if (draft && fallbackMove) {
         const selectedMove = legalMoves.find((move) => move.id === draft.moveId) ?? fallbackMove;
+        const selectedTarget = liveTargets.some((entry) => entry.targetIndex === draft.target) ? draft.target : randomTarget;
         choice = {
           type: draft.type,
           actor,
           moveId: selectedMove.id,
-          target: draft.target,
+          target: selectedTarget,
         } satisfies SimulatorChoice;
       } else {
         choice = {
@@ -2270,6 +2326,8 @@ function App() {
 
       const wasAutoSelected =
         timedOut &&
+        unit.rechargeTurns <= 0 &&
+        unit.chargingTurns <= 0 &&
         (!draft || (draft.type !== 'switch' && !legalMoves.some((move) => move.id === draft.moveId)));
       if (wasAutoSelected) {
         notices.push(`Your ${unit.pokemon.displayName} move was randomly selected due to no selection made.`);
@@ -3747,6 +3805,10 @@ function App() {
                             simBattle.player.active
                               .map((activeIndex) => simBattle.player.units[activeIndex])
                               .find((candidate) => candidate && candidate !== unit && !candidate.fainted) ?? null;
+                          const liveEnemyTargets = livingTargetSlots(simBattle.opponent);
+                          const selectedTarget = liveEnemyTargets.some((entry) => entry.targetIndex === draft.target)
+                            ? draft.target
+                            : (liveEnemyTargets[0]?.targetIndex ?? 0);
                           const targetMode = simulatorTargetMode(selectedMove, simBattle.format);
                           const targetNote = simulatorTargetNote(selectedMove, simBattle.format, allyUnit?.pokemon.displayName ?? null);
                           const restrictionNotes = simulatorRestrictionNotes(unit);
@@ -3773,7 +3835,7 @@ function App() {
                               ) : null}
                               <label className="field">
                                 <span>Action</span>
-                                <select value={effectiveDraftType} onChange={(event) => updateChoiceDraft(actor, { type: event.target.value as ChoiceDraft['type'] })}>
+                                <select value={effectiveDraftType} onChange={(event) => updateChoiceDraft(actor, { type: event.target.value as ChoiceDraft['type'] })} disabled={unit.rechargeTurns > 0 || unit.chargingTurns > 0}>
                                   <option value="move">Move</option>
                                   {allowMegaOption ? <option value="mega">Mega Evolve</option> : null}
                                   {canSwitch ? <option value="switch">Switch</option> : null}
@@ -3792,11 +3854,10 @@ function App() {
                                   {targetMode === 'foe' ? (
                                     <label className="field">
                                       <span>Target</span>
-                                      <select value={draft.target} onChange={(event) => updateChoiceDraft(actor, { target: Number(event.target.value) })}>
-                                        {simBattle.opponent.active.map((enemyIndex, targetIndex) => {
-                                          const enemy = simBattle.opponent.units[enemyIndex];
-                                          return <option key={`${enemy?.pokemon.id}-${targetIndex}`} value={targetIndex}>{enemy?.pokemon.displayName ?? `Target ${targetIndex + 1}`}</option>;
-                                        })}
+                                      <select value={selectedTarget} onChange={(event) => updateChoiceDraft(actor, { target: Number(event.target.value) })}>
+                                        {liveEnemyTargets.map(({ unit: enemy, targetIndex }) => (
+                                          <option key={`${enemy.pokemon.id}-${targetIndex}`} value={targetIndex}>{enemy.pokemon.displayName}</option>
+                                        ))}
                                       </select>
                                     </label>
                                   ) : targetNote ? (
@@ -3811,7 +3872,11 @@ function App() {
                                   ))}
                                   {!legalMoves.length ? (
                                     <div className="note-row compact-note">
-                                      No legal move is currently available under the active locks. If the turn timer expires here, the sandbox will attempt a fallback line automatically.
+                                      {unit.rechargeTurns > 0
+                                        ? 'This slot is spending the turn recharging, so it cannot pick a move or switch.'
+                                        : unit.chargingTurns > 0
+                                          ? 'This slot is already charging a two-turn move and will fire that stored move automatically on its next action.'
+                                          : 'No legal move is currently available under the active locks. If the turn timer expires here, the sandbox will fall back to the correct forced line automatically.'}
                                     </div>
                                   ) : null}
                                   {effectiveDraftType === 'mega' && unit.megaPokemon ? (
@@ -4086,6 +4151,10 @@ function App() {
                             pvpRoom.battle!.player.active
                               .map((activeIndex) => pvpRoom.battle!.player.units[activeIndex])
                               .find((candidate) => candidate && candidate !== unit && !candidate.fainted) ?? null;
+                          const liveEnemyTargets = livingTargetSlots(pvpRoom.battle!.opponent);
+                          const selectedTarget = liveEnemyTargets.some((entry) => entry.targetIndex === draft.target)
+                            ? draft.target
+                            : (liveEnemyTargets[0]?.targetIndex ?? 0);
                           const targetMode = simulatorTargetMode(selectedMove, pvpRoom.battle!.format);
                           const targetNote = simulatorTargetNote(selectedMove, pvpRoom.battle!.format, allyUnit?.pokemon.displayName ?? null);
                           const restrictionNotes = simulatorRestrictionNotes(unit);
@@ -4109,7 +4178,7 @@ function App() {
                               ) : null}
                               <label className="field">
                                 <span>Action</span>
-                                <select value={effectiveDraftType} onChange={(event) => updatePvpChoiceDraft(actor, { type: event.target.value as ChoiceDraft['type'] })}>
+                                <select value={effectiveDraftType} onChange={(event) => updatePvpChoiceDraft(actor, { type: event.target.value as ChoiceDraft['type'] })} disabled={unit.rechargeTurns > 0 || unit.chargingTurns > 0}>
                                   <option value="move">Move</option>
                                   {allowMegaOption ? <option value="mega">Mega Evolve</option> : null}
                                   {canSwitch ? <option value="switch">Switch</option> : null}
@@ -4126,11 +4195,10 @@ function App() {
                                   {targetMode === 'foe' ? (
                                     <label className="field">
                                       <span>Target</span>
-                                      <select value={draft.target} onChange={(event) => updatePvpChoiceDraft(actor, { target: Number(event.target.value) })}>
-                                        {pvpRoom.battle!.opponent.active.map((enemyIndex, targetIndex) => {
-                                          const enemy = pvpRoom.battle!.opponent.units[enemyIndex];
-                                          return <option key={`${enemy?.pokemon.id}-${targetIndex}`} value={targetIndex}>{enemy?.pokemon.displayName ?? `Target ${targetIndex + 1}`}</option>;
-                                        })}
+                                      <select value={selectedTarget} onChange={(event) => updatePvpChoiceDraft(actor, { target: Number(event.target.value) })}>
+                                        {liveEnemyTargets.map(({ unit: enemy, targetIndex }) => (
+                                          <option key={`${enemy.pokemon.id}-${targetIndex}`} value={targetIndex}>{enemy.pokemon.displayName}</option>
+                                        ))}
                                       </select>
                                     </label>
                                   ) : targetNote ? <div className="note-row compact-note">{targetNote}</div> : null}
@@ -4139,6 +4207,15 @@ function App() {
                                       {note}
                                     </div>
                                   ))}
+                                  {!legalMoves.length ? (
+                                    <div className="note-row compact-note">
+                                      {unit.rechargeTurns > 0
+                                        ? 'This slot is spending the turn recharging, so it cannot pick a move or switch.'
+                                        : unit.chargingTurns > 0
+                                          ? 'This slot is already charging a two-turn move and will fire that stored move automatically on its next action.'
+                                          : 'No legal move is currently available under the active locks. If the PvP timer expires here, the correct forced line will be submitted automatically.'}
+                                    </div>
+                                  ) : null}
                                 </>
                               ) : (
                                 <label className="field">
@@ -4292,6 +4369,37 @@ function App() {
                 <InfoStat label="Win Rate" value={`${profileHistorySummary.winRate}%`} />
                 <InfoStat label="Best Streak" value={`${profileHistorySummary.bestStreak}`} />
                 <InfoStat label="Avg Turns" value={profileHistorySummary.averageTurns} />
+              </div>
+              <div className="subpanel">
+                <SectionHeader title="Live Team Analysis" subtitle="The current squad snapshot stays visible here so the profile doubles as a prep dashboard." />
+                <div className="result-grid">
+                  <InfoStat label="Format" value={analysis.format} />
+                  <InfoStat label="Synergy" value={`${analysis.synergyScore}`} />
+                  <InfoStat label="Survive" value={`${analysis.survivabilityGrade} / ${analysis.survivabilityTurns}`} />
+                  <InfoStat label="Win Rate" value={`${analysis.estimatedWinRate}%`} />
+                  <InfoStat label="Meta" value={analysis.teamUsage.label} />
+                  <InfoStat label="Off-Meta" value={getNinetalesBiasLabel(state.profile.offMetaBias)} />
+                </div>
+                <MetricNotes analysis={analysis} compact />
+                <div className="notes-list compact-scroll">
+                  <div className="note-row"><strong>Overview:</strong> {analysis.overview}</div>
+                  <div className="note-row"><strong>Threat Pulse:</strong> {analysis.threats.slice(0, 3).map((threat) => `${threat.name} ${threat.score}%`).join(', ') || 'Not enough live team data yet.'}</div>
+                  <div className="note-row"><strong>Easy Wins:</strong> {analysis.easyTargets.join(', ') || 'No easy targets flagged yet.'}</div>
+                </div>
+              </div>
+              <div className="subpanel">
+                <SectionHeader title="Ability Parity" subtitle="A live audit snapshot of how much of the Champions ability pool is wired into battle logic today." />
+                <div className="result-grid">
+                  <InfoStat label="Covered" value={`${overallAbilityParity.coveredPercent}%`} />
+                  <InfoStat label="Explicit" value={`${overallAbilityParity.explicit}`} />
+                  <InfoStat label="Damage Core" value={`${overallAbilityParity.damageCore}`} />
+                  <InfoStat label="Review Left" value={`${overallAbilityParity.reviewNeeded}`} />
+                </div>
+                <div className="notes-list compact-scroll">
+                  <div className="note-row">Explicit ability hooks include live rulings like weather setters, terrain setters, Intimidate, Prankster timing, Good as Gold, Inner Focus, Contrary, Simple, Defiant, Competitive, Clear Body-style shields, Mirror Armor, and Mega Sol timing.</div>
+                  <div className="note-row">Damage-core abilities are covered inside the shared calc layer for type conversion, immunities, power modifiers, crits, and stat multipliers.</div>
+                  <div className="note-row"><strong>Still queued for bespoke review:</strong> {overallAbilityParity.topReviewAbilities.map((entry) => entry.abilityName).join(', ') || 'No remaining review queue.'}</div>
+                </div>
               </div>
               <div className="notes-list scroll-stack growth-chart-list">
                 {profileHistorySummary.growthChart.length ? profileHistorySummary.growthChart.map((record) => (

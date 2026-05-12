@@ -155,7 +155,7 @@ const { calculateDamage } = damage;
 const { generateTeamPlans } = ai;
 const { buildMoveParitySummary, moveParityForMove } = moveParity;
 const { createRoomState, forfeitRoomState, joinRoomState, submitBringOrderState, submitTurnChoicesState, touchRoomState } = online;
-const { advancePreviewToBattle, createSimulatorBattle, legalMovesForUnit, randomChoicesForSide, resolveTurn } = simulator;
+const { advancePreviewToBattle, createSimulatorBattle, legalMovesForUnit, randomChoicesForSide, resolveTurn, resolveTurnWithChoices } = simulator;
 
 const statKeys = ['hp', 'attack', 'defense', 'specialAttack', 'specialDefense', 'speed'];
 const failures = [];
@@ -326,8 +326,22 @@ const coachingUser = findPokemonWithMoves(['Coaching'], ['Chesnaught']);
 const healPulseUser = findPokemonWithMoves(['Heal Pulse'], ['Audino', 'Gardevoir', 'Chimecho']);
 const stickyWebUser = findPokemonWithMoves(['Sticky Web'], ['Ariados', 'Araquanid']);
 const toxicSpikesUser = findPokemonWithMoves(['Toxic Spikes'], ['Ariados', 'Arbok', 'Beedrill']);
+const hyperBeamUser = findPokemonWithMoves(['Hyper Beam'], ['Meganium', 'Charizard', 'Sableye']);
+const solarBeamUser = findPokemonWithMoves(['Solar Beam'], ['Meganium', 'Glimmora', 'Charizard']);
+const meteorBeamUser = findPokemonWithMoves(['Meteor Beam'], ['Glimmora']);
+const pranksterUser = dataset.pokemon.find((pokemon) => pokemon.displayName === 'Sableye' && pokemon.abilities.some((ability) => ability.name === 'Prankster') && ['Taunt', 'Fake Out'].every((moveName) => pokemon.movePool.some((move) => move.name === moveName))) ?? null;
+const darkTarget = dataset.pokemon.find((pokemon) => pokemon.displayName === 'Umbreon' && pokemon.types.includes('Dark')) ?? findPokemonWithMoves(['Protect'], ['Umbreon']);
+const struggleTarget = findPokemonWithMoves(['Protect'], ['Clefable', 'Amoonguss', 'Umbreon']);
+const intimidateUser = dataset.pokemon.find((pokemon) => pokemon.displayName === 'Incineroar' && pokemon.abilities.some((ability) => ability.name === 'Intimidate')) ?? null;
+const innerFocusTarget = dataset.pokemon.find((pokemon) => pokemon.displayName === 'Umbreon' && pokemon.abilities.some((ability) => ability.name === 'Inner Focus')) ?? null;
+const clearBodyTarget = dataset.pokemon.find((pokemon) => pokemon.displayName === 'Dragapult' && pokemon.abilities.some((ability) => ability.name === 'Clear Body')) ?? null;
+const mirrorArmorTarget = dataset.pokemon.find((pokemon) => pokemon.displayName === 'Corviknight' && pokemon.abilities.some((ability) => ability.name === 'Mirror Armor')) ?? null;
+const competitiveTarget = dataset.pokemon.find((pokemon) => pokemon.displayName === 'Milotic' && pokemon.abilities.some((ability) => ability.name === 'Competitive')) ?? null;
+const obliviousTarget = dataset.pokemon.find((pokemon) => pokemon.displayName === 'Mamoswine' && pokemon.abilities.some((ability) => ability.name === 'Oblivious')) ?? null;
+const contraryUser = dataset.pokemon.find((pokemon) => pokemon.displayName === 'Serperior' && pokemon.abilities.some((ability) => ability.name === 'Contrary') && pokemon.movePool.some((move) => move.name === 'Leaf Storm')) ?? null;
 const charizardBase = dataset.pokemon.find((pokemon) => pokemon.displayName === 'Charizard' && !pokemon.isMega) ?? null;
 const abomasnowBase = dataset.pokemon.find((pokemon) => pokemon.displayName === 'Abomasnow' && !pokemon.isMega) ?? null;
+const meganiumBase = dataset.pokemon.find((pokemon) => pokemon.displayName === 'Meganium' && !pokemon.isMega) ?? null;
 assert(
     protectUser &&
     groundedProtectUser &&
@@ -355,8 +369,22 @@ assert(
     healPulseUser &&
     stickyWebUser &&
     toxicSpikesUser &&
+    hyperBeamUser &&
+    solarBeamUser &&
+    meteorBeamUser &&
+    pranksterUser &&
+    darkTarget &&
+    struggleTarget &&
+    intimidateUser &&
+    innerFocusTarget &&
+    clearBodyTarget &&
+    mirrorArmorTarget &&
+    competitiveTarget &&
+    obliviousTarget &&
+    contraryUser &&
     charizardBase &&
-    abomasnowBase,
+    abomasnowBase &&
+    meganiumBase,
   'Expected simulator audit Pokemon to exist in the Champions roster.',
 );
 
@@ -366,6 +394,9 @@ const slowEarthquakeChoiceId = moveIdFor(slowEarthquakeUser, 'Earthquake');
 const thunderChoiceId = moveIdFor(thunderUser, 'Thunder');
 const snarlChoiceId = moveIdFor(snarlUser, 'Snarl');
 const shadowBallChoiceId = moveIdFor(shadowBallUser, 'Shadow Ball');
+const specialTargetAAttackId = specialTargetA.movePool.find((move) => move.category !== 'Status')?.id ?? specialTargetA.movePool[0]?.id ?? null;
+const specialTargetBAttackId = specialTargetB.movePool.find((move) => move.category !== 'Status')?.id ?? specialTargetB.movePool[0]?.id ?? null;
+const darkTargetAttackId = darkTarget.movePool.find((move) => move.category !== 'Status')?.id ?? darkTarget.movePool[0]?.id ?? null;
 const wishChoiceId = moveIdFor(wishUser, 'Wish');
 const voltSwitchChoiceId = moveIdFor(pivotUser, 'Volt Switch');
 const brickBreakChoiceId = moveIdFor(brickBreakUser, 'Brick Break');
@@ -384,10 +415,23 @@ const coachingChoiceId = moveIdFor(coachingUser, 'Coaching');
 const healPulseChoiceId = moveIdFor(healPulseUser, 'Heal Pulse');
 const stickyWebChoiceId = moveIdFor(stickyWebUser, 'Sticky Web');
 const toxicSpikesChoiceId = moveIdFor(toxicSpikesUser, 'Toxic Spikes');
+const hyperBeamChoiceId = moveIdFor(hyperBeamUser, 'Hyper Beam');
+const solarBeamChoiceId = moveIdFor(solarBeamUser, 'Solar Beam');
+const meteorBeamChoiceId = moveIdFor(meteorBeamUser, 'Meteor Beam');
+const pranksterTauntChoiceId = moveIdFor(pranksterUser, 'Taunt');
+const pranksterFakeOutChoiceId = moveIdFor(pranksterUser, 'Fake Out');
+const intimidateAttackId = intimidateUser.movePool.find((move) => move.category !== 'Status')?.id ?? intimidateUser.movePool[0]?.id ?? null;
+const innerFocusAttackId = innerFocusTarget.movePool.find((move) => move.category !== 'Status')?.id ?? innerFocusTarget.movePool[0]?.id ?? null;
+const clearBodyAttackId = clearBodyTarget.movePool.find((move) => move.category !== 'Status')?.id ?? clearBodyTarget.movePool[0]?.id ?? null;
+const mirrorArmorAttackId = mirrorArmorTarget.movePool.find((move) => move.category !== 'Status')?.id ?? mirrorArmorTarget.movePool[0]?.id ?? null;
+const competitiveAttackId = competitiveTarget.movePool.find((move) => move.category !== 'Status')?.id ?? competitiveTarget.movePool[0]?.id ?? null;
+const obliviousAttackId = obliviousTarget.movePool.find((move) => move.category !== 'Status')?.id ?? obliviousTarget.movePool[0]?.id ?? null;
+const contraryLeafStormChoiceId = moveIdFor(contraryUser, 'Leaf Storm');
 const megaCharizardMoveId = moveIdFor(charizardBase, 'Flamethrower') ?? moveIdFor(charizardBase, 'Heat Wave') ?? charizardBase.movePool[0]?.id ?? null;
 const megaAbomasnowMoveId = moveIdFor(abomasnowBase, 'Blizzard') ?? moveIdFor(abomasnowBase, 'Ice Shard') ?? abomasnowBase.movePool[0]?.id ?? null;
 const charizarditeYId = itemIdByName('Charizardite Y');
 const abomasiteId = itemIdByName('Abomasite');
+const meganiumiteId = itemIdByName('Meganiumite');
 assert(
     protectChoiceId &&
     earthquakeChoiceId &&
@@ -395,6 +439,9 @@ assert(
     thunderChoiceId &&
     snarlChoiceId &&
     shadowBallChoiceId &&
+    specialTargetAAttackId &&
+    specialTargetBAttackId &&
+    darkTargetAttackId &&
     wishChoiceId &&
     voltSwitchChoiceId &&
     brickBreakChoiceId &&
@@ -413,10 +460,23 @@ assert(
     healPulseChoiceId &&
     stickyWebChoiceId &&
     toxicSpikesChoiceId &&
+    hyperBeamChoiceId &&
+    solarBeamChoiceId &&
+    meteorBeamChoiceId &&
+    pranksterTauntChoiceId &&
+    pranksterFakeOutChoiceId &&
+    intimidateAttackId &&
+    innerFocusAttackId &&
+    clearBodyAttackId &&
+    mirrorArmorAttackId &&
+    competitiveAttackId &&
+    obliviousAttackId &&
+    contraryLeafStormChoiceId &&
     megaCharizardMoveId &&
     megaAbomasnowMoveId &&
     charizarditeYId &&
-    abomasiteId,
+    abomasiteId &&
+    meganiumiteId,
   'Expected simulator audit moves and Mega Stones to exist on selected Pokemon.',
 );
 
@@ -766,6 +826,182 @@ revealBattle.opponent.units[0].currentHp = 1;
 revealBattle = withMockRandom([0.1, 0.1, 0.1], () => resolveTurn(revealBattle, [{ type: 'move', actor: 0, moveId: earthquakeChoiceId, target: 0 }]));
 assert.equal(revealBattle.opponent.units[1].revealed, true, 'Opponent bench Pokemon should become revealed after they first switch into battle.');
 
+let hyperBeamBattle = buildBattle(
+  'Singles',
+  [
+    buildSlot('hyper-beam-user', hyperBeamUser, ['Hyper Beam'], { evs: { ...blankStats(), specialAttack: 32, hp: 20, specialDefense: 14 } }),
+    buildSlot('hyper-beam-bench', protectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } }),
+  ],
+  [buildSlot('hyper-beam-foe', specialTargetB, [specialTargetB.movePool.find((move) => move.id === specialTargetBAttackId)?.name ?? specialTargetB.movePool[0].name], { evs: { ...blankStats(), hp: 20, specialDefense: 24, defense: 22 } })],
+);
+hyperBeamBattle = withMockRandom([0.1, 0.1, 0.1, 0.1], () => resolveTurn(hyperBeamBattle, [{ type: 'move', actor: 0, moveId: hyperBeamChoiceId, target: 0 }]));
+assert.equal(hyperBeamBattle.player.units[0].rechargeTurns, 1, 'Hyper Beam should apply a one-turn recharge lock after it lands.');
+const hyperBeamActiveBeforeRecharge = hyperBeamBattle.player.active[0];
+hyperBeamBattle = withMockRandom([0.1, 0.1, 0.1, 0.1], () => resolveTurn(hyperBeamBattle, [{ type: 'switch', actor: 0, target: 1 }]));
+assert.equal(hyperBeamBattle.player.active[0], hyperBeamActiveBeforeRecharge, 'A recharging Pokemon should not be allowed to switch out on the recharge turn.');
+assert.equal(hyperBeamBattle.player.units[0].rechargeTurns, 0, 'Recharge should clear after the forced rest turn is spent.');
+
+let solarBeamBattle = buildBattle(
+  'Singles',
+  [buildSlot('solar-beam-user', solarBeamUser, ['Solar Beam'], { evs: { ...blankStats(), specialAttack: 32, hp: 20, specialDefense: 14 } })],
+  [buildSlot('solar-beam-foe', specialTargetB, [specialTargetB.movePool.find((move) => move.id === specialTargetBAttackId)?.name ?? specialTargetB.movePool[0].name], { evs: { ...blankStats(), hp: 20, specialDefense: 24, defense: 22 } })],
+);
+const solarBeamStartHp = solarBeamBattle.opponent.units[0].currentHp;
+solarBeamBattle = withMockRandom([0.1, 0.1, 0.1, 0.1], () => resolveTurn(solarBeamBattle, [{ type: 'move', actor: 0, moveId: solarBeamChoiceId, target: 0 }]));
+assert.equal(solarBeamBattle.opponent.units[0].currentHp, solarBeamStartHp, 'Solar Beam should spend the first turn charging outside of sun.');
+assert.equal(solarBeamBattle.player.units[0].chargingTurns, 1, 'Solar Beam should store a charge turn outside of sun.');
+solarBeamBattle = withMockRandom([0.1, 0.1, 0.1, 0.1], () => resolveTurn(solarBeamBattle, [{ type: 'move', actor: 0, moveId: solarBeamChoiceId, target: 0 }]));
+assert.ok(solarBeamBattle.opponent.units[0].currentHp < solarBeamStartHp, 'Solar Beam should land on the following turn after charging.');
+assert.equal(solarBeamBattle.player.units[0].chargingTurns, 0, 'Solar Beam should clear its charge state after firing.');
+
+let megaSolBattle = buildBattle(
+  'Singles',
+  [buildSlot('mega-sol-user', meganiumBase, ['Solar Beam'], { itemId: meganiumiteId, evs: { ...blankStats(), specialAttack: 32, hp: 20, specialDefense: 14 } })],
+  [buildSlot('mega-sol-foe', specialTargetB, [specialTargetB.movePool.find((move) => move.id === specialTargetBAttackId)?.name ?? specialTargetB.movePool[0].name], { evs: { ...blankStats(), hp: 20, specialDefense: 24, defense: 22 } })],
+);
+const megaSolStartHp = megaSolBattle.opponent.units[0].currentHp;
+megaSolBattle = withMockRandom([0.1, 0.1, 0.1, 0.1], () => resolveTurn(megaSolBattle, [{ type: 'mega', actor: 0, moveId: solarBeamChoiceId, target: 0 }]));
+assert.equal(megaSolBattle.player.units[0].megaEvolved, true, 'Mega Meganium should Mega Evolve before acting.');
+assert.ok(megaSolBattle.opponent.units[0].currentHp < megaSolStartHp, 'Mega Sol should let Solar Beam fire immediately without a charge turn.');
+assert.equal(megaSolBattle.player.units[0].chargingTurns, 0, 'Mega Sol should bypass Solar Beam charging entirely.');
+
+let meteorBeamBattle = buildBattle(
+  'Singles',
+  [buildSlot('meteor-beam-user', meteorBeamUser, ['Meteor Beam'], { evs: { ...blankStats(), specialAttack: 32, hp: 20, specialDefense: 14 } })],
+  [buildSlot('meteor-beam-foe', specialTargetB, [specialTargetB.movePool.find((move) => move.id === specialTargetBAttackId)?.name ?? specialTargetB.movePool[0].name], { evs: { ...blankStats(), hp: 20, specialDefense: 24, defense: 22 } })],
+);
+const meteorBeamStartHp = meteorBeamBattle.opponent.units[0].currentHp;
+meteorBeamBattle = withMockRandom([0.1, 0.1, 0.1, 0.1], () => resolveTurn(meteorBeamBattle, [{ type: 'move', actor: 0, moveId: meteorBeamChoiceId, target: 0 }]));
+assert.equal(meteorBeamBattle.opponent.units[0].currentHp, meteorBeamStartHp, 'Meteor Beam should not deal damage on its setup turn.');
+assert.equal(meteorBeamBattle.player.units[0].build.specialAttackStage, 1, 'Meteor Beam should raise Sp. Atk on the setup turn.');
+assert.equal(meteorBeamBattle.player.units[0].chargingTurns, 1, 'Meteor Beam should store a charge turn before the attack lands.');
+meteorBeamBattle = withMockRandom([0.1, 0.1, 0.1, 0.1], () => resolveTurn(meteorBeamBattle, [{ type: 'move', actor: 0, moveId: meteorBeamChoiceId, target: 0 }]));
+assert.ok(meteorBeamBattle.opponent.units[0].currentHp < meteorBeamStartHp, 'Meteor Beam should strike on the following turn after charging.');
+
+let pranksterDarkBattle = buildBattle(
+  'Singles',
+  [buildSlot('prankster-user', pranksterUser, ['Taunt', 'Fake Out'], { abilityName: 'Prankster', evs: { ...blankStats(), hp: 20, speed: 32, defense: 14 } })],
+  [buildSlot('prankster-dark-foe', darkTarget, [darkTarget.movePool.find((move) => move.id === darkTargetAttackId)?.name ?? darkTarget.movePool[0].name], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } })],
+);
+pranksterDarkBattle = withMockRandom([0.1, 0.1, 0.1], () => resolveTurn(pranksterDarkBattle, [{ type: 'move', actor: 0, moveId: pranksterTauntChoiceId, target: 0 }]));
+assert.equal(pranksterDarkBattle.opponent.units[0].tauntTurns, 0, 'Dark-types should ignore opposing Prankster status moves like Taunt.');
+
+let pranksterFakeOutBattle = buildBattle(
+  'Singles',
+  [buildSlot('prankster-fake-out-user', pranksterUser, ['Fake Out'], { abilityName: 'Prankster', evs: { ...blankStats(), hp: 20, speed: 32, defense: 14 } })],
+  [buildSlot('prankster-fake-out-foe', darkTarget, [darkTarget.movePool.find((move) => move.id === darkTargetAttackId)?.name ?? darkTarget.movePool[0].name], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } })],
+);
+const fakeOutStartHp = pranksterFakeOutBattle.opponent.units[0].currentHp;
+pranksterFakeOutBattle = withMockRandom([0.1, 0.1, 0.1], () => resolveTurn(pranksterFakeOutBattle, [{ type: 'move', actor: 0, moveId: pranksterFakeOutChoiceId, target: 0 }]));
+assert.ok(pranksterFakeOutBattle.opponent.units[0].currentHp < fakeOutStartHp, 'Fake Out should still damage a Dark-type because it is not a Prankster status move.');
+
+const intimidateClearBodyBattle = buildBattle(
+  'Singles',
+  [buildSlot('intimidate-user', intimidateUser, [intimidateUser.movePool.find((move) => move.id === intimidateAttackId)?.name ?? intimidateUser.movePool[0].name], { abilityName: 'Intimidate', evs: { ...blankStats(), hp: 24, attack: 24, specialDefense: 18 } })],
+  [buildSlot('clear-body-target', clearBodyTarget, [clearBodyTarget.movePool.find((move) => move.id === clearBodyAttackId)?.name ?? clearBodyTarget.movePool[0].name], { abilityName: 'Clear Body', evs: { ...blankStats(), hp: 20, attack: 24, speed: 22 } })],
+);
+assert.equal(intimidateClearBodyBattle.opponent.units[0].build.attackStage, 0, 'Clear Body should block Intimidate on switch-in.');
+
+const intimidateMirrorArmorBattle = buildBattle(
+  'Singles',
+  [buildSlot('mirror-intimidate-user', intimidateUser, [intimidateUser.movePool.find((move) => move.id === intimidateAttackId)?.name ?? intimidateUser.movePool[0].name], { abilityName: 'Intimidate', evs: { ...blankStats(), hp: 24, attack: 24, specialDefense: 18 } })],
+  [buildSlot('mirror-armor-target', mirrorArmorTarget, [mirrorArmorTarget.movePool.find((move) => move.id === mirrorArmorAttackId)?.name ?? mirrorArmorTarget.movePool[0].name], { abilityName: 'Mirror Armor', evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } })],
+);
+assert.equal(intimidateMirrorArmorBattle.opponent.units[0].build.attackStage, 0, 'Mirror Armor should stop Intimidate from lowering the target.');
+assert.equal(intimidateMirrorArmorBattle.player.units[0].build.attackStage, -1, 'Mirror Armor should reflect Intimidate back to the source.');
+
+const intimidateCompetitiveBattle = buildBattle(
+  'Singles',
+  [buildSlot('competitive-intimidate-user', intimidateUser, [intimidateUser.movePool.find((move) => move.id === intimidateAttackId)?.name ?? intimidateUser.movePool[0].name], { abilityName: 'Intimidate', evs: { ...blankStats(), hp: 24, attack: 24, specialDefense: 18 } })],
+  [buildSlot('competitive-target', competitiveTarget, [competitiveTarget.movePool.find((move) => move.id === competitiveAttackId)?.name ?? competitiveTarget.movePool[0].name], { abilityName: 'Competitive', evs: { ...blankStats(), hp: 32, specialAttack: 20, defense: 14 } })],
+);
+assert.equal(intimidateCompetitiveBattle.opponent.units[0].build.specialAttackStage, 2, 'Competitive should boost Sp. Atk after an opposing stat drop.');
+
+let innerFocusBattle = buildBattle(
+  'Singles',
+  [buildSlot('inner-focus-fake-out-user', pranksterUser, ['Fake Out'], { abilityName: 'Prankster', evs: { ...blankStats(), hp: 20, speed: 32, defense: 14 } })],
+  [buildSlot('inner-focus-target', innerFocusTarget, [innerFocusTarget.movePool.find((move) => move.id === innerFocusAttackId)?.name ?? innerFocusTarget.movePool[0].name], { abilityName: 'Inner Focus', evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } })],
+);
+const innerFocusStartHp = innerFocusBattle.opponent.units[0].currentHp;
+innerFocusBattle = withMockRandom([0.1, 0.1, 0.1], () => resolveTurn(innerFocusBattle, [{ type: 'move', actor: 0, moveId: pranksterFakeOutChoiceId, target: 0 }]));
+assert.ok(innerFocusBattle.opponent.units[0].currentHp < innerFocusStartHp, 'Inner Focus targets should still take Fake Out damage.');
+assert.equal(innerFocusBattle.opponent.units[0].flinched, false, 'Inner Focus should stop Fake Out from causing flinch.');
+
+let obliviousBattle = buildBattle(
+  'Singles',
+  [buildSlot('oblivious-taunt-user', pranksterUser, ['Taunt'], { abilityName: 'Prankster', evs: { ...blankStats(), hp: 20, speed: 32, defense: 14 } })],
+  [buildSlot('oblivious-target', obliviousTarget, [obliviousTarget.movePool.find((move) => move.id === obliviousAttackId)?.name ?? obliviousTarget.movePool[0].name], { abilityName: 'Oblivious', evs: { ...blankStats(), hp: 32, attack: 24, defense: 10 } })],
+);
+obliviousBattle = withMockRandom([0.1, 0.1, 0.1], () => resolveTurn(obliviousBattle, [{ type: 'move', actor: 0, moveId: pranksterTauntChoiceId, target: 0 }]));
+assert.equal(obliviousBattle.opponent.units[0].tauntTurns, 0, 'Oblivious should ignore Taunt.');
+
+let contraryBattle = buildBattle(
+  'Singles',
+  [buildSlot('contrary-user', contraryUser, ['Leaf Storm'], { abilityName: 'Contrary', natureId: 'timid', evs: { ...blankStats(), specialAttack: 32, speed: 32, hp: 2 } })],
+  [buildSlot('contrary-target', protectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } })],
+);
+contraryBattle = withMockRandom([0.1, 0.1, 0.1], () => resolveTurn(contraryBattle, [{ type: 'move', actor: 0, moveId: contraryLeafStormChoiceId, target: 0 }]));
+assert.equal(contraryBattle.player.units[0].build.specialAttackStage, 2, 'Contrary should reverse Leaf Storm into a Sp. Atk boost.');
+
+let struggleBattle = buildBattle(
+  'Singles',
+  [buildSlot('struggle-user', pranksterUser, ['Taunt'], { abilityName: 'Prankster', evs: { ...blankStats(), hp: 20, speed: 32, defense: 14 } })],
+  [buildSlot('struggle-foe', struggleTarget, ['Protect', 'Light Screen', 'Reflect', 'Wish'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } })],
+);
+const strugglePlayerStartHp = struggleBattle.player.units[0].currentHp;
+const struggleFoeStartHp = struggleBattle.opponent.units[0].currentHp;
+struggleBattle = withMockRandom([0.1, 0.1, 0.1, 0.1], () => resolveTurn(struggleBattle, [{ type: 'move', actor: 0, moveId: pranksterTauntChoiceId, target: 0 }]));
+assert.ok(struggleBattle.player.units[0].currentHp < strugglePlayerStartHp, 'A taunted, all-status target should damage the opponent with Struggle.');
+assert.ok(struggleBattle.opponent.units[0].currentHp < struggleFoeStartHp, 'A taunted, all-status target should also take Struggle recoil.');
+
+let replacementBattle = buildBattle(
+  'Singles',
+  [
+    buildSlot('replacement-user-a', slowEarthquakeUser, ['Earthquake'], { natureId: 'brave', evs: { ...blankStats(), attack: 32, hp: 32, speed: 2 } }),
+    buildSlot('replacement-user-b', protectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } }),
+    buildSlot('replacement-user-c', groundedProtectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } }),
+    buildSlot('replacement-user-d', specialTargetA, [specialTargetA.movePool.find((move) => move.id === specialTargetAAttackId)?.name ?? specialTargetA.movePool[0].name], { evs: { ...blankStats(), hp: 20, defense: 20, specialDefense: 26 } }),
+  ],
+  [buildSlot('replacement-foe', specialTargetB, [specialTargetB.movePool.find((move) => move.id === specialTargetBAttackId)?.name ?? specialTargetB.movePool[0].name], { evs: { ...blankStats(), specialAttack: 32, speed: 32, hp: 2 } })],
+);
+replacementBattle.player.units[0].currentHp = 1;
+replacementBattle = withMockRandom([0.1, 0.1, 0.1, 0.1], () =>
+  resolveTurnWithChoices(
+    replacementBattle,
+    [{ type: 'move', actor: 0, moveId: slowEarthquakeChoiceId, target: 0 }],
+    [{ type: 'move', actor: 0, moveId: specialTargetBAttackId, target: 0 }],
+  ));
+assert.equal(replacementBattle.player.active[0], 1, 'When the lead is knocked out, the first bench Pokemon should replace it immediately.');
+assert.equal(replacementBattle.player.units.filter((unit) => !unit.fainted).length, 3, 'The battle should still preserve the remaining three player Pokemon after the first knockout.');
+
+let redirectBattle = buildBattle(
+  'Doubles',
+  [
+    buildSlot('redirect-user-a', shadowBallUser, ['Shadow Ball'], { evs: { ...blankStats(), specialAttack: 32, speed: 32, hp: 2 } }),
+    buildSlot('redirect-user-b', specialTargetB, [specialTargetB.movePool.find((move) => move.id === specialTargetBAttackId)?.name ?? specialTargetB.movePool[0].name], { evs: { ...blankStats(), specialAttack: 32, speed: 24, hp: 10 } }),
+  ],
+  [
+    buildSlot('redirect-foe-a', specialTargetA, [specialTargetA.movePool.find((move) => move.id === specialTargetAAttackId)?.name ?? specialTargetA.movePool[0].name], { evs: { ...blankStats(), hp: 20, defense: 20, specialDefense: 26 } }),
+    buildSlot('redirect-foe-b', specialTargetB, [specialTargetB.movePool.find((move) => move.id === specialTargetBAttackId)?.name ?? specialTargetB.movePool[0].name], { evs: { ...blankStats(), hp: 20, specialAttack: 24, speed: 22 } }),
+  ],
+);
+redirectBattle.opponent.units[0].currentHp = 1;
+const redirectStartHp = redirectBattle.opponent.units[1].currentHp;
+redirectBattle = withMockRandom([0.1, 0.1, 0.1, 0.1, 0.1], () =>
+  resolveTurnWithChoices(
+    redirectBattle,
+    [
+      { type: 'move', actor: 0, moveId: shadowBallChoiceId, target: 0 },
+      { type: 'move', actor: 1, moveId: specialTargetBAttackId, target: 0 },
+    ],
+    [
+      { type: 'move', actor: 0, moveId: specialTargetAAttackId, target: 0 },
+      { type: 'move', actor: 1, moveId: specialTargetBAttackId, target: 0 },
+    ],
+  ));
+assert.ok(redirectBattle.opponent.units[0].fainted, 'The first targeted foe should be knocked out before the second allied attack resolves.');
+assert.ok(redirectBattle.opponent.units[1].currentHp < redirectStartHp, 'When one foe is knocked out in Doubles, later single-target attacks should redirect to the remaining live target.');
+
 const hostAccount = {
   playerId: 'audit-host',
   trainerName: 'Audit Host',
@@ -857,7 +1093,7 @@ const summary = [
   `Verified item clause sanitization for manual teams and AI-generated teams.`,
   `Verified move-parity registry coverage at ${paritySummary.coveredPercent}% across ${paritySummary.total} Champions moves, with ${paritySummary.explicit} explicit hooks tagged in the report.`,
   `Verified damage engine produces live damage output under the Champions EV model, including Doubles spread reduction, Aurora Veil, Helping Hand, Magic Room, and Wonder Room checks.`,
-  `Verified simulator rules for chained Protect odds, ally-target support hooks, rain-locked Thunder accuracy, Snarl spread debuffs, Earthquake ally collateral, Sticky Web and Toxic Spikes switch-in hooks, forced-thaw freeze timing, Rest sleep timing, Disable and Torment move locks, weather field timers, opponent reveal state, Calm Mind and Nasty Plot boosts, Trick Room toggling, and Mega weather ordering.`,
+  `Verified simulator rules for chained Protect odds, ally-target support hooks, rain-locked Thunder accuracy, Snarl spread debuffs, Earthquake ally collateral, Sticky Web and Toxic Spikes switch-in hooks, forced-thaw freeze timing, Rest sleep timing, Disable and Torment move locks, weather field timers, opponent reveal state, Calm Mind and Nasty Plot boosts, Trick Room toggling, recharge turns, charge-turn attacks, mid-turn doubles retargeting, Struggle locks, Dark-type immunity to opposing Prankster status moves, and Mega weather ordering.`,
   `Verified shared PvP room logic, including bring-four lock-in, full roster integrity, deadline-based turn resolution, forfeit handling, and 50 automated room-code battle simulations (${onlineBattleHostWins} host wins / ${onlineBattleGuestWins} guest wins).`,
   warnings.length ? `Source-data warnings: ${warnings.length} HP floor rows on the scraped form pages disagree with fixed 31 IV policy, so the app keeps the fixed-IV result intentionally.` : 'Source-data warnings: none.',
 ];

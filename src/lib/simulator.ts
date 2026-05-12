@@ -84,6 +84,12 @@ export interface SimUnit {
   revealed: boolean;
   damageDealt: number;
   knockouts: number;
+  rechargeTurns: number;
+  rechargeMoveName: string | null;
+  chargingTurns: number;
+  chargingMoveId: string | null;
+  chargingMoveName: string | null;
+  chargingTarget: number | null;
 }
 
 type WishMarker = {
@@ -134,9 +140,11 @@ export interface SimulatorBattleState {
 }
 
 const priorityMoves = new Set(['Fake Out', 'Bullet Punch', 'Sucker Punch', 'Extreme Speed', 'Aqua Jet', 'Ice Shard']);
-const healingMoves = new Set(['Recover', 'Roost', 'Slack Off', 'Moonlight', 'Synthesis', 'Wish', 'Shore Up', 'Soft-Boiled']);
+const healingMoves = new Set(['Morning Sun', 'Recover', 'Roost', 'Slack Off', 'Moonlight', 'Synthesis', 'Wish', 'Shore Up', 'Soft-Boiled']);
 const drainingMoves = new Set(['Drain Punch', 'Giga Drain', 'Horn Leech', 'Leech Life', 'Parabolic Charge', 'Draining Kiss']);
 const recoilMoves = new Set(['Brave Bird', 'Double-Edge', 'Flare Blitz', 'Head Smash', 'Volt Tackle', 'Wave Crash', 'Wood Hammer']);
+const rechargeMoves = new Set(['Blast Burn', 'Eternabeam', 'Frenzy Plant', 'Giga Impact', 'Hydro Cannon', 'Hyper Beam', 'Meteor Assault', 'Prismatic Laser', 'Roar of Time', 'Rock Wrecker']);
+const chargeMoves = new Set(['Meteor Beam', 'Razor Wind', 'Sky Attack', 'Skull Bash', 'Solar Beam', 'Solar Blade']);
 const redirectionMoves = new Set(['Follow Me', 'Rage Powder']);
 const protectionMoves = new Set(['Protect', 'Detect', "King's Shield", 'Spiky Shield', 'Baneful Bunker']);
 const sideProtectionMoves = new Set(['Quick Guard', 'Wide Guard']);
@@ -209,6 +217,10 @@ const terrainAbilities = new Map<string, EnvironmentState['terrain']>([
   ['Misty Surge', 'misty'],
   ['Psychic Surge', 'psychic'],
 ]);
+const statDropShieldAbilities = new Set(['Clear Body', 'Full Metal Body', 'White Smoke']);
+const statusMoveShieldAbilities = new Set(['Good as Gold']);
+const tauntShieldAbilities = new Set(['Oblivious']);
+const flinchShieldAbilities = new Set(['Inner Focus']);
 const boostMoves = new Map<string, Partial<Record<'attackStage' | 'defenseStage' | 'specialAttackStage' | 'specialDefenseStage' | 'speedStage', number>>>([
   ['Swords Dance', { attackStage: 2 }],
   ['Dragon Dance', { attackStage: 1, speedStage: 1 }],
@@ -223,6 +235,17 @@ const boostMoves = new Map<string, Partial<Record<'attackStage' | 'defenseStage'
   ['Cosmic Power', { defenseStage: 1, specialDefenseStage: 1 }],
   ['Cotton Guard', { defenseStage: 3 }],
 ]);
+const struggleMove = {
+  id: 'struggle',
+  name: 'Struggle',
+  type: 'Normal',
+  category: 'Physical',
+  power: 50,
+  accuracy: null,
+  pp: null,
+  effectChance: null,
+  description: 'Used automatically when no other move can be selected. Hits a random foe and damages the user for one quarter of its max HP.',
+} satisfies PokemonMove;
 
 type StageKey =
   | 'attackStage'
@@ -273,6 +296,10 @@ function abilityNameForUnit(unit: SimUnit) {
   return resolveAbility(unit.build, unit.pokemon)?.name ?? null;
 }
 
+function randomDuration(min: number, max: number) {
+  return min + Math.floor(Math.random() * (max - min + 1));
+}
+
 function activeItemForUnit(state: SimulatorBattleState, unit: SimUnit): ItemEntry | null {
   const item = getItemById(unit.build.itemId);
   if (!item) {
@@ -287,7 +314,63 @@ function activeItemForUnit(state: SimulatorBattleState, unit: SimUnit): ItemEntr
 }
 
 function findMove(unit: SimUnit, moveId: string) {
+  if (moveId === struggleMove.id) {
+    return struggleMove;
+  }
   return unit.pokemon.movePool.find((move) => move.id === moveId) ?? null;
+}
+
+function clearChargeState(unit: SimUnit) {
+  unit.chargingTurns = 0;
+  unit.chargingMoveId = null;
+  unit.chargingMoveName = null;
+  unit.chargingTarget = null;
+}
+
+function virtualSunlightForMove(state: SimulatorBattleState, unit: SimUnit, move: PokemonMove | null = null) {
+  if (state.environment.weather === 'sun') {
+    return true;
+  }
+
+  if (!move) {
+    return abilityNameForUnit(unit) === 'Mega Sol';
+  }
+
+  return abilityNameForUnit(unit) === 'Mega Sol';
+}
+
+function chargeBypassReason(state: SimulatorBattleState, actor: SimUnit, move: PokemonMove) {
+  if ((move.name === 'Solar Beam' || move.name === 'Solar Blade') && virtualSunlightForMove(state, actor, move)) {
+    return 'sunlight';
+  }
+
+  const item = activeItemForUnit(state, actor);
+  if (item?.name === 'Power Herb' && chargeMoves.has(move.name)) {
+    return item.name;
+  }
+
+  return null;
+}
+
+function applyChargeStartEffects(state: SimulatorBattleState, actor: SimUnit, move: PokemonMove) {
+  if (move.name === 'Meteor Beam') {
+    applySingleStage(actor, 'specialAttackStage', 1);
+    state.log.unshift(`${actor.pokemon.displayName}'s Meteor Beam raised its Sp. Atk.`);
+  }
+
+  if (move.name === 'Skull Bash') {
+    applySingleStage(actor, 'defenseStage', 1);
+    state.log.unshift(`${actor.pokemon.displayName}'s Skull Bash raised its Defense.`);
+  }
+}
+
+function startChargingMove(state: SimulatorBattleState, actor: SimUnit, move: PokemonMove, target: number) {
+  actor.chargingTurns = 1;
+  actor.chargingMoveId = move.id;
+  actor.chargingMoveName = move.name;
+  actor.chargingTarget = target;
+  applyChargeStartEffects(state, actor, move);
+  state.log.unshift(`${actor.pokemon.displayName} began charging ${move.name}.`);
 }
 
 function currentBuild(unit: SimUnit) {
@@ -441,6 +524,12 @@ function makeUnit(build: PokemonBuild, slotIndex: number): SimUnit | null {
     revealed: false,
     damageDealt: 0,
     knockouts: 0,
+    rechargeTurns: 0,
+    rechargeMoveName: null,
+    chargingTurns: 0,
+    chargingMoveId: null,
+    chargingMoveName: null,
+    chargingTarget: null,
   };
 }
 
@@ -494,12 +583,23 @@ function targetActiveUnit(side: SimSide, activeSlot: number) {
   return typeof unitIndex === 'number' ? side.units[unitIndex] ?? null : null;
 }
 
+function livingActiveTargets(side: SimSide) {
+  return side.active
+    .map((unitIndex, activeSlot) => ({ unitIndex, activeSlot, unit: typeof unitIndex === 'number' ? side.units[unitIndex] ?? null : null }))
+    .filter((entry): entry is { unitIndex: number; activeSlot: number; unit: SimUnit } => Boolean(entry.unit && !entry.unit.fainted));
+}
+
 function firstAvailableBench(side: SimSide) {
-  return side.bench.find((unitIndex) => !side.units[unitIndex]?.fainted) ?? null;
+  return side.bench.find((unitIndex) => unitIndex >= 0 && !side.units[unitIndex]?.fainted) ?? null;
 }
 
 function canUnitSwitchOut(unit: SimUnit) {
-  return !unit.trappedByMove && unit.bindingTurns <= 0;
+  return !unit.trappedByMove && unit.bindingTurns <= 0 && unit.rechargeTurns <= 0 && unit.chargingTurns <= 0;
+}
+
+function unitAbilitiesMatch(unit: SimUnit, names: Set<string>) {
+  const ability = abilityNameForUnit(unit);
+  return ability ? names.has(ability) : false;
 }
 
 function lowerUnitHp(unit: SimUnit, amount: number) {
@@ -522,29 +622,115 @@ function healUnit(unit: SimUnit, amount: number) {
   unit.currentHp = Math.min(unit.maxHp, unit.currentHp + amount);
 }
 
+function modifiedStageDelta(unit: SimUnit, delta: number) {
+  let adjusted = delta;
+  const ability = abilityNameForUnit(unit);
+  if (ability === 'Contrary') {
+    adjusted *= -1;
+  }
+  if (ability === 'Simple') {
+    adjusted *= 2;
+  }
+  return adjusted;
+}
+
+function applyStageDeltaRaw(unit: SimUnit, stageKey: StageKey, delta: number) {
+  const before = unit.build[stageKey];
+  const after = Math.max(-6, Math.min(6, before + delta));
+  const actualDelta = after - before;
+  unit.build[stageKey] = after;
+  if (actualDelta > 0) {
+    unit.statsRaisedThisTurn = true;
+  }
+  if (actualDelta < 0) {
+    unit.statsLoweredThisTurn = true;
+  }
+  return actualDelta;
+}
+
 function applyBoosts(unit: SimUnit, boosts: Partial<Record<StageKey, number>>) {
   for (const [key, value] of Object.entries(boosts)) {
     const stageKey = key as StageKey;
-    const currentValue = Number(unit.build[stageKey] ?? 0);
-    const delta = Number(value ?? 0);
-    unit.build[stageKey] = Math.max(-6, Math.min(6, currentValue + delta));
-    if (delta > 0) {
-      unit.statsRaisedThisTurn = true;
-    }
-    if (delta < 0) {
-      unit.statsLoweredThisTurn = true;
-    }
+    const delta = modifiedStageDelta(unit, Number(value ?? 0));
+    applyStageDeltaRaw(unit, stageKey, delta);
   }
 }
 
 function applySingleStage(unit: SimUnit, stageKey: StageKey, delta: number) {
-  unit.build[stageKey] = Math.max(-6, Math.min(6, unit.build[stageKey] + delta));
-  if (delta > 0) {
-    unit.statsRaisedThisTurn = true;
+  return applyStageDeltaRaw(unit, stageKey, modifiedStageDelta(unit, delta));
+}
+
+function applyReactiveDropAbilities(state: SimulatorBattleState, target: SimUnit, cause: string) {
+  const ability = abilityNameForUnit(target);
+  if (ability === 'Defiant') {
+    applyStageDeltaRaw(target, 'attackStage', modifiedStageDelta(target, 2));
+    state.log.unshift(`${target.pokemon.displayName} answered ${cause} with Defiant.`);
   }
-  if (delta < 0) {
-    unit.statsLoweredThisTurn = true;
+  if (ability === 'Competitive') {
+    applyStageDeltaRaw(target, 'specialAttackStage', modifiedStageDelta(target, 2));
+    state.log.unshift(`${target.pokemon.displayName} answered ${cause} with Competitive.`);
   }
+}
+
+function applyStageChangesFromSource(
+  state: SimulatorBattleState,
+  source: SimUnit | null,
+  target: SimUnit,
+  boosts: Partial<Record<StageKey, number>>,
+  cause: string,
+  options: { treatAsOpposing?: boolean; allowMirrorArmor?: boolean } = {},
+) {
+  const sourceIsOpponent = options.treatAsOpposing ?? (source ? unitSideId(state, source) !== unitSideId(state, target) : false);
+  const targetAbility = abilityNameForUnit(target);
+  let changed = false;
+  let loweredByOpponent = false;
+  let blockedDrop = false;
+  const reflectedBoosts: Partial<Record<StageKey, number>> = {};
+
+  for (const [key, value] of Object.entries(boosts)) {
+    const stageKey = key as StageKey;
+    const rawDelta = Number(value ?? 0);
+    if (!rawDelta) {
+      continue;
+    }
+
+    if (sourceIsOpponent && rawDelta < 0) {
+      if ((stageKey !== 'accuracyStage' && stageKey !== 'evasionStage') && statDropShieldAbilities.has(targetAbility ?? '')) {
+        blockedDrop = true;
+        continue;
+      }
+      if (targetAbility === 'Mirror Armor' && options.allowMirrorArmor !== false && source) {
+        reflectedBoosts[stageKey] = (reflectedBoosts[stageKey] ?? 0) + rawDelta;
+        continue;
+      }
+    }
+
+    const actualDelta = applyStageDeltaRaw(target, stageKey, modifiedStageDelta(target, rawDelta));
+    if (actualDelta !== 0) {
+      changed = true;
+    }
+    if (sourceIsOpponent && actualDelta < 0) {
+      loweredByOpponent = true;
+    }
+  }
+
+  if (blockedDrop) {
+    state.log.unshift(`${target.pokemon.displayName} ignored ${cause} because ${targetAbility} blocks opposing stat drops.`);
+  }
+
+  if (Object.keys(reflectedBoosts).length && source) {
+    state.log.unshift(`${target.pokemon.displayName} reflected ${cause} back with Mirror Armor.`);
+    applyStageChangesFromSource(state, target, source, reflectedBoosts, `${cause} (reflected)`, {
+      treatAsOpposing: true,
+      allowMirrorArmor: false,
+    });
+  }
+
+  if (loweredByOpponent) {
+    applyReactiveDropAbilities(state, target, cause);
+  }
+
+  return changed;
 }
 
 function clearSideHazards(side: SimSide) {
@@ -847,8 +1033,9 @@ function applyProtectionContactRebound(state: SimulatorBattleState, target: SimU
   }
 
   if (target.protectSource === "King's Shield") {
-    applySingleStage(attacker, 'attackStage', -1);
-    state.log.unshift(`${attacker.pokemon.displayName}'s Attack fell after contacting King's Shield.`);
+    if (applyStageChangesFromSource(state, target, attacker, { attackStage: -1 }, "King's Shield")) {
+      state.log.unshift(`${attacker.pokemon.displayName}'s Attack fell after contacting King's Shield.`);
+    }
     return;
   }
 
@@ -888,6 +1075,7 @@ function refillActive(side: SimSide) {
 
     const replacement = firstAvailableBench(side);
     if (replacement === null) {
+      side.active[index] = -1;
       continue;
     }
 
@@ -895,6 +1083,10 @@ function refillActive(side: SimSide) {
     side.bench = side.bench.filter((entry) => entry !== replacement);
     side.units[replacement].turnsActive = 0;
     replacements.push(replacement);
+  }
+  side.bench = side.bench.filter((entry) => entry >= 0 && !side.units[entry]?.fainted && !side.active.includes(entry));
+  if (side.redirectionUnitIndex !== null && side.units[side.redirectionUnitIndex]?.fainted) {
+    side.redirectionUnitIndex = null;
   }
   return replacements;
 }
@@ -956,6 +1148,9 @@ function switchOutUnit(side: SimSide, unitIndex: number) {
   unit.yawnTurns = 0;
   unit.perishSongTurns = 0;
   unit.destinyBondActive = false;
+  unit.rechargeTurns = 0;
+  unit.rechargeMoveName = null;
+  clearChargeState(unit);
 }
 
 function applyEntryHazards(state: SimulatorBattleState, side: SimSide, unit: SimUnit) {
@@ -976,8 +1171,9 @@ function applyEntryHazards(state: SimulatorBattleState, side: SimSide, unit: Sim
   }
 
   if (!unit.fainted && side.stickyWeb && groundedTarget) {
-    applySingleStage(unit, 'speedStage', -1);
-    state.log.unshift(`${unit.pokemon.displayName} was slowed by Sticky Web.`);
+    if (applyStageChangesFromSource(state, null, unit, { speedStage: -1 }, 'Sticky Web', { treatAsOpposing: true })) {
+      state.log.unshift(`${unit.pokemon.displayName} was slowed by Sticky Web.`);
+    }
   }
 
   if (!unit.fainted && side.toxicSpikesLayers > 0 && groundedTarget) {
@@ -1015,14 +1211,21 @@ function applySwitchInAbility(state: SimulatorBattleState, sideId: SideId, unit:
   }
 
   if (ability === 'Intimidate') {
+    let intimidatedAnyTarget = false;
     for (const activeIndex of defendingSide.active) {
       const target = defendingSide.units[activeIndex];
       if (!target || target.fainted) {
         continue;
       }
-      applySingleStage(target, 'attackStage', -1);
+      if (unitAbilitiesMatch(target, flinchShieldAbilities)) {
+        state.log.unshift(`${target.pokemon.displayName} stood firm against Intimidate with Inner Focus.`);
+        continue;
+      }
+      intimidatedAnyTarget = applyStageChangesFromSource(state, unit, target, { attackStage: -1 }, 'Intimidate') || intimidatedAnyTarget;
     }
-    state.log.unshift(`${unit.pokemon.displayName} lowered the opposing side's Attack with Intimidate.`);
+    if (intimidatedAnyTarget) {
+      state.log.unshift(`${unit.pokemon.displayName} lowered the opposing side's Attack with Intimidate.`);
+    }
   }
 
   if (ability === 'Intrepid Sword') {
@@ -1103,6 +1306,10 @@ function simultaneousSwitchInOrder(state: SimulatorBattleState) {
 }
 
 export function legalMovesForUnit(unit: SimUnit) {
+  if (unit.rechargeTurns > 0 || unit.chargingTurns > 0) {
+    return [];
+  }
+
   const fullMoveList = unit.build.moveIds
     .map((moveId) => findMove(unit, moveId))
     .filter((move): move is PokemonMove => move !== null);
@@ -1122,20 +1329,20 @@ export function legalMovesForUnit(unit: SimUnit) {
         (unit.disableTurns > 0 && unit.disabledMoveId === encoredMove.id) ||
         (unit.tormentActive && unit.lastMoveId === encoredMove.id)
       ) {
-        return [];
+        return [struggleMove];
       }
       return unit.tauntTurns > 0 && encoredMove.category === 'Status'
-        ? allMoves.filter((move) => move.category !== 'Status')
+        ? (allMoves.filter((move) => move.category !== 'Status').length ? allMoves.filter((move) => move.category !== 'Status') : [struggleMove])
         : [encoredMove];
     }
   }
 
   if (unit.tauntTurns > 0) {
     const nonStatusMoves = allMoves.filter((move) => move.category !== 'Status');
-    return nonStatusMoves.length ? nonStatusMoves : allMoves;
+    return nonStatusMoves.length ? nonStatusMoves : [struggleMove];
   }
 
-  return allMoves;
+  return allMoves.length ? allMoves : [struggleMove];
 }
 
 function normalizeChoiceForUnit(side: SimSide, choice: SimulatorChoice): SimulatorChoice {
@@ -1162,23 +1369,44 @@ function normalizeChoiceForUnit(side: SimSide, choice: SimulatorChoice): Simulat
 
 function movePriority(move: PokemonMove, unit: SimUnit) {
   let priority = stagePriority(move);
+  if (abilityNameForUnit(unit) === 'Prankster' && move.category === 'Status') {
+    priority += 1;
+  }
   if (!movePriorityOverrides.has(move.name) && priorityMoves.has(move.name)) priority += 1;
   return priority;
 }
 
+function pranksterBlockedByDarkTarget(state: SimulatorBattleState, actor: SimUnit, target: SimUnit, move: PokemonMove) {
+  if (move.category !== 'Status' || abilityNameForUnit(actor) !== 'Prankster') {
+    return false;
+  }
+
+  if (unitSideId(state, actor) === unitSideId(state, target)) {
+    return false;
+  }
+
+  return typeListForUnit(state, target).includes('Dark');
+}
+
 function resolveMoveTarget(state: SimulatorBattleState, defendingSide: SimSide, requestedTarget: number, move: PokemonMove) {
+  const liveTargets = livingActiveTargets(defendingSide);
+  if (move.name === 'Struggle') {
+    return liveTargets[Math.floor(Math.random() * Math.max(1, liveTargets.length))]?.unit ?? null;
+  }
+
   const directTarget = targetActiveUnit(defendingSide, requestedTarget);
+  const resolvedDirectTarget = directTarget && !directTarget.fainted ? directTarget : (liveTargets[0]?.unit ?? null);
   if (state.format !== 'Doubles' || moveScope(move) !== 'single') {
-    return directTarget;
+    return resolvedDirectTarget;
   }
 
   if (defendingSide.redirectionUnitIndex === null) {
-    return directTarget;
+    return resolvedDirectTarget;
   }
 
   const redirectTarget = defendingSide.units[defendingSide.redirectionUnitIndex] ?? null;
   if (!redirectTarget || redirectTarget.fainted) {
-    return directTarget;
+    return resolvedDirectTarget;
   }
 
   if (move.category === 'Status') {
@@ -1223,7 +1451,7 @@ function resolveMoveTarget(state: SimulatorBattleState, defendingSide: SimSide, 
       'Wonder Room',
       'Wide Guard',
     ]);
-    return exemptStatusMoves.has(move.name) ? directTarget : redirectTarget;
+    return exemptStatusMoves.has(move.name) ? resolvedDirectTarget : redirectTarget;
   }
 
   return redirectTarget;
@@ -1300,6 +1528,21 @@ function applyStatusMove(
     opponentTargets = resolveTargetRefs(state, actingSideId, actingSide, defendingSide, actor, 0, move).filter((entry) => !entry.ally);
   }
   const legalOpponentTargets = opponentTargets.filter((targetRef) => {
+    if (pranksterBlockedByDarkTarget(state, actor, targetRef.unit, move)) {
+      state.log.unshift(`${targetRef.unit.pokemon.displayName} ignored ${move.name} because Dark-types are immune to opposing Prankster status moves.`);
+      return false;
+    }
+
+    const targetAbility = abilityNameForUnit(targetRef.unit);
+    if (targetAbility && statusMoveShieldAbilities.has(targetAbility) && unitSideId(state, actor) !== targetRef.sideId) {
+      state.log.unshift(`${targetRef.unit.pokemon.displayName} ignored ${move.name} because ${targetAbility} blocks opposing status moves.`);
+      return false;
+    }
+    if (move.name === 'Taunt' && targetAbility && tauntShieldAbilities.has(targetAbility)) {
+      state.log.unshift(`${targetRef.unit.pokemon.displayName} ignored Taunt because of ${targetAbility}.`);
+      return false;
+    }
+
     const sideProtection = blockedBySideProtection(move, priority, targetRef);
     if (sideProtection) {
       state.log.unshift(`${targetRef.unit.pokemon.displayName} was shielded by ${sideProtection}.`);
@@ -1384,7 +1627,7 @@ function applyStatusMove(
 
     let amount = healAmount(actor, 0.5);
     if (move.name === 'Morning Sun' || move.name === 'Moonlight' || move.name === 'Synthesis') {
-      amount = state.environment.weather === 'sun'
+      amount = virtualSunlightForMove(state, actor, move)
         ? healAmount(actor, 2 / 3)
         : state.environment.weather === 'clear'
           ? healAmount(actor, 0.5)
@@ -1688,7 +1931,7 @@ function applyStatusMove(
 
   if (move.name === 'Toxic Thread') {
     accurateOpponentTargets.forEach((targetRef) => {
-      applySingleStage(targetRef.unit, 'speedStage', -2);
+      applyStageChangesFromSource(state, actor, targetRef.unit, { speedStage: -2 }, move.name);
       maybeInflictStatus(state, actor, targetRef.unit, 'poison', move.name);
     });
     if (accurateOpponentTargets.length) {
@@ -1699,15 +1942,14 @@ function applyStatusMove(
 
   if (move.name === 'Parting Shot' || move.name === 'Tearful Look' || move.name === 'Noble Roar') {
     accurateOpponentTargets.forEach((targetRef) => {
-      applySingleStage(targetRef.unit, 'attackStage', -1);
-      applySingleStage(targetRef.unit, 'specialAttackStage', -1);
+      applyStageChangesFromSource(state, actor, targetRef.unit, { attackStage: -1, specialAttackStage: -1 }, move.name);
     });
     state.log.unshift(`${actor.pokemon.displayName} softened the opposing side with ${move.name}.`);
     return;
   }
 
   if (move.name === 'Baby-Doll Eyes') {
-    accurateOpponentTargets.forEach((targetRef) => applySingleStage(targetRef.unit, 'attackStage', -1));
+    accurateOpponentTargets.forEach((targetRef) => applyStageChangesFromSource(state, actor, targetRef.unit, { attackStage: -1 }, move.name));
     if (accurateOpponentTargets.length) {
       state.log.unshift(`${actor.pokemon.displayName} lowered Attack with Baby-Doll Eyes.`);
     }
@@ -1715,7 +1957,7 @@ function applyStatusMove(
   }
 
   if (move.name === 'Fake Tears' || move.name === 'Metal Sound') {
-    accurateOpponentTargets.forEach((targetRef) => applySingleStage(targetRef.unit, 'specialDefenseStage', -2));
+    accurateOpponentTargets.forEach((targetRef) => applyStageChangesFromSource(state, actor, targetRef.unit, { specialDefenseStage: -2 }, move.name));
     if (accurateOpponentTargets.length) {
       state.log.unshift(`${actor.pokemon.displayName} harshly lowered Sp. Def with ${move.name}.`);
     }
@@ -1723,7 +1965,7 @@ function applyStatusMove(
   }
 
   if (move.name === 'Eerie Impulse') {
-    accurateOpponentTargets.forEach((targetRef) => applySingleStage(targetRef.unit, 'specialAttackStage', -2));
+    accurateOpponentTargets.forEach((targetRef) => applyStageChangesFromSource(state, actor, targetRef.unit, { specialAttackStage: -2 }, move.name));
     if (accurateOpponentTargets.length) {
       state.log.unshift(`${actor.pokemon.displayName} harshly lowered Sp. Atk with Eerie Impulse.`);
     }
@@ -1733,7 +1975,7 @@ function applyStatusMove(
   if (move.name === 'Encore') {
     accurateOpponentTargets.forEach((targetRef) => {
       if (targetRef.unit.lastMoveId) {
-        targetRef.unit.encoreTurns = 3;
+        targetRef.unit.encoreTurns = randomDuration(3, 5);
         targetRef.unit.encoreMoveId = targetRef.unit.lastMoveId;
       }
     });
@@ -1746,7 +1988,7 @@ function applyStatusMove(
   if (move.name === 'Disable') {
     accurateOpponentTargets.forEach((targetRef) => {
       if (targetRef.unit.lastMoveId) {
-        targetRef.unit.disableTurns = 4;
+        targetRef.unit.disableTurns = randomDuration(3, 5);
         targetRef.unit.disabledMoveId = targetRef.unit.lastMoveId;
       }
     });
@@ -1927,28 +2169,33 @@ function applyTargetStatEffect(state: SimulatorBattleState, actor: SimUnit, targ
     case 'Snarl':
     case 'Struggle Bug':
     case 'Mystical Fire':
-      applySingleStage(target, 'specialAttackStage', -1);
-      state.log.unshift(`${target.pokemon.displayName}'s Sp. Atk fell because of ${move.name}.`);
+      if (applyStageChangesFromSource(state, actor, target, { specialAttackStage: -1 }, move.name)) {
+        state.log.unshift(`${target.pokemon.displayName}'s Sp. Atk fell because of ${move.name}.`);
+      }
       return;
     case 'Breaking Swipe':
     case 'Bitter Malice':
     case 'Chilling Water':
     case 'Lunge':
-      applySingleStage(target, 'attackStage', -1);
-      state.log.unshift(`${target.pokemon.displayName}'s Attack fell because of ${move.name}.`);
+      if (applyStageChangesFromSource(state, actor, target, { attackStage: -1 }, move.name)) {
+        state.log.unshift(`${target.pokemon.displayName}'s Attack fell because of ${move.name}.`);
+      }
       return;
     case 'Acid Spray':
     case 'Lumina Crash':
-      applySingleStage(target, 'specialDefenseStage', -2);
-      state.log.unshift(`${target.pokemon.displayName}'s Sp. Def sharply fell because of ${move.name}.`);
+      if (applyStageChangesFromSource(state, actor, target, { specialDefenseStage: -2 }, move.name)) {
+        state.log.unshift(`${target.pokemon.displayName}'s Sp. Def sharply fell because of ${move.name}.`);
+      }
       return;
     case 'Apple Acid':
-      applySingleStage(target, 'specialDefenseStage', -1);
-      state.log.unshift(`${target.pokemon.displayName}'s Sp. Def fell because of ${move.name}.`);
+      if (applyStageChangesFromSource(state, actor, target, { specialDefenseStage: -1 }, move.name)) {
+        state.log.unshift(`${target.pokemon.displayName}'s Sp. Def fell because of ${move.name}.`);
+      }
       return;
     case 'Fire Lash':
-      applySingleStage(target, 'defenseStage', -1);
-      state.log.unshift(`${target.pokemon.displayName}'s Defense fell because of ${move.name}.`);
+      if (applyStageChangesFromSource(state, actor, target, { defenseStage: -1 }, move.name)) {
+        state.log.unshift(`${target.pokemon.displayName}'s Defense fell because of ${move.name}.`);
+      }
       return;
     case 'Rock Tomb':
     case 'Mud Shot':
@@ -1956,43 +2203,50 @@ function applyTargetStatEffect(state: SimulatorBattleState, actor: SimUnit, targ
     case 'Bulldoze':
     case 'Electroweb':
     case 'Low Sweep':
-      applySingleStage(target, 'speedStage', -1);
-      state.log.unshift(`${target.pokemon.displayName}'s Speed fell because of ${move.name}.`);
+      if (applyStageChangesFromSource(state, actor, target, { speedStage: -1 }, move.name)) {
+        state.log.unshift(`${target.pokemon.displayName}'s Speed fell because of ${move.name}.`);
+      }
       return;
     case 'Mud-Slap':
-      applySingleStage(target, 'accuracyStage', -1);
-      state.log.unshift(`${target.pokemon.displayName}'s Accuracy fell because of ${move.name}.`);
+      if (applyStageChangesFromSource(state, actor, target, { accuracyStage: -1 }, move.name)) {
+        state.log.unshift(`${target.pokemon.displayName}'s Accuracy fell because of ${move.name}.`);
+      }
       return;
     default:
       break;
   }
 
   if (move.name === 'Muddy Water' && chanceRoll(30)) {
-    applySingleStage(target, 'accuracyStage', -1);
-    state.log.unshift(`${target.pokemon.displayName}'s Accuracy fell because of Muddy Water.`);
+    if (applyStageChangesFromSource(state, actor, target, { accuracyStage: -1 }, move.name)) {
+      state.log.unshift(`${target.pokemon.displayName}'s Accuracy fell because of Muddy Water.`);
+    }
     return;
   }
 
   if (move.name === 'Night Daze' && chanceRoll(40)) {
-    applySingleStage(target, 'accuracyStage', -1);
-    state.log.unshift(`${target.pokemon.displayName}'s Accuracy fell because of Night Daze.`);
+    if (applyStageChangesFromSource(state, actor, target, { accuracyStage: -1 }, move.name)) {
+      state.log.unshift(`${target.pokemon.displayName}'s Accuracy fell because of Night Daze.`);
+    }
     return;
   }
 
   if ((move.name === 'Bug Buzz' || move.name === 'Earth Power' || move.name === 'Energy Ball' || move.name === 'Flash Cannon') && chanceRoll(10)) {
-    applySingleStage(target, 'specialDefenseStage', -1);
-    state.log.unshift(`${target.pokemon.displayName}'s Sp. Def fell because of ${move.name}.`);
+    if (applyStageChangesFromSource(state, actor, target, { specialDefenseStage: -1 }, move.name)) {
+      state.log.unshift(`${target.pokemon.displayName}'s Sp. Def fell because of ${move.name}.`);
+    }
     return;
   }
 
   if (move.name === 'Crunch' && chanceRoll(20)) {
-    applySingleStage(target, 'defenseStage', -1);
-    state.log.unshift(`${target.pokemon.displayName}'s Defense fell because of Crunch.`);
+    if (applyStageChangesFromSource(state, actor, target, { defenseStage: -1 }, move.name)) {
+      state.log.unshift(`${target.pokemon.displayName}'s Defense fell because of Crunch.`);
+    }
   }
 
   if (move.name === 'Grav Apple') {
-    applySingleStage(target, 'defenseStage', -1);
-    state.log.unshift(`${target.pokemon.displayName}'s Defense fell because of Grav Apple.`);
+    if (applyStageChangesFromSource(state, actor, target, { defenseStage: -1 }, move.name)) {
+      state.log.unshift(`${target.pokemon.displayName}'s Defense fell because of Grav Apple.`);
+    }
   }
 }
 
@@ -2181,6 +2435,7 @@ function executeDamageMove(
   actingSide: SimSide,
   defendingSide: SimSide,
 ) {
+  const isStruggle = move.id === struggleMove.id;
   if (move.name === 'Fake Out' && actor.turnsActive > 0) {
     state.log.unshift(`${actor.pokemon.displayName}'s Fake Out failed because it is no longer freshly sent out.`);
     return;
@@ -2284,7 +2539,7 @@ function executeDamageMove(
     }
     if (targetRef.unit.fainted) {
       actor.knockouts += 1;
-      state.log.unshift(`${targetRef.unit.pokemon.displayName} was knocked out.`);
+      state.log.unshift(`${targetRef.unit.pokemon.displayName} was knocked out by ${actor.pokemon.displayName} using ${move.name}.`);
       if (targetRef.unit.destinyBondActive && !actor.fainted) {
         lowerUnitHp(actor, actor.currentHp);
         state.log.unshift(`${actor.pokemon.displayName} was taken down by Destiny Bond.`);
@@ -2293,9 +2548,11 @@ function executeDamageMove(
     maybeTriggerHealingBerry(state, targetRef.unit);
     applyProtectionContactRebound(state, targetRef.unit, actor, move);
 
-    if (move.name === 'Fake Out' && targetRef.unit.turnsActive === 0 && !targetRef.unit.fainted) {
+    if (move.name === 'Fake Out' && targetRef.unit.turnsActive === 0 && !targetRef.unit.fainted && !unitAbilitiesMatch(targetRef.unit, flinchShieldAbilities)) {
       targetRef.unit.flinched = true;
       state.log.unshift(`${targetRef.unit.pokemon.displayName} flinched.`);
+    } else if (move.name === 'Fake Out' && targetRef.unit.turnsActive === 0 && unitAbilitiesMatch(targetRef.unit, flinchShieldAbilities)) {
+      state.log.unshift(`${targetRef.unit.pokemon.displayName} held steady through Fake Out with Inner Focus.`);
     }
 
     applyTargetStatEffect(state, actor, targetRef.unit, move);
@@ -2323,6 +2580,19 @@ function executeDamageMove(
     lowerUnitHp(actor, recoil);
     state.log.unshift(`${actor.pokemon.displayName} took ${recoil} recoil from ${move.name}.`);
     maybeTriggerHealingBerry(state, actor);
+  }
+
+  if (isStruggle && landedHit && !actor.fainted) {
+    const recoil = Math.max(1, Math.floor(actor.maxHp / 4));
+    lowerUnitHp(actor, recoil);
+    state.log.unshift(`${actor.pokemon.displayName} took ${recoil} recoil from Struggle.`);
+    maybeTriggerHealingBerry(state, actor);
+  }
+
+  if (rechargeMoves.has(move.name) && landedHit && !actor.fainted) {
+    actor.rechargeTurns = 1;
+    actor.rechargeMoveName = move.name;
+    state.log.unshift(`${actor.pokemon.displayName} must recharge after ${move.name}.`);
   }
 
   applySelfAfterAttack(state, actor, move, landedHit);
@@ -2721,6 +2991,10 @@ export function randomChoicesForSide(state: SimulatorBattleState, sideId: SideId
   const side = sideForId(state, sideId);
   const defendingSide = opposingSide(state, sideId);
   const choices: SimulatorChoice[] = [];
+  const liveDefendingSlots = defendingSide.active
+    .map((unitIndex, index) => ({ unit: defendingSide.units[unitIndex], index }))
+    .filter((entry): entry is { unit: SimUnit; index: number } => Boolean(entry.unit && !entry.unit.fainted))
+    .map((entry) => entry.index);
 
   for (const [actor, unitIndex] of side.active.entries()) {
     const unit = side.units[unitIndex];
@@ -2729,14 +3003,18 @@ export function randomChoicesForSide(state: SimulatorBattleState, sideId: SideId
     }
 
     const legalMoves = legalMovesForUnit(unit);
-    const move = legalMoves[Math.floor(Math.random() * Math.max(1, legalMoves.length))] ?? legalMoves[0] ?? null;
+    const move = legalMoves[Math.floor(Math.random() * Math.max(1, legalMoves.length))]
+      ?? legalMoves[0]
+      ?? findMove(unit, unit.chargingMoveId ?? '')
+      ?? findMove(unit, unit.build.moveIds[0] ?? '')
+      ?? null;
     if (!move) {
       continue;
     }
 
     const targetChoices =
-      moveScope(move) === 'single' && defendingSide.active.length
-        ? defendingSide.active.map((_, index) => index)
+      moveScope(move) === 'single' && liveDefendingSlots.length
+        ? liveDefendingSlots
         : [0];
     const target = targetChoices[Math.floor(Math.random() * Math.max(1, targetChoices.length))] ?? 0;
     choices.push({
@@ -2844,13 +3122,31 @@ export function resolveTurnWithChoices(
       continue;
     }
 
+    if (actor.rechargeTurns > 0) {
+      const rechargeMoveName = actor.rechargeMoveName ?? 'its last move';
+      actor.rechargeTurns = Math.max(0, actor.rechargeTurns - 1);
+      if (actor.rechargeTurns === 0) {
+        actor.rechargeMoveName = null;
+      }
+      next.log.unshift(`${actor.pokemon.displayName} is recharging after ${rechargeMoveName}.`);
+      continue;
+    }
+
     if (actor.flinched) {
+      if (actor.chargingTurns > 0 && actor.chargingMoveName) {
+        next.log.unshift(`${actor.pokemon.displayName} lost its ${actor.chargingMoveName} charge.`);
+        clearChargeState(actor);
+      }
       next.log.unshift(`${actor.pokemon.displayName} flinched and could not move.`);
       actor.flinched = false;
       continue;
     }
 
     if (!processPreMoveStatus(next, actor)) {
+      if (actor.chargingTurns > 0 && actor.chargingMoveName) {
+        next.log.unshift(`${actor.pokemon.displayName} lost its ${actor.chargingMoveName} charge.`);
+        clearChargeState(actor);
+      }
       continue;
     }
 
@@ -2858,7 +3154,12 @@ export function resolveTurnWithChoices(
       const currentIndex = actingSide.active[queuedAction.choice.actor];
       const targetIndex = queuedAction.choice.target;
       if (!canUnitSwitchOut(actor)) {
-        next.log.unshift(`${actor.pokemon.displayName} could not switch because it is trapped by ${actor.trappedByMove ?? 'a binding effect'}.`);
+        const switchBlockReason = actor.chargingTurns > 0 && actor.chargingMoveName
+          ? `it is locked into ${actor.chargingMoveName}`
+          : actor.trappedByMove
+            ? `it is trapped by ${actor.trappedByMove}`
+            : 'it cannot leave the field right now';
+        next.log.unshift(`${actor.pokemon.displayName} could not switch because ${switchBlockReason}.`);
         continue;
       }
       if (!actingSide.bench.includes(targetIndex) || actingSide.units[targetIndex]?.fainted) {
@@ -2878,8 +3179,18 @@ export function resolveTurnWithChoices(
       continue;
     }
 
-    const move = findMove(actor, queuedAction.choice.moveId) ?? legalMovesForUnit(actor)[0] ?? null;
+    const actionChoice = queuedAction.choice as Extract<SimulatorChoice, { type: 'move' | 'mega' }>;
+    const forcedChargeMove = actor.chargingTurns > 0 && actor.chargingMoveId ? findMove(actor, actor.chargingMoveId) : null;
+    const actionLegalMoves = forcedChargeMove ? [] : legalMovesForUnit(actor);
+    const move = forcedChargeMove
+      ?? actionLegalMoves.find((entry) => entry.id === actionChoice.moveId)
+      ?? actionLegalMoves[0]
+      ?? findMove(actor, actionChoice.moveId)
+      ?? null;
     if (!move) {
+      if (actor.chargingTurns > 0) {
+        clearChargeState(actor);
+      }
       continue;
     }
 
@@ -2887,7 +3198,31 @@ export function resolveTurnWithChoices(
       actor.destinyBondActive = false;
     }
 
-    const target = resolveMoveTarget(next, defendingSide, queuedAction.choice.target, move);
+    const forcedChargeTarget = actor.chargingTurns > 0 ? actor.chargingTarget ?? actionChoice.target : actionChoice.target;
+    if (actor.chargingTurns > 0 && actor.chargingMoveName) {
+      next.log.unshift(`${actor.pokemon.displayName} unleashed ${actor.chargingMoveName}.`);
+      clearChargeState(actor);
+    } else if (chargeMoves.has(move.name)) {
+      const bypassReason = chargeBypassReason(next, actor, move);
+      if (!bypassReason) {
+        actor.lastMoveId = move.id;
+        if (!protectionCounterMoves.has(move.name)) {
+          actor.protectStreak = 0;
+        }
+        startChargingMove(next, actor, move, actionChoice.target);
+        continue;
+      }
+
+      applyChargeStartEffects(next, actor, move);
+      if (bypassReason === 'sunlight') {
+        next.log.unshift(`${actor.pokemon.displayName} fired ${move.name} immediately thanks to sunlight conditions.`);
+      } else {
+        actor.build.itemId = null;
+        next.log.unshift(`${actor.pokemon.displayName} consumed ${bypassReason} and fired ${move.name} immediately.`);
+      }
+    }
+
+    const target = resolveMoveTarget(next, defendingSide, forcedChargeTarget, move);
     actor.lastMoveId = move.id;
     if (!protectionCounterMoves.has(move.name)) {
       actor.protectStreak = 0;

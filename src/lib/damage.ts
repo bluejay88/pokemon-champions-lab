@@ -201,6 +201,7 @@ type PowerContext = {
   attackerGrounded: boolean;
   defenderGrounded: boolean;
   environment: EnvironmentState;
+  moveWeather: EnvironmentState['weather'];
   moveType: string;
   attackerSpeed: number;
   defenderSpeed: number;
@@ -233,7 +234,7 @@ function isBallBombMove(move: PokemonMove) {
 
 export function moveMakesContact(move: PokemonMove) {
   const name = move.name.toLowerCase();
-  return punchMoves.has(move.name) || biteMoves.has(move.name) || ['tackle', 'claw', 'fang', 'whip', 'kick', 'bash', 'headbutt', 'tail', 'slam', 'jab', 'jab'].some((keyword) => name.includes(keyword));
+  return move.name === 'Struggle' || punchMoves.has(move.name) || biteMoves.has(move.name) || ['tackle', 'claw', 'fang', 'whip', 'kick', 'bash', 'headbutt', 'tail', 'slam', 'jab', 'jab'].some((keyword) => name.includes(keyword));
 }
 
 function moveHasSecondaryEffect(move: PokemonMove) {
@@ -413,7 +414,7 @@ function resolvedMovePower(move: PokemonMove, context: PowerContext) {
       }
       break;
     case 'Weather Ball':
-      if (context.environment.weather !== 'clear') {
+      if (context.moveWeather !== 'clear') {
         power = 100;
       }
       break;
@@ -430,7 +431,7 @@ function resolvedMovePower(move: PokemonMove, context: PowerContext) {
       break;
     case 'Solar Beam':
     case 'Solar Blade':
-      if (['rain', 'sand', 'snow'].includes(context.environment.weather)) {
+      if (['rain', 'sand', 'snow'].includes(context.moveWeather)) {
         power *= 0.5;
         context.notes.push(`${move.name} is weakened outside sun because of the current weather.`);
       }
@@ -585,6 +586,22 @@ function abilityAttackModifier(
   effectiveness: number,
 ) {
   if (!attackerAbilityName) {
+    return 1;
+  }
+
+  if (move.name === 'Struggle') {
+    if (attackerAbilityName === 'Huge Power' || attackerAbilityName === 'Pure Power') {
+      return move.category === 'Physical' ? 2 : 1;
+    }
+    if (attackerAbilityName === 'Guts') {
+      return move.category === 'Physical' && attackerBuild.status !== 'healthy' ? 1.5 : 1;
+    }
+    if (attackerAbilityName === 'Hustle') {
+      return move.category === 'Physical' ? 1.5 : 1;
+    }
+    if (attackerAbilityName === 'Tough Claws') {
+      return moveMakesContact(move) ? 1.3 : 1;
+    }
     return 1;
   }
 
@@ -1080,6 +1097,15 @@ export function calculateDamage(
   const attackerAbility = resolveAbility(attackerBuild, attacker)?.name ?? null;
   const rawDefenderAbility = resolveAbility(defenderBuild, defender)?.name ?? null;
   const defenderAbility = moldBreakerAbilities.has(attackerAbility ?? '') ? null : rawDefenderAbility;
+  const isStruggle = move.name === 'Struggle';
+  const moveEnvironment =
+    attackerAbility === 'Mega Sol'
+      ? { ...environment, weather: 'sun' as const }
+      : environment;
+  const stagedAttackerBuild =
+    move.name === 'Meteor Beam'
+      ? { ...attackerBuild, specialAttackStage: Math.min(6, attackerBuild.specialAttackStage + 1) }
+      : attackerBuild;
   const attackerStats = currentStats(attackerBuild, attacker);
   const defenderStats = currentStats(defenderBuild, defender);
   const attackerGrounded = environment.gravity || grounded(attacker, attackerBuild);
@@ -1087,14 +1113,14 @@ export function calculateDamage(
   const notes: string[] = [];
   const attackerItemName = resolveHeldItem(attackerBuild)?.name ?? null;
   const defenderItemName = resolveHeldItem(defenderBuild)?.name ?? null;
-  const moveType = adjustedMoveType(move, attackerAbility, environment, attackerGrounded, notes);
+  const moveType = isStruggle ? 'Normal' : adjustedMoveType(move, attackerAbility, moveEnvironment, attackerGrounded, notes);
   const attackerTypes = effectiveTypes(attacker, attackerBuild, environment.weather);
   const defenderTypes = effectiveTypes(defender, defenderBuild, environment.weather);
   const attackerSpeed = speedStat(attackerBuild, attacker, environment, attackerAbility);
   const defenderSpeed = speedStat(defenderBuild, defender, environment, defenderAbility);
-  const effectiveness = typeEffectiveness(moveType, defenderTypes);
+  const effectiveness = isStruggle ? 1 : typeEffectiveness(moveType, defenderTypes);
 
-  if (immunityFromAbility(defenderAbility, move, moveType, effectiveness)) {
+  if (!isStruggle && immunityFromAbility(defenderAbility, move, moveType, effectiveness)) {
     return {
       move,
       appliedType: moveType,
@@ -1121,7 +1147,7 @@ export function calculateDamage(
     } satisfies DamageResult;
   }
 
-  const stab = attackerTypes.includes(moveType) ? (attackerAbility === 'Adaptability' ? 2 : 1.5) : 1;
+  const stab = isStruggle ? 1 : (attackerTypes.includes(moveType) ? (attackerAbility === 'Adaptability' ? 2 : 1.5) : 1);
   const profile = moveProfile(move, attackerStats);
   const power = resolvedMovePower(move, {
     attacker,
@@ -1134,7 +1160,8 @@ export function calculateDamage(
     defenderStats,
     attackerGrounded,
     defenderGrounded,
-    environment,
+    environment: moveEnvironment,
+    moveWeather: moveEnvironment.weather,
     moveType,
     attackerSpeed,
     defenderSpeed,
@@ -1153,7 +1180,7 @@ export function calculateDamage(
   let attackStat = attackStatBase * effectiveStageMultiplier(
     'attacker',
     profile.attackStat === 'defense' ? 'defense' : profile.attackStat,
-    profile.useTargetAttack ? defenderBuild : attackerBuild,
+    profile.useTargetAttack ? defenderBuild : stagedAttackerBuild,
     environment,
     profile.useTargetAttack ? false : ignoreAttackStages,
   );
@@ -1234,12 +1261,12 @@ export function calculateDamage(
     notes.push('Burn cuts physical damage on this line.');
   }
 
-  const itemModifier = offensiveItemModifier(attackerItemName, move, moveType, attacker, attackerBuild, effectiveness, environment);
+  const itemModifier = isStruggle ? 1 : offensiveItemModifier(attackerItemName, move, moveType, attacker, attackerBuild, effectiveness, environment);
   const abilityAttackBoost = abilityAttackModifier(attackerAbility, move, moveType, environment, attackerBuild, effectiveness);
   const abilityDefenseBoost = defensiveAbilityModifier(defenderAbility, move, moveType, effectiveness, defenderBuild);
-  const berryModifier = defensiveItemModifier(defenderItemName, moveType, effectiveness, environment);
-  const terrainBoost = terrainModifier(move, moveType, environment, attackerGrounded, defenderGrounded);
-  const weatherBoost = weatherModifier(moveType, environment);
+  const berryModifier = isStruggle ? 1 : defensiveItemModifier(defenderItemName, moveType, effectiveness, environment);
+  const terrainBoost = isStruggle ? 1 : terrainModifier(move, moveType, environment, attackerGrounded, defenderGrounded);
+  const weatherBoost = isStruggle ? 1 : weatherModifier(moveType, moveEnvironment);
   const helpingHandBoost = helpingHandModifier(environment);
   const spreadBoost = spreadModifier(move, environment);
   const screenBoost = screenModifier(move, environment, attackerAbility);
@@ -1287,6 +1314,10 @@ export function calculateDamage(
 
   if (!environment.magicRoom && attackerItemName === 'Choice Scarf') {
     notes.push('Choice Scarf affects speed order, not raw move damage.');
+  }
+
+  if (attackerAbility === 'Mega Sol' && environment.weather !== 'sun') {
+    notes.push('Mega Sol lets the attacker resolve weather-sensitive move rules as though sun were active.');
   }
 
   if (attackerAbility === 'Stance Change' && attacker.baseSpecies === 'Aegislash') {
