@@ -10,7 +10,7 @@ export type MoveCategory = 'Physical' | 'Special' | 'Status';
 export type Weather = 'clear' | 'sun' | 'rain' | 'sand' | 'snow';
 export type Terrain = 'none' | 'electric' | 'grassy' | 'misty' | 'psychic';
 export type StatusCondition = 'healthy' | 'burn' | 'poison' | 'toxic' | 'paralysis' | 'sleep' | 'freeze';
-export type BattleTab = 'team-builder' | 'damage-lab' | 'pokedex' | 'ai-builder' | 'analyzer' | 'simulator' | 'profile';
+export type BattleTab = 'team-builder' | 'damage-lab' | 'pokedex' | 'ai-builder' | 'analyzer' | 'simulator' | 'pvp-battles' | 'profile';
 export type BattleFormat = 'Singles' | 'Doubles';
 export type UsageLabel = 'OU' | 'UU' | 'RU' | 'NU';
 export type LayoutMode = 'Auto' | 'Stretch' | 'Focus';
@@ -149,6 +149,7 @@ export interface SimulatorMatchRecord {
   playedAt: string;
   format: BattleFormat;
   teamName: string;
+  mode: 'AI Simulator' | 'PvP';
   result: 'Win' | 'Loss';
   turns: number;
   opponentPreview: string[];
@@ -175,15 +176,41 @@ export interface Profile {
   offMetaBias: number;
   layoutMode: LayoutMode;
   resizablePanels: boolean;
+  battleMusicEnabled: boolean;
+  battleMusicVolume: number;
+  preferredBattleTrackId: string;
+  announcerDefaultEnabled: boolean;
+  onlineAccount: OnlineBattleAccount | null;
   matchHistory: SimulatorMatchRecord[];
 }
 
+export interface OnlineBattleAccount {
+  playerId: string;
+  trainerName: string;
+  email: string;
+  sessionToken: string;
+  registeredAt: string;
+}
+
+export interface OnlinePresenceStats {
+  activeUsers: number;
+  totalVisits: number;
+  activeBattles: number;
+}
+
 export interface EnvironmentState {
+  battleFormat: BattleFormat;
   weather: Weather;
   terrain: Terrain;
+  gravity: boolean;
+  magicRoom: boolean;
+  wonderRoom: boolean;
+  helpingHand: boolean;
   criticalHit: boolean;
   reflect: boolean;
   lightScreen: boolean;
+  auroraVeil: boolean;
+  spreadTargetsHit: 1 | 2;
   defenderProtectedByBerry: boolean;
 }
 

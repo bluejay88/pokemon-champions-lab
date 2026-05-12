@@ -102,6 +102,7 @@ if (!skipCompile) {
     resolve(workspaceRoot, 'src/lib/damage.ts'),
     resolve(workspaceRoot, 'src/lib/usage.ts'),
     resolve(workspaceRoot, 'src/lib/ai.ts'),
+    resolve(workspaceRoot, 'src/lib/online.ts'),
     resolve(workspaceRoot, 'src/lib/simulator.ts'),
     resolve(workspaceRoot, 'src/types.ts'),
   ], compilerOptions);
@@ -130,6 +131,7 @@ const auditRequire = rootRequire;
 const champions = auditRequire(resolve(auditDir, 'lib/champions.js'));
 const damage = auditRequire(resolve(auditDir, 'lib/damage.js'));
 const ai = auditRequire(resolve(auditDir, 'lib/ai.js'));
+const online = auditRequire(resolve(auditDir, 'lib/online.js'));
 const simulator = auditRequire(resolve(auditDir, 'lib/simulator.js'));
 const dataset = JSON.parse(readFileSync(resolve(workspaceRoot, 'src/data/champions-data.json'), 'utf8'));
 
@@ -149,7 +151,8 @@ const {
 
 const { calculateDamage } = damage;
 const { generateTeamPlans } = ai;
-const { advancePreviewToBattle, createSimulatorBattle, legalMovesForUnit, resolveTurn } = simulator;
+const { createRoomState, forfeitRoomState, joinRoomState, submitBringOrderState, submitTurnChoicesState } = online;
+const { advancePreviewToBattle, createSimulatorBattle, legalMovesForUnit, randomChoicesForSide, resolveTurn } = simulator;
 
 const statKeys = ['hp', 'attack', 'defense', 'specialAttack', 'specialDefense', 'speed'];
 const failures = [];
@@ -241,7 +244,7 @@ const attacker = {
   natureId: 'jolly',
   moveIds: ['earthquake'],
   evs: { ...blankStats(), attack: 32, speed: 32, hp: 2 },
-  itemId: 'life-orb',
+  itemId: 'soft-sand',
 };
 const defender = {
   ...makeEmptyBuild('audit-defender'),
@@ -255,9 +258,40 @@ assert(earthquake, 'Garchomp should have Earthquake in its move pool.');
 const damageResult = calculateDamage(attacker, defender, earthquake, champions.defaultEnvironment);
 assert(damageResult, 'Damage calculation should return a result for damaging moves.');
 assert.ok(damageResult.maxDamage > damageResult.minDamage || damageResult.maxDamage > 0, 'Damage result should contain positive damage output.');
+const spreadDamageResult = calculateDamage(attacker, defender, earthquake, {
+  ...champions.defaultEnvironment,
+  battleFormat: 'Doubles',
+  spreadTargetsHit: 2,
+});
+const auroraVeilDamageResult = calculateDamage(attacker, defender, earthquake, {
+  ...champions.defaultEnvironment,
+  battleFormat: 'Doubles',
+  spreadTargetsHit: 2,
+  auroraVeil: true,
+});
+const helpingHandDamageResult = calculateDamage(attacker, defender, earthquake, {
+  ...champions.defaultEnvironment,
+  helpingHand: true,
+});
+const magicRoomDamageResult = calculateDamage(attacker, defender, earthquake, {
+  ...champions.defaultEnvironment,
+  magicRoom: true,
+});
+const wonderRoomDamageResult = calculateDamage(attacker, defender, earthquake, {
+  ...champions.defaultEnvironment,
+  wonderRoom: true,
+});
+assert(spreadDamageResult && auroraVeilDamageResult && helpingHandDamageResult && magicRoomDamageResult && wonderRoomDamageResult, 'Damage calculation should support spread, room, and support-field contexts.');
+assert.ok(spreadDamageResult.averageDamage < damageResult.averageDamage, 'Spread-target damage should be reduced in Doubles.');
+assert.ok(auroraVeilDamageResult.averageDamage < spreadDamageResult.averageDamage, 'Aurora Veil should reduce incoming damage beyond the base spread reduction.');
+assert.ok(helpingHandDamageResult.averageDamage > damageResult.averageDamage, 'Helping Hand should boost outgoing damage.');
+assert.ok(magicRoomDamageResult.averageDamage < damageResult.averageDamage, 'Magic Room should suppress held-item damage boosts.');
+assert.ok(wonderRoomDamageResult.averageDamage > damageResult.averageDamage, 'Wonder Room should swap the defender into its lower special-wall stat when appropriate.');
 
 const protectUser = findPokemonWithMoves(['Protect'], ['Amoonguss', 'Umbreon', 'Clefable']);
+const groundedProtectUser = findPokemonWithMoves(['Protect'], ['Umbreon', 'Clefable', 'Snorlax']);
 const earthquakeUser = findPokemonWithMoves(['Earthquake'], ['Garchomp']);
+const slowEarthquakeUser = findPokemonWithMoves(['Earthquake'], ['Steelix', 'Ting-Lu', 'Rhyperior', 'Garchomp']);
 const thunderUser = findPokemonWithMoves(['Thunder'], ['Zapdos', 'Jolteon']);
 const snarlUser = findPokemonWithMoves(['Snarl'], ['Incineroar', 'Arcanine']);
 const shadowBallUser = findPokemonWithMoves(['Shadow Ball'], ['Froslass', 'Gengar', 'Alakazam']);
@@ -275,11 +309,18 @@ const calmMindUser = findPokemonWithMoves(['Calm Mind'], ['Alakazam', 'Suicune',
 const nastyPlotUser = findPokemonWithMoves(['Nasty Plot'], ['Gengar', 'Hydreigon', 'Mismagius']);
 const sunnyDayUser = findPokemonWithMoves(['Sunny Day', 'Protect'], ['Charizard', 'Venusaur', 'Castform']);
 const tormentUser = findPokemonWithMoves(['Torment', 'Protect'], ['Infernape', 'Sableye', 'Umbreon']);
+const auroraVeilUser = findPokemonWithMoves(['Aurora Veil'], ['Froslass', 'Abomasnow', 'Ninetales']);
+const coachingUser = findPokemonWithMoves(['Coaching'], ['Chesnaught']);
+const healPulseUser = findPokemonWithMoves(['Heal Pulse'], ['Audino', 'Gardevoir', 'Chimecho']);
+const stickyWebUser = findPokemonWithMoves(['Sticky Web'], ['Ariados', 'Araquanid']);
+const toxicSpikesUser = findPokemonWithMoves(['Toxic Spikes'], ['Ariados', 'Arbok', 'Beedrill']);
 const charizardBase = dataset.pokemon.find((pokemon) => pokemon.displayName === 'Charizard' && !pokemon.isMega) ?? null;
 const abomasnowBase = dataset.pokemon.find((pokemon) => pokemon.displayName === 'Abomasnow' && !pokemon.isMega) ?? null;
 assert(
-  protectUser &&
+    protectUser &&
+    groundedProtectUser &&
     earthquakeUser &&
+    slowEarthquakeUser &&
     thunderUser &&
     snarlUser &&
     shadowBallUser &&
@@ -297,6 +338,11 @@ assert(
     nastyPlotUser &&
     sunnyDayUser &&
     tormentUser &&
+    auroraVeilUser &&
+    coachingUser &&
+    healPulseUser &&
+    stickyWebUser &&
+    toxicSpikesUser &&
     charizardBase &&
     abomasnowBase,
   'Expected simulator audit Pokemon to exist in the Champions roster.',
@@ -304,6 +350,7 @@ assert(
 
 const protectChoiceId = moveIdFor(protectUser, 'Protect');
 const earthquakeChoiceId = moveIdFor(earthquakeUser, 'Earthquake');
+const slowEarthquakeChoiceId = moveIdFor(slowEarthquakeUser, 'Earthquake');
 const thunderChoiceId = moveIdFor(thunderUser, 'Thunder');
 const snarlChoiceId = moveIdFor(snarlUser, 'Snarl');
 const shadowBallChoiceId = moveIdFor(shadowBallUser, 'Shadow Ball');
@@ -320,13 +367,19 @@ const calmMindChoiceId = moveIdFor(calmMindUser, 'Calm Mind');
 const nastyPlotChoiceId = moveIdFor(nastyPlotUser, 'Nasty Plot');
 const sunnyDayChoiceId = moveIdFor(sunnyDayUser, 'Sunny Day');
 const tormentChoiceId = moveIdFor(tormentUser, 'Torment');
+const auroraVeilChoiceId = moveIdFor(auroraVeilUser, 'Aurora Veil');
+const coachingChoiceId = moveIdFor(coachingUser, 'Coaching');
+const healPulseChoiceId = moveIdFor(healPulseUser, 'Heal Pulse');
+const stickyWebChoiceId = moveIdFor(stickyWebUser, 'Sticky Web');
+const toxicSpikesChoiceId = moveIdFor(toxicSpikesUser, 'Toxic Spikes');
 const megaCharizardMoveId = moveIdFor(charizardBase, 'Flamethrower') ?? moveIdFor(charizardBase, 'Heat Wave') ?? charizardBase.movePool[0]?.id ?? null;
 const megaAbomasnowMoveId = moveIdFor(abomasnowBase, 'Blizzard') ?? moveIdFor(abomasnowBase, 'Ice Shard') ?? abomasnowBase.movePool[0]?.id ?? null;
 const charizarditeYId = itemIdByName('Charizardite Y');
 const abomasiteId = itemIdByName('Abomasite');
 assert(
-  protectChoiceId &&
+    protectChoiceId &&
     earthquakeChoiceId &&
+    slowEarthquakeChoiceId &&
     thunderChoiceId &&
     snarlChoiceId &&
     shadowBallChoiceId &&
@@ -343,6 +396,11 @@ assert(
     nastyPlotChoiceId &&
     sunnyDayChoiceId &&
     tormentChoiceId &&
+    auroraVeilChoiceId &&
+    coachingChoiceId &&
+    healPulseChoiceId &&
+    stickyWebChoiceId &&
+    toxicSpikesChoiceId &&
     megaCharizardMoveId &&
     megaAbomasnowMoveId &&
     charizarditeYId &&
@@ -401,6 +459,44 @@ assert.equal(snarlBattle.opponent.units[1].build.specialAttackStage, -1, 'Snarl 
 assert.ok(snarlBattle.opponent.units[0].currentHp < snarlBattle.opponent.units[0].maxHp, 'Snarl should damage the first opposing target.');
 assert.ok(snarlBattle.opponent.units[1].currentHp < snarlBattle.opponent.units[1].maxHp, 'Snarl should damage the second opposing target.');
 
+let coachingBattle = buildBattle(
+  'Doubles',
+  [
+    buildSlot('coach-user', coachingUser, ['Coaching'], { evs: { ...blankStats(), hp: 24, defense: 20, specialDefense: 22 } }),
+    buildSlot('coach-ally', earthquakeUser, ['Earthquake'], { natureId: 'jolly', evs: { ...blankStats(), attack: 32, speed: 32, hp: 2 } }),
+  ],
+  [
+    buildSlot('coach-foe-a', protectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } }),
+    buildSlot('coach-foe-b', specialTargetB, [specialTargetB.movePool[0].name], { evs: { ...blankStats(), hp: 20, specialDefense: 24, defense: 22 } }),
+  ],
+);
+coachingBattle = withMockRandom([0.1, 0.1, 0.1], () => resolveTurn(coachingBattle, [
+  { type: 'move', actor: 0, moveId: coachingChoiceId, target: 0 },
+  { type: 'move', actor: 1, moveId: earthquakeChoiceId, target: 0 },
+]));
+assert.equal(coachingBattle.player.units[1].build.attackStage, 1, 'Coaching should raise the ally\'s Attack by one stage.');
+assert.equal(coachingBattle.player.units[1].build.defenseStage, 1, 'Coaching should raise the ally\'s Defense by one stage.');
+assert.equal(coachingBattle.player.units[0].build.attackStage, 0, 'Coaching should not incorrectly boost the user.');
+
+let healPulseBattle = buildBattle(
+  'Doubles',
+  [
+    buildSlot('heal-user', healPulseUser, ['Heal Pulse'], { evs: { ...blankStats(), hp: 24, specialDefense: 22, defense: 20 } }),
+    buildSlot('heal-ally', protectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } }),
+  ],
+  [
+    buildSlot('heal-foe-a', shadowBallUser, ['Shadow Ball'], { evs: { ...blankStats(), specialAttack: 32, speed: 20, hp: 14 } }),
+    buildSlot('heal-foe-b', specialTargetB, [specialTargetB.movePool[0].name], { evs: { ...blankStats(), hp: 20, specialDefense: 24, defense: 22 } }),
+  ],
+);
+healPulseBattle.player.units[1].currentHp = Math.max(1, Math.floor(healPulseBattle.player.units[1].maxHp * 0.35));
+const preHealPulseHp = healPulseBattle.player.units[1].currentHp;
+healPulseBattle = withMockRandom([0.1, 0.1, 0.1], () => resolveTurn(healPulseBattle, [
+  { type: 'move', actor: 0, moveId: healPulseChoiceId, target: 0 },
+  { type: 'move', actor: 1, moveId: protectChoiceId, target: 0 },
+]));
+assert.ok(healPulseBattle.player.units[1].currentHp > preHealPulseHp, 'Heal Pulse should restore HP to an ally instead of the user.');
+
 let earthquakeBattle = buildBattle(
   'Doubles',
   [
@@ -419,6 +515,68 @@ earthquakeBattle = withMockRandom([0.1, 0.1, 0.1, 0.1, 0.1, 0.1], () => resolveT
 assert.ok(earthquakeBattle.player.units[1].currentHp < earthquakeBattle.player.units[1].maxHp, 'All-adjacent moves should hit the user\'s ally when appropriate.');
 assert.ok(earthquakeBattle.opponent.units[0].currentHp < earthquakeBattle.opponent.units[0].maxHp, 'Earthquake should damage the first opposing target.');
 assert.ok(earthquakeBattle.opponent.units[1].currentHp < earthquakeBattle.opponent.units[1].maxHp, 'Earthquake should damage the second opposing target.');
+
+let auroraVeilBattle = buildBattle(
+  'Doubles',
+  [
+    buildSlot('veil-user', auroraVeilUser, ['Aurora Veil'], { evs: { ...blankStats(), hp: 32, specialDefense: 20, defense: 14 } }),
+    buildSlot('veil-ally', protectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } }),
+  ],
+  [
+    buildSlot('veil-foe-a', protectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } }),
+    buildSlot('veil-foe-b', disableUser, ['Protect'], { evs: { ...blankStats(), hp: 20, specialDefense: 24, defense: 22 } }),
+  ],
+);
+auroraVeilBattle = withMockRandom([0.1, 0.1, 0.1], () => resolveTurn(auroraVeilBattle, [
+  { type: 'move', actor: 0, moveId: auroraVeilChoiceId, target: 0 },
+  { type: 'move', actor: 1, moveId: protectChoiceId, target: 0 },
+]));
+assert.equal(auroraVeilBattle.player.auroraVeilTurns, 0, 'Aurora Veil should fail without snow.');
+auroraVeilBattle.environment.weather = 'snow';
+auroraVeilBattle = withMockRandom([0.1, 0.1, 0.1], () => resolveTurn(auroraVeilBattle, [
+  { type: 'move', actor: 0, moveId: auroraVeilChoiceId, target: 0 },
+  { type: 'move', actor: 1, moveId: protectChoiceId, target: 0 },
+]));
+assert.equal(auroraVeilBattle.player.auroraVeilTurns, 4, 'Aurora Veil should set a five-turn side timer when snow is active.');
+
+let stickyWebBattle = buildBattle(
+  'Doubles',
+  [
+    buildSlot('web-user', stickyWebUser, ['Sticky Web'], { natureId: 'jolly', evs: { ...blankStats(), speed: 32, hp: 20, defense: 14 } }),
+    buildSlot('web-ally', slowEarthquakeUser, ['Earthquake'], { natureId: 'brave', evs: { ...blankStats(), attack: 32, hp: 32, speed: 2 } }),
+  ],
+  [
+    buildSlot('web-foe-a', specialTargetA, [specialTargetA.movePool[0].name], { evs: { ...blankStats(), hp: 20, defense: 20, specialDefense: 26 } }),
+    buildSlot('web-foe-b', protectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } }),
+    buildSlot('web-bench', groundedProtectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } }),
+  ],
+);
+stickyWebBattle.opponent.units[0].currentHp = 1;
+stickyWebBattle = withMockRandom([0.2, 0.2, 0.2, 0.2], () => resolveTurn(stickyWebBattle, [
+  { type: 'move', actor: 0, moveId: stickyWebChoiceId, target: 0 },
+  { type: 'move', actor: 1, moveId: slowEarthquakeChoiceId, target: 0 },
+]));
+assert.equal(stickyWebBattle.opponent.units[2].revealed, true, 'A replacement switch-in should reveal the incoming Pokemon.');
+assert.equal(stickyWebBattle.opponent.units[2].build.speedStage, -1, 'Sticky Web should lower the Speed of grounded switch-ins.');
+
+let toxicSpikesBattle = buildBattle(
+  'Doubles',
+  [
+    buildSlot('toxic-spikes-user', toxicSpikesUser, ['Toxic Spikes'], { natureId: 'jolly', evs: { ...blankStats(), speed: 32, hp: 20, defense: 14 } }),
+    buildSlot('toxic-spikes-ally', slowEarthquakeUser, ['Earthquake'], { natureId: 'brave', evs: { ...blankStats(), attack: 32, hp: 32, speed: 2 } }),
+  ],
+  [
+    buildSlot('toxic-spikes-foe-a', specialTargetA, [specialTargetA.movePool[0].name], { evs: { ...blankStats(), hp: 20, defense: 20, specialDefense: 26 } }),
+    buildSlot('toxic-spikes-foe-b', protectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } }),
+    buildSlot('toxic-spikes-bench', groundedProtectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } }),
+  ],
+);
+toxicSpikesBattle.opponent.units[0].currentHp = 1;
+toxicSpikesBattle = withMockRandom([0.2, 0.2, 0.2, 0.2], () => resolveTurn(toxicSpikesBattle, [
+  { type: 'move', actor: 0, moveId: toxicSpikesChoiceId, target: 0 },
+  { type: 'move', actor: 1, moveId: slowEarthquakeChoiceId, target: 0 },
+]));
+assert.equal(toxicSpikesBattle.opponent.units[2].build.status, 'poison', 'Toxic Spikes should poison grounded switch-ins when one layer is active.');
 
 let freezeBattle = buildBattle(
   'Singles',
@@ -463,9 +621,11 @@ let brickBreakBattle = buildBattle(
 );
 brickBreakBattle.opponent.reflectTurns = 5;
 brickBreakBattle.opponent.lightScreenTurns = 5;
+brickBreakBattle.opponent.auroraVeilTurns = 5;
 brickBreakBattle = withMockRandom([0.1, 0.1, 0.1], () => resolveTurn(brickBreakBattle, [{ type: 'move', actor: 0, moveId: brickBreakChoiceId, target: 0 }]));
 assert.equal(brickBreakBattle.opponent.reflectTurns, 0, 'Brick Break should remove Reflect.');
 assert.equal(brickBreakBattle.opponent.lightScreenTurns, 0, 'Brick Break should remove Light Screen.');
+assert.equal(brickBreakBattle.opponent.auroraVeilTurns, 0, 'Brick Break should also remove Aurora Veil.');
 
 let terrainBattle = buildBattle(
   'Singles',
@@ -594,6 +754,72 @@ revealBattle.opponent.units[0].currentHp = 1;
 revealBattle = withMockRandom([0.1, 0.1, 0.1], () => resolveTurn(revealBattle, [{ type: 'move', actor: 0, moveId: earthquakeChoiceId, target: 0 }]));
 assert.equal(revealBattle.opponent.units[1].revealed, true, 'Opponent bench Pokemon should become revealed after they first switch into battle.');
 
+const hostAccount = {
+  playerId: 'audit-host',
+  trainerName: 'Audit Host',
+  email: 'host@test.local',
+  sessionToken: 'audit-host-session',
+  registeredAt: new Date().toISOString(),
+};
+const guestAccount = {
+  playerId: 'audit-guest',
+  trainerName: 'Audit Guest',
+  email: 'guest@test.local',
+  sessionToken: 'audit-guest-session',
+  registeredAt: new Date().toISOString(),
+};
+const auditHostTeam = createTeam('Audit Host Team', 'Singles');
+auditHostTeam.slots[0] = buildSlot('audit-host-1', earthquakeUser, ['Earthquake'], { natureId: 'jolly', evs: { ...blankStats(), attack: 32, speed: 32, hp: 2 } });
+auditHostTeam.slots[1] = buildSlot('audit-host-2', charizardBase, ['Flamethrower'], { itemId: charizarditeYId, natureId: 'timid', evs: { ...blankStats(), specialAttack: 32, speed: 32, hp: 2 } });
+auditHostTeam.slots[2] = buildSlot('audit-host-3', trickRoomUser, ['Trick Room', 'Shadow Ball'], { natureId: 'quiet', evs: { ...blankStats(), hp: 32, specialAttack: 20, specialDefense: 14 } });
+auditHostTeam.slots[3] = buildSlot('audit-host-4', protectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } });
+const auditGuestTeam = createTeam('Audit Guest Team', 'Singles');
+auditGuestTeam.slots[0] = buildSlot('audit-guest-1', abomasnowBase, ['Blizzard'], { itemId: abomasiteId, natureId: 'quiet', evs: { ...blankStats(), specialAttack: 32, hp: 32, speed: 0 } });
+auditGuestTeam.slots[1] = buildSlot('audit-guest-2', specialTargetA, [specialTargetA.movePool[0].name], { evs: { ...blankStats(), hp: 20, defense: 20, specialDefense: 26 } });
+auditGuestTeam.slots[2] = buildSlot('audit-guest-3', specialTargetB, [specialTargetB.movePool[0].name], { evs: { ...blankStats(), hp: 20, specialDefense: 24, defense: 22 } });
+auditGuestTeam.slots[3] = buildSlot('audit-guest-4', groundedProtectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, defense: 14, specialDefense: 20 } });
+
+let forfeitAuditRoom = createRoomState(hostAccount, auditHostTeam, 'Singles', 'gen5-final', true);
+forfeitAuditRoom = joinRoomState(forfeitAuditRoom, guestAccount, auditGuestTeam, 'gen4-champion', true);
+forfeitAuditRoom = submitBringOrderState(forfeitAuditRoom, hostAccount.playerId, [0, 1, 2, 3]);
+forfeitAuditRoom = submitBringOrderState(forfeitAuditRoom, guestAccount.playerId, [0, 1, 2, 3]);
+forfeitAuditRoom = forfeitRoomState(forfeitAuditRoom, guestAccount.playerId);
+assert.equal(forfeitAuditRoom.winnerSeat, 'host', 'Forfeit should award the win to the non-forfeiting player.');
+assert.equal(forfeitAuditRoom.resultReason, 'forfeit', 'Forfeit results should be tagged clearly in PvP room state.');
+
+let onlineBattleHostWins = 0;
+let onlineBattleGuestWins = 0;
+for (let matchIndex = 0; matchIndex < 50; matchIndex += 1) {
+  let room = createRoomState(hostAccount, auditHostTeam, 'Singles', 'gen5-final', true);
+  room = joinRoomState(room, guestAccount, auditGuestTeam, 'gen4-champion', true);
+  room = submitBringOrderState(room, hostAccount.playerId, [0, 1, 2, 3]);
+  room = submitBringOrderState(room, guestAccount.playerId, [0, 1, 2, 3]);
+
+  let guard = 0;
+  while (room.stage === 'battle' && room.battle && guard < 60) {
+    const hostChoices = randomChoicesForSide(room.battle, 'player');
+    room = submitTurnChoicesState(room, hostAccount.playerId, hostChoices);
+    if (room.stage !== 'battle' || !room.battle) {
+      break;
+    }
+    const guestChoices = randomChoicesForSide(room.battle, 'opponent');
+    room = submitTurnChoicesState(room, guestAccount.playerId, guestChoices);
+    guard += 1;
+  }
+
+  if (room.stage === 'battle') {
+    room = forfeitRoomState(room, guestAccount.playerId);
+  }
+
+  assert.equal(room.stage, 'finished', 'A fully automated PvP audit battle should reach a finished state.');
+  assert.ok(room.winnerSeat === 'host' || room.winnerSeat === 'guest', 'A finished PvP room should always name a winner.');
+  if (room.winnerSeat === 'host') {
+    onlineBattleHostWins += 1;
+  } else {
+    onlineBattleGuestWins += 1;
+  }
+}
+
 if (failures.length) {
   throw new Error(`Stat range audit failed for ${failures.length} entries.\n${failures.slice(0, 24).join('\n')}`);
 }
@@ -603,8 +829,9 @@ const summary = [
   `Verified Froslass Timid speed benchmark: 143 base, 178 with 32 Speed EV points.`,
   `Verified global EV limits: 66 total points, 32 max per stat.`,
   `Verified item clause sanitization for manual teams and AI-generated teams.`,
-  `Verified damage engine produces live damage output under the Champions EV model.`,
-  `Verified simulator rules for chained Protect odds, rain-locked Thunder accuracy, Snarl spread debuffs, Earthquake ally collateral, forced-thaw freeze timing, Rest sleep timing, Disable and Torment move locks, weather field timers, opponent reveal state, Calm Mind and Nasty Plot boosts, Trick Room toggling, and Mega weather ordering.`,
+  `Verified damage engine produces live damage output under the Champions EV model, including Doubles spread reduction, Aurora Veil, Helping Hand, Magic Room, and Wonder Room checks.`,
+  `Verified simulator rules for chained Protect odds, ally-target support hooks, rain-locked Thunder accuracy, Snarl spread debuffs, Earthquake ally collateral, Sticky Web and Toxic Spikes switch-in hooks, forced-thaw freeze timing, Rest sleep timing, Disable and Torment move locks, weather field timers, opponent reveal state, Calm Mind and Nasty Plot boosts, Trick Room toggling, and Mega weather ordering.`,
+  `Verified shared PvP room logic, including bring-four lock-in, live turn resolution, forfeit handling, and 50 automated room-code battle simulations (${onlineBattleHostWins} host wins / ${onlineBattleGuestWins} guest wins).`,
   warnings.length ? `Source-data warnings: ${warnings.length} HP floor rows on the scraped form pages disagree with fixed 31 IV policy, so the app keeps the fixed-IV result intentionally.` : 'Source-data warnings: none.',
 ];
 

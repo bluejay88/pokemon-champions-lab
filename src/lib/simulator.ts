@@ -13,7 +13,7 @@ import {
   stageMultiplier,
   typeEffectiveness,
 } from './champions';
-import type { BattleFormat, EnvironmentState, PokemonBuild, PokemonEntry, PokemonMove, Team } from '../types';
+import type { BattleFormat, EnvironmentState, ItemEntry, PokemonBuild, PokemonEntry, PokemonMove, Team } from '../types';
 
 export type SimulatorStage = 'preview' | 'battle' | 'finished';
 export type SideId = 'player' | 'opponent';
@@ -51,6 +51,7 @@ export interface SimUnit {
   turnsActive: number;
   flinched: boolean;
   helpingHand: boolean;
+  beakBlastPrimed: boolean;
   toxicCounter: number;
   sleepTurns: number;
   sleepSource: 'normal' | 'rest' | null;
@@ -68,6 +69,11 @@ export interface SimUnit {
   aquaRing: boolean;
   ingrain: boolean;
   seededBySideId: SideId | null;
+  saltCure: boolean;
+  syrupTurns: number;
+  bindingTurns: number;
+  bindingDamageRate: number;
+  trappedByMove: string | null;
   electricBoost: boolean;
   statsRaisedThisTurn: boolean;
   statsLoweredThisTurn: boolean;
@@ -92,9 +98,12 @@ export interface SimSide {
   tailwindTurns: number;
   reflectTurns: number;
   lightScreenTurns: number;
+  auroraVeilTurns: number;
   safeguardTurns: number;
   stealthRock: boolean;
   spikesLayers: number;
+  toxicSpikesLayers: number;
+  stickyWeb: boolean;
   redirectionUnitIndex: number | null;
   quickGuardActive: boolean;
   wideGuardActive: boolean;
@@ -115,6 +124,8 @@ export interface SimulatorBattleState {
   terrainTurns: number;
   trickRoomTurns: number;
   gravityTurns: number;
+  magicRoomTurns: number;
+  wonderRoomTurns: number;
   log: string[];
   winner: SideId | null;
 }
@@ -233,6 +244,7 @@ const movePriorityOverrides = new Map<string, number>([
   ['Wide Guard', 3],
   ['Fake Out', 3],
   ['Ally Switch', 2],
+  ['First Impression', 2],
   ['Extreme Speed', 2],
   ['Sucker Punch', 1],
   ['Aqua Jet', 1],
@@ -256,6 +268,19 @@ function activeCount(format: BattleFormat) {
 
 function abilityNameForUnit(unit: SimUnit) {
   return resolveAbility(unit.build, unit.pokemon)?.name ?? null;
+}
+
+function activeItemForUnit(state: SimulatorBattleState, unit: SimUnit): ItemEntry | null {
+  const item = getItemById(unit.build.itemId);
+  if (!item) {
+    return null;
+  }
+
+  if (state.magicRoomTurns > 0 && item.category !== 'mega-stone') {
+    return null;
+  }
+
+  return item;
 }
 
 function findMove(unit: SimUnit, moveId: string) {
@@ -380,6 +405,7 @@ function makeUnit(build: PokemonBuild, slotIndex: number): SimUnit | null {
     turnsActive: 0,
     flinched: false,
     helpingHand: false,
+    beakBlastPrimed: false,
     toxicCounter: 1,
     sleepTurns: 0,
     freezeTurns: 0,
@@ -395,6 +421,11 @@ function makeUnit(build: PokemonBuild, slotIndex: number): SimUnit | null {
     aquaRing: false,
     ingrain: false,
     seededBySideId: null,
+    saltCure: false,
+    syrupTurns: 0,
+    bindingTurns: 0,
+    bindingDamageRate: 0,
+    trappedByMove: null,
     electricBoost: false,
     statsRaisedThisTurn: false,
     statsLoweredThisTurn: false,
@@ -422,9 +453,12 @@ function makeSide(team: Team, selectedOrder: number[], name: string, format: Bat
     tailwindTurns: 0,
     reflectTurns: 0,
     lightScreenTurns: 0,
+    auroraVeilTurns: 0,
     safeguardTurns: 0,
     stealthRock: false,
     spikesLayers: 0,
+    toxicSpikesLayers: 0,
+    stickyWeb: false,
     redirectionUnitIndex: null,
     quickGuardActive: false,
     wideGuardActive: false,
@@ -456,6 +490,10 @@ function targetActiveUnit(side: SimSide, activeSlot: number) {
 
 function firstAvailableBench(side: SimSide) {
   return side.bench.find((unitIndex) => !side.units[unitIndex]?.fainted) ?? null;
+}
+
+function canUnitSwitchOut(unit: SimUnit) {
+  return !unit.trappedByMove && unit.bindingTurns <= 0;
 }
 
 function lowerUnitHp(unit: SimUnit, amount: number) {
@@ -506,6 +544,8 @@ function applySingleStage(unit: SimUnit, stageKey: StageKey, delta: number) {
 function clearSideHazards(side: SimSide) {
   side.stealthRock = false;
   side.spikesLayers = 0;
+  side.toxicSpikesLayers = 0;
+  side.stickyWeb = false;
 }
 
 function clearVolatileChoiceLocks(unit: SimUnit) {
@@ -526,6 +566,7 @@ function clearProtectionState(unit: SimUnit) {
   unit.protected = false;
   unit.protectSource = null;
   unit.endure = false;
+  unit.beakBlastPrimed = false;
 }
 
 function unitSideId(state: SimulatorBattleState, unit: SimUnit): SideId {
@@ -601,7 +642,7 @@ function maybeConsumeStatusBerry(state: SimulatorBattleState, unit: SimUnit) {
     return false;
   }
 
-  const item = getItemById(unit.build.itemId);
+  const item = activeItemForUnit(state, unit);
   if (!item) {
     return false;
   }
@@ -756,6 +797,10 @@ function accuracyCheck(state: SimulatorBattleState, actor: SimUnit, target: SimU
     return true;
   }
 
+  if (move.name === 'Toxic' && typeListForUnit(state, actor).includes('Poison')) {
+    return true;
+  }
+
   if (move.name === 'Blizzard' && state.environment.weather === 'snow') {
     return true;
   }
@@ -765,6 +810,9 @@ function accuracyCheck(state: SimulatorBattleState, actor: SimUnit, target: SimU
   }
 
   let accuracy = move.accuracy;
+  if ((move.name === 'Thunder' || move.name === 'Hurricane') && state.environment.weather === 'sun') {
+    accuracy = 50;
+  }
   if (state.gravityTurns > 0) {
     accuracy *= 5 / 3;
   }
@@ -858,8 +906,14 @@ function updateWinner(state: SimulatorBattleState) {
 function screenAwareEnvironment(state: SimulatorBattleState, defendingSide: SimSide): EnvironmentState {
   return {
     ...state.environment,
+    battleFormat: state.format,
+    gravity: state.gravityTurns > 0,
+    magicRoom: state.magicRoomTurns > 0,
+    wonderRoom: state.wonderRoomTurns > 0,
+    helpingHand: false,
     reflect: defendingSide.reflectTurns > 0,
     lightScreen: defendingSide.lightScreenTurns > 0,
+    auroraVeil: defendingSide.auroraVeilTurns > 0,
   };
 }
 
@@ -881,6 +935,11 @@ function switchOutUnit(side: SimSide, unitIndex: number) {
   unit.protectStreak = 0;
   clearProtectionState(unit);
   unit.seededBySideId = null;
+  unit.saltCure = false;
+  unit.syrupTurns = 0;
+  unit.bindingTurns = 0;
+  unit.bindingDamageRate = 0;
+  unit.trappedByMove = null;
   unit.electricBoost = false;
   unit.tauntTurns = 0;
   unit.encoreTurns = 0;
@@ -892,6 +951,7 @@ function switchOutUnit(side: SimSide, unitIndex: number) {
 
 function applyEntryHazards(state: SimulatorBattleState, side: SimSide, unit: SimUnit) {
   const effectiveTypeSet = effectiveTypes(unit.pokemon, unit.build, state.environment.weather);
+  const groundedTarget = unitGroundedInState(state, unit);
   if (side.stealthRock) {
     const multiplier = typeEffectiveness('Rock', effectiveTypeSet);
     const damage = Math.max(1, Math.floor(unit.maxHp * (multiplier / 8)));
@@ -899,11 +959,25 @@ function applyEntryHazards(state: SimulatorBattleState, side: SimSide, unit: Sim
     state.log.unshift(`${unit.pokemon.displayName} took ${damage} from Stealth Rock.`);
   }
 
-  if (!unit.fainted && side.spikesLayers > 0 && unitGroundedInState(state, unit)) {
+  if (!unit.fainted && side.spikesLayers > 0 && groundedTarget) {
     const layerFraction = side.spikesLayers >= 3 ? 0.25 : side.spikesLayers === 2 ? 1 / 6 : 0.125;
     const damage = Math.max(1, Math.floor(unit.maxHp * layerFraction));
     lowerUnitHp(unit, damage);
     state.log.unshift(`${unit.pokemon.displayName} took ${damage} from Spikes.`);
+  }
+
+  if (!unit.fainted && side.stickyWeb && groundedTarget) {
+    applySingleStage(unit, 'speedStage', -1);
+    state.log.unshift(`${unit.pokemon.displayName} was slowed by Sticky Web.`);
+  }
+
+  if (!unit.fainted && side.toxicSpikesLayers > 0 && groundedTarget) {
+    if (effectiveTypeSet.includes('Poison')) {
+      side.toxicSpikesLayers = 0;
+      state.log.unshift(`${unit.pokemon.displayName} absorbed the Toxic Spikes.`);
+    } else if (!effectiveTypeSet.includes('Steel')) {
+      maybeInflictStatus(state, null, unit, side.toxicSpikesLayers >= 2 ? 'toxic' : 'poison', 'Toxic Spikes');
+    }
   }
 
   maybeTriggerHealingBerry(state, unit);
@@ -1102,6 +1176,7 @@ function resolveMoveTarget(state: SimulatorBattleState, defendingSide: SimSide, 
       'Ingrain',
       "King's Shield",
       'Light Screen',
+      'Magic Room',
       'Nasty Plot',
       'Protect',
       'Quick Guard',
@@ -1113,11 +1188,14 @@ function resolveMoveTarget(state: SimulatorBattleState, defendingSide: SimSide, 
       'Snowscape',
       'Spikes',
       'Stealth Rock',
+      'Sticky Web',
       'Sunny Day',
       'Swords Dance',
       'Tailwind',
       'Tailwind',
+      'Toxic Spikes',
       'Trick Room',
+      'Wonder Room',
       'Wide Guard',
     ]);
     return exemptStatusMoves.has(move.name) ? directTarget : redirectTarget;
@@ -1315,8 +1393,15 @@ function applyStatusMove(
   }
 
   if (move.name === 'Heal Pulse') {
-    healUnit(actor, healAmount(actor, 0.5));
-    state.log.unshift(`${actor.pokemon.displayName} restored HP with Heal Pulse.`);
+    const ally = actingSide.active
+      .map((unitIndex) => actingSide.units[unitIndex])
+      .find((unit) => unit && unit !== actor && !unit.fainted) ?? null;
+    if (!ally) {
+      state.log.unshift(`${actor.pokemon.displayName}'s Heal Pulse failed because no ally was available.`);
+      return;
+    }
+    healUnit(ally, healAmount(ally, 0.5));
+    state.log.unshift(`${actor.pokemon.displayName} restored ${ally.pokemon.displayName} with Heal Pulse.`);
     return;
   }
 
@@ -1343,8 +1428,13 @@ function applyStatusMove(
   }
 
   if (move.name === 'Gravity') {
-    state.gravityTurns = 5;
-    state.log.unshift(`${actor.pokemon.displayName} intensified gravity for five turns.`);
+    state.gravityTurns = state.gravityTurns > 0 ? 0 : 5;
+    state.environment.gravity = state.gravityTurns > 0;
+    state.log.unshift(
+      state.gravityTurns > 0
+        ? `${actor.pokemon.displayName} intensified gravity for five turns.`
+        : `${actor.pokemon.displayName} returned gravity to normal.`,
+    );
     return;
   }
 
@@ -1372,6 +1462,28 @@ function applyStatusMove(
     return;
   }
 
+  if (move.name === 'Magic Room') {
+    state.magicRoomTurns = state.magicRoomTurns > 0 ? 0 : 5;
+    state.environment.magicRoom = state.magicRoomTurns > 0;
+    state.log.unshift(
+      state.magicRoomTurns > 0
+        ? `${actor.pokemon.displayName} warped the field with Magic Room.`
+        : `${actor.pokemon.displayName} ended Magic Room.`,
+    );
+    return;
+  }
+
+  if (move.name === 'Wonder Room') {
+    state.wonderRoomTurns = state.wonderRoomTurns > 0 ? 0 : 5;
+    state.environment.wonderRoom = state.wonderRoomTurns > 0;
+    state.log.unshift(
+      state.wonderRoomTurns > 0
+        ? `${actor.pokemon.displayName} warped the field with Wonder Room.`
+        : `${actor.pokemon.displayName} ended Wonder Room.`,
+    );
+    return;
+  }
+
   if (move.name === 'Reflect') {
     actingSide.reflectTurns = 5;
     state.log.unshift(`${actor.pokemon.displayName} set Reflect.`);
@@ -1385,8 +1497,11 @@ function applyStatusMove(
   }
 
   if (move.name === 'Aurora Veil') {
-    actingSide.reflectTurns = 5;
-    actingSide.lightScreenTurns = 5;
+    if (state.environment.weather !== 'snow') {
+      state.log.unshift(`${actor.pokemon.displayName}'s Aurora Veil failed because snow is not active.`);
+      return;
+    }
+    actingSide.auroraVeilTurns = 5;
     state.log.unshift(`${actor.pokemon.displayName} put up Aurora Veil.`);
     return;
   }
@@ -1398,6 +1513,8 @@ function applyStatusMove(
       state.log.unshift(`${actor.pokemon.displayName} boosted its ally with Helping Hand.`);
       return;
     }
+    state.log.unshift(`${actor.pokemon.displayName}'s Helping Hand failed because no ally was available.`);
+    return;
   }
 
   if (redirectionMoves.has(move.name)) {
@@ -1407,6 +1524,14 @@ function applyStatusMove(
   }
 
   if (allyBoostMoves.has(move.name)) {
+    const allies = actingSide.active
+      .map((unitIndex) => actingSide.units[unitIndex])
+      .filter((unit): unit is SimUnit => Boolean(unit && !unit.fainted && unit !== actor));
+    if (move.name === 'Coaching' && !allies.length) {
+      state.log.unshift(`${actor.pokemon.displayName}'s Coaching failed because no ally was available.`);
+      return;
+    }
+
     for (const unitIndex of actingSide.active) {
       const unit = actingSide.units[unitIndex];
       if (!unit || unit.fainted) {
@@ -1462,14 +1587,28 @@ function applyStatusMove(
     return;
   }
 
+  if (move.name === 'Sticky Web') {
+    defendingSide.stickyWeb = true;
+    state.log.unshift(`${actor.pokemon.displayName} spread Sticky Web on the opposing side.`);
+    return;
+  }
+
+  if (move.name === 'Toxic Spikes') {
+    defendingSide.toxicSpikesLayers = Math.min(2, defendingSide.toxicSpikesLayers + 1);
+    state.log.unshift(`${actor.pokemon.displayName} added Toxic Spikes (${defendingSide.toxicSpikesLayers}).`);
+    return;
+  }
+
   if (move.name === 'Defog') {
     clearSideHazards(actingSide);
     clearSideHazards(defendingSide);
     actingSide.reflectTurns = 0;
     actingSide.lightScreenTurns = 0;
+    actingSide.auroraVeilTurns = 0;
     actingSide.safeguardTurns = 0;
     defendingSide.reflectTurns = 0;
     defendingSide.lightScreenTurns = 0;
+    defendingSide.auroraVeilTurns = 0;
     defendingSide.safeguardTurns = 0;
     state.environment.terrain = 'none';
     state.terrainTurns = 0;
@@ -1515,6 +1654,17 @@ function applyStatusMove(
 
   if (move.name === 'Spore') {
     accurateOpponentTargets.forEach((targetRef) => maybeInflictStatus(state, actor, targetRef.unit, 'sleep', move.name));
+    return;
+  }
+
+  if (move.name === 'Toxic Thread') {
+    accurateOpponentTargets.forEach((targetRef) => {
+      applySingleStage(targetRef.unit, 'speedStage', -2);
+      maybeInflictStatus(state, actor, targetRef.unit, 'poison', move.name);
+    });
+    if (accurateOpponentTargets.length) {
+      state.log.unshift(`${actor.pokemon.displayName} tangled the target with Toxic Thread.`);
+    }
     return;
   }
 
@@ -1742,12 +1892,29 @@ function applyTargetStatEffect(state: SimulatorBattleState, actor: SimUnit, targ
     applySingleStage(target, 'defenseStage', -1);
     state.log.unshift(`${target.pokemon.displayName}'s Defense fell because of Crunch.`);
   }
+
+  if (move.name === 'Grav Apple') {
+    applySingleStage(target, 'defenseStage', -1);
+    state.log.unshift(`${target.pokemon.displayName}'s Defense fell because of Grav Apple.`);
+  }
 }
 
 function applyTargetStatusEffect(state: SimulatorBattleState, actor: SimUnit, target: SimUnit, move: PokemonMove) {
   switch (move.name) {
     case 'Inferno':
       maybeInflictStatus(state, actor, target, 'burn', move.name);
+      return;
+    case 'Salt Cure':
+      target.saltCure = true;
+      state.log.unshift(`${target.pokemon.displayName} was afflicted by Salt Cure.`);
+      return;
+    case 'Spirit Shackle':
+      target.trappedByMove = move.name;
+      state.log.unshift(`${target.pokemon.displayName} can no longer switch because of Spirit Shackle.`);
+      return;
+    case 'Syrup Bomb':
+      target.syrupTurns = Math.max(target.syrupTurns, 3);
+      state.log.unshift(`${target.pokemon.displayName} became syrupy for three turns.`);
       return;
     case 'Mortal Spin':
       maybeInflictStatus(state, actor, target, 'poison', move.name);
@@ -1812,6 +1979,11 @@ function applyTargetStatusEffect(state: SimulatorBattleState, actor: SimUnit, ta
     return;
   }
 
+  if (move.name === 'Infernal Parade' && chanceRoll(30)) {
+    maybeInflictStatus(state, actor, target, 'burn', move.name);
+    return;
+  }
+
   if ((move.name === 'Blaze Kick' || move.name === 'Heat Wave' || move.name === 'Fire Fang') && chanceRoll(10)) {
     maybeInflictStatus(state, actor, target, 'burn', move.name);
   }
@@ -1833,13 +2005,27 @@ function applySelfAfterAttack(state: SimulatorBattleState, actor: SimUnit, move:
     const defendingSide = opposingSide(state, unitSideId(state, actor));
     defendingSide.reflectTurns = 0;
     defendingSide.lightScreenTurns = 0;
+    defendingSide.auroraVeilTurns = 0;
     state.log.unshift(`${actor.pokemon.displayName} broke opposing screens with Brick Break.`);
+  }
+
+  if (move.name === 'Psychic Fangs' && landedHit) {
+    const defendingSide = opposingSide(state, unitSideId(state, actor));
+    defendingSide.reflectTurns = 0;
+    defendingSide.lightScreenTurns = 0;
+    defendingSide.auroraVeilTurns = 0;
+    state.log.unshift(`${actor.pokemon.displayName} shattered opposing screens with Psychic Fangs.`);
   }
 
   if (move.name === 'Ice Spinner' && landedHit) {
     state.environment.terrain = 'none';
     state.terrainTurns = 0;
     state.log.unshift(`${actor.pokemon.displayName} removed the terrain with Ice Spinner.`);
+  }
+
+  if (move.name === 'Psyshield Bash' && landedHit) {
+    applySingleStage(actor, 'defenseStage', 1);
+    state.log.unshift(`${actor.pokemon.displayName} boosted its Defense with Psyshield Bash.`);
   }
 
   if (move.name === 'Close Combat') {
@@ -1903,6 +2089,11 @@ function executeDamageMove(
     return;
   }
 
+  if (move.name === 'First Impression' && actor.turnsActive > 0) {
+    state.log.unshift(`${actor.pokemon.displayName}'s First Impression failed because it is no longer freshly sent out.`);
+    return;
+  }
+
   const actingSideId: SideId = state.player === actingSide ? 'player' : 'opponent';
   let targetRefs: TargetRef[] = [];
   if (moveScope(move) === 'single') {
@@ -1925,7 +2116,7 @@ function executeDamageMove(
   }
 
   const priority = movePriority(move, actor);
-  const spreadPenalty = moveScope(move) !== 'single' && targetRefs.length > 1 ? 0.75 : 1;
+  const spreadTargetsHit = moveScope(move) !== 'single' && targetRefs.length > 1 ? 2 : 1;
   let totalDamage = 0;
   let landedHit = false;
 
@@ -1954,14 +2145,21 @@ function executeDamageMove(
       continue;
     }
 
-    const result = calculateDamage(currentBuild(actor), currentBuild(targetRef.unit), move, screenAwareEnvironment(state, targetRef.side));
+    if (targetRef.unit.beakBlastPrimed && moveMakesContact(move)) {
+      maybeInflictStatus(state, targetRef.unit, actor, 'burn', 'Beak Blast');
+    }
+
+    const result = calculateDamage(currentBuild(actor), currentBuild(targetRef.unit), move, {
+      ...screenAwareEnvironment(state, targetRef.side),
+      helpingHand: actor.helpingHand,
+      spreadTargetsHit,
+    });
     if (!result) {
       state.log.unshift(`${actor.pokemon.displayName} used ${move.name}, but no direct damage line applied.`);
       continue;
     }
 
     let damage = Math.round((result.minDamage + result.maxDamage) / 2);
-    damage = Math.max(1, Math.round(damage * spreadPenalty));
     if (actor.helpingHand) {
       damage = Math.round(damage * 1.5);
     }
@@ -2006,6 +2204,10 @@ function executeDamageMove(
   if (drainingMoves.has(move.name) && totalDamage > 0 && !actor.fainted) {
     healUnit(actor, Math.max(1, Math.round(totalDamage * 0.5)));
     state.log.unshift(`${actor.pokemon.displayName} drained health back.`);
+  }
+
+  if (move.name === 'Beak Blast') {
+    actor.beakBlastPrimed = false;
   }
 
   if (actor.electricBoost && move.type === 'Electric') {
@@ -2077,12 +2279,18 @@ function endTurnSideEffects(state: SimulatorBattleState, side: SimSide) {
       continue;
     }
 
-    unit.turnsActive += side.active.includes(side.units.indexOf(unit)) ? 1 : 0;
+    const activeOnField = side.active.includes(side.units.indexOf(unit));
+    unit.turnsActive += activeOnField ? 1 : 0;
     clearProtectionState(unit);
     unit.flinched = false;
     unit.helpingHand = false;
+    unit.beakBlastPrimed = false;
     const ability = abilityNameForUnit(unit);
     const types = typeListForUnit(state, unit);
+
+    if (!activeOnField) {
+      continue;
+    }
 
     if (unit.build.status === 'burn') {
       lowerUnitHp(unit, Math.max(1, Math.round(unit.maxHp * 0.0625)));
@@ -2101,11 +2309,30 @@ function endTurnSideEffects(state: SimulatorBattleState, side: SimSide) {
       healUnit(unit, healAmount(unit, 0.125));
     }
 
+    if (unit.saltCure) {
+      const saltDamageRate = types.includes('Water') || types.includes('Steel') ? 0.25 : 0.125;
+      lowerUnitHp(unit, Math.max(1, Math.round(unit.maxHp * saltDamageRate)));
+    }
+
+    if (unit.bindingTurns > 0) {
+      lowerUnitHp(unit, Math.max(1, Math.round(unit.maxHp * Math.max(unit.bindingDamageRate, 0.125))));
+      unit.bindingTurns = Math.max(0, unit.bindingTurns - 1);
+      if (unit.bindingTurns <= 0) {
+        unit.bindingDamageRate = 0;
+        unit.trappedByMove = null;
+      }
+    }
+
+    if (unit.syrupTurns > 0) {
+      applySingleStage(unit, 'speedStage', -1);
+      unit.syrupTurns = Math.max(0, unit.syrupTurns - 1);
+    }
+
     if (unit.fainted) {
       continue;
     }
 
-    const item = getItemById(unit.build.itemId);
+    const item = activeItemForUnit(state, unit);
     if (item?.name === 'Leftovers') {
       healUnit(unit, healAmount(unit, 0.0625));
     }
@@ -2167,6 +2394,7 @@ function endTurnSideEffects(state: SimulatorBattleState, side: SimSide) {
   side.tailwindTurns = Math.max(0, side.tailwindTurns - 1);
   side.reflectTurns = Math.max(0, side.reflectTurns - 1);
   side.lightScreenTurns = Math.max(0, side.lightScreenTurns - 1);
+  side.auroraVeilTurns = Math.max(0, side.auroraVeilTurns - 1);
   side.safeguardTurns = Math.max(0, side.safeguardTurns - 1);
   side.redirectionUnitIndex = null;
   side.quickGuardActive = false;
@@ -2334,11 +2562,13 @@ export function createSimulatorBattle(
     previewEndsAt,
     player: makeSide(playerTeam, playerOrder, 'Player', format),
     opponent: makeSide(opponentTeam, opponentOrder, 'Opponent', format),
-    environment: { ...defaultEnvironment },
+    environment: { ...defaultEnvironment, battleFormat: format },
     weatherTurns: 0,
     terrainTurns: 0,
     trickRoomTurns: 0,
     gravityTurns: 0,
+    magicRoomTurns: 0,
+    wonderRoomTurns: 0,
     log: ['Team preview started. Choose your bring order and prepare the lead plan.'],
     winner: null,
   } satisfies SimulatorBattleState;
@@ -2366,7 +2596,44 @@ export function generateAiChoices(state: SimulatorBattleState, sideId: SideId) {
   return side.active.map((_, actor) => aiChoiceForUnit(state, sideId, actor));
 }
 
-export function resolveTurn(state: SimulatorBattleState, playerChoices: SimulatorChoice[]) {
+export function randomChoicesForSide(state: SimulatorBattleState, sideId: SideId) {
+  const side = sideForId(state, sideId);
+  const defendingSide = opposingSide(state, sideId);
+  const choices: SimulatorChoice[] = [];
+
+  for (const [actor, unitIndex] of side.active.entries()) {
+    const unit = side.units[unitIndex];
+    if (!unit || unit.fainted) {
+      continue;
+    }
+
+    const legalMoves = legalMovesForUnit(unit);
+    const move = legalMoves[Math.floor(Math.random() * Math.max(1, legalMoves.length))] ?? legalMoves[0] ?? null;
+    if (!move) {
+      continue;
+    }
+
+    const targetChoices =
+      moveScope(move) === 'single' && defendingSide.active.length
+        ? defendingSide.active.map((_, index) => index)
+        : [0];
+    const target = targetChoices[Math.floor(Math.random() * Math.max(1, targetChoices.length))] ?? 0;
+    choices.push({
+      type: 'move',
+      actor,
+      moveId: move.id,
+      target,
+    });
+  }
+
+  return choices;
+}
+
+export function resolveTurnWithChoices(
+  state: SimulatorBattleState,
+  playerChoices: SimulatorChoice[],
+  opponentSideChoices: SimulatorChoice[],
+) {
   const next = structuredClone(state) as SimulatorBattleState;
   for (const side of [next.player, next.opponent]) {
     for (const unit of side.units) {
@@ -2379,14 +2646,35 @@ export function resolveTurn(state: SimulatorBattleState, playerChoices: Simulato
     'player',
     playerChoices.map((choice) => normalizeChoiceForUnit(next.player, choice)),
   );
-  const opponentChoices = normalizeMegaChoicesForSide(
+  const normalizedOpponentChoices = normalizeMegaChoicesForSide(
     next,
     'opponent',
-    generateAiChoices(next, 'opponent').map((choice) => normalizeChoiceForUnit(next.opponent, choice)),
+    opponentSideChoices.map((choice) => normalizeChoiceForUnit(next.opponent, choice)),
   );
+
+  for (const side of [next.player, next.opponent]) {
+    for (const unit of side.units) {
+      unit.beakBlastPrimed = false;
+    }
+  }
+  for (const queuedChoice of [
+    ...normalizedPlayerChoices.map((choice) => ({ sideId: 'player' as SideId, choice })),
+    ...normalizedOpponentChoices.map((choice) => ({ sideId: 'opponent' as SideId, choice })),
+  ]) {
+    if (queuedChoice.choice.type === 'switch') {
+      continue;
+    }
+    const actingSide = sideForId(next, queuedChoice.sideId);
+    const unit = targetActiveUnit(actingSide, queuedChoice.choice.actor);
+    const move = unit ? findMove(unit, queuedChoice.choice.moveId) : null;
+    if (unit && move?.name === 'Beak Blast') {
+      unit.beakBlastPrimed = true;
+    }
+  }
+
   const megaQueue = [
     ...normalizedPlayerChoices.filter((choice): choice is Extract<SimulatorChoice, { type: 'mega' }> => choice.type === 'mega').map((choice) => ({ side: 'player' as SideId, choice })),
-    ...opponentChoices.filter((choice): choice is Extract<SimulatorChoice, { type: 'mega' }> => choice.type === 'mega').map((choice) => ({ side: 'opponent' as SideId, choice })),
+    ...normalizedOpponentChoices.filter((choice): choice is Extract<SimulatorChoice, { type: 'mega' }> => choice.type === 'mega').map((choice) => ({ side: 'opponent' as SideId, choice })),
   ];
 
   megaQueue.sort((left, right) => {
@@ -2405,7 +2693,7 @@ export function resolveTurn(state: SimulatorBattleState, playerChoices: Simulato
 
   const queued = [
     ...normalizedPlayerChoices.map((choice) => ({ side: 'player' as SideId, choice })),
-    ...opponentChoices.map((choice) => ({ side: 'opponent' as SideId, choice })),
+    ...normalizedOpponentChoices.map((choice) => ({ side: 'opponent' as SideId, choice })),
   ];
 
   queued.sort((left, right) => {
@@ -2448,6 +2736,10 @@ export function resolveTurn(state: SimulatorBattleState, playerChoices: Simulato
     if (queuedAction.choice.type === 'switch') {
       const currentIndex = actingSide.active[queuedAction.choice.actor];
       const targetIndex = queuedAction.choice.target;
+      if (!canUnitSwitchOut(actor)) {
+        next.log.unshift(`${actor.pokemon.displayName} could not switch because it is trapped by ${actor.trappedByMove ?? 'a binding effect'}.`);
+        continue;
+      }
       if (!actingSide.bench.includes(targetIndex) || actingSide.units[targetIndex]?.fainted) {
         continue;
       }
@@ -2511,6 +2803,21 @@ export function resolveTurn(state: SimulatorBattleState, playerChoices: Simulato
     next.gravityTurns = Math.max(0, next.gravityTurns - 1);
     if (next.gravityTurns === 0) {
       next.log.unshift('Gravity returned to normal.');
+      next.environment.gravity = false;
+    }
+  }
+  if (next.magicRoomTurns > 0) {
+    next.magicRoomTurns = Math.max(0, next.magicRoomTurns - 1);
+    if (next.magicRoomTurns === 0) {
+      next.log.unshift('Magic Room faded.');
+      next.environment.magicRoom = false;
+    }
+  }
+  if (next.wonderRoomTurns > 0) {
+    next.wonderRoomTurns = Math.max(0, next.wonderRoomTurns - 1);
+    if (next.wonderRoomTurns === 0) {
+      next.log.unshift('Wonder Room faded.');
+      next.environment.wonderRoom = false;
     }
   }
   integrateReplacements(next, 'player');
@@ -2525,4 +2832,8 @@ export function resolveTurn(state: SimulatorBattleState, playerChoices: Simulato
   }
 
   return next;
+}
+
+export function resolveTurn(state: SimulatorBattleState, playerChoices: SimulatorChoice[]) {
+  return resolveTurnWithChoices(state, playerChoices, generateAiChoices(state, 'opponent'));
 }

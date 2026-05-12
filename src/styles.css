@@ -1542,6 +1542,26 @@ button {
   gap: 18px;
 }
 
+.sim-field-panel {
+  gap: 14px;
+}
+
+.sim-field-stack {
+  display: grid;
+  gap: 14px;
+}
+
+.sim-field-section {
+  display: grid;
+  gap: 8px;
+}
+
+.sim-field-section strong {
+  font-size: 0.82rem;
+  color: #dbeeff;
+  letter-spacing: 0.02em;
+}
+
 .sim-log {
   max-height: 380px;
 }
@@ -1949,4 +1969,23 @@ button {
   .note-row {
     padding: 14px 15px;
   }
+}
+.youtube-audio-player {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.action-button.danger {
+  border-color: rgba(255, 116, 116, 0.6);
+  color: #ffd6d6;
+  background: linear-gradient(180deg, rgba(82, 28, 28, 0.88), rgba(48, 18, 18, 0.92));
+}
+
+.action-button.danger:hover {
+  border-color: rgba(255, 145, 145, 0.9);
+  box-shadow: 0 14px 28px rgba(76, 18, 18, 0.28);
 }

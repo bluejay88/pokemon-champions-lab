@@ -114,11 +114,18 @@ export const statLabels: Record<StatKey, string> = {
 };
 
 export const defaultEnvironment: EnvironmentState = {
+  battleFormat: 'Singles',
   weather: 'clear',
   terrain: 'none',
+  gravity: false,
+  magicRoom: false,
+  wonderRoom: false,
+  helpingHand: false,
   criticalHit: false,
   reflect: false,
   lightScreen: false,
+  auroraVeil: false,
+  spreadTargetsHit: 1,
   defenderProtectedByBerry: true,
 };
 
@@ -396,6 +403,10 @@ export function sanitizeAppState(state: AppState) {
     profile: {
       ...defaults.profile,
       ...state.profile,
+      matchHistory: (state.profile?.matchHistory ?? defaults.profile.matchHistory).map((record) => ({
+        ...record,
+        mode: record.mode ?? 'AI Simulator',
+      })),
     },
     teams,
     activeTeamId,
@@ -476,6 +487,11 @@ export function createDefaultState(): AppState {
       offMetaBias: 50,
       layoutMode: 'Auto',
       resizablePanels: true,
+      battleMusicEnabled: true,
+      battleMusicVolume: 18,
+      preferredBattleTrackId: 'gen5-final',
+      announcerDefaultEnabled: true,
+      onlineAccount: null,
       matchHistory: [],
     },
     teams: [team],

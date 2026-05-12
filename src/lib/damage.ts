@@ -125,6 +125,25 @@ const ballBombMoves = new Set([
   'Zap Cannon',
 ]);
 
+const spreadMoves = new Set([
+  'Blizzard',
+  'Breaking Swipe',
+  'Bulldoze',
+  'Dazzling Gleam',
+  'Discharge',
+  'Earthquake',
+  'Heat Wave',
+  'Hyper Voice',
+  'Icy Wind',
+  'Lava Plume',
+  'Muddy Water',
+  'Rock Slide',
+  'Snarl',
+  'Struggle Bug',
+  'Surf',
+  'Swift',
+]);
+
 const recoilMoves = new Set([
   'Brave Bird',
   'Double-Edge',
@@ -363,9 +382,10 @@ function resolvedMovePower(move: PokemonMove, context: PowerContext) {
       }
       break;
     case 'Hex':
+    case 'Infernal Parade':
       if (context.defenderBuild.status !== 'healthy') {
         power *= 2;
-        context.notes.push('Hex doubles because the defender is statused.');
+        context.notes.push(`${move.name} doubles because the defender is statused.`);
       }
       break;
     case 'Venoshock':
@@ -400,6 +420,12 @@ function resolvedMovePower(move: PokemonMove, context: PowerContext) {
     case 'Terrain Pulse':
       if (context.attackerGrounded && context.environment.terrain !== 'none') {
         power = 100;
+      }
+      break;
+    case 'Grav Apple':
+      if (context.environment.gravity) {
+        power = Math.floor(power * 1.5);
+        context.notes.push('Grav Apple is boosted by Gravity.');
       }
       break;
     case 'Solar Beam':
@@ -465,8 +491,9 @@ function offensiveItemModifier(
   attacker: PokemonEntry,
   attackerBuild: PokemonBuild,
   effectiveness: number,
+  environment: EnvironmentState,
 ) {
-  if (!itemName) {
+  if (!itemName || environment.magicRoom) {
     return 1;
   }
 
@@ -497,6 +524,26 @@ function offensiveItemModifier(
 
   if (itemName === 'Expert Belt' && effectiveness > 1) {
     return 1.2;
+  }
+
+  if (itemName === 'Life Orb') {
+    return 1.3;
+  }
+
+  if (itemName === 'Choice Band' && move.category === 'Physical') {
+    return 1.5;
+  }
+
+  if (itemName === 'Choice Specs' && move.category === 'Special') {
+    return 1.5;
+  }
+
+  if (itemName === 'Muscle Band' && move.category === 'Physical') {
+    return 1.1;
+  }
+
+  if (itemName === 'Wise Glasses' && move.category === 'Special') {
+    return 1.1;
   }
 
   if (itemName === 'Charcoal' && moveType === 'Fire') return 1.2;
@@ -784,13 +831,25 @@ function abilityStatMultiplier(
 }
 
 function defensiveItemModifier(itemName: string | null, moveType: string, effectiveness: number, environment: EnvironmentState) {
-  if (!itemName || !environment.defenderProtectedByBerry) {
+  if (!itemName || environment.magicRoom || !environment.defenderProtectedByBerry) {
     return 1;
   }
 
   const resistType = resistBerryType(itemName);
   if (resistType && resistType === moveType && effectiveness > 1) {
     return 0.5;
+  }
+
+  return 1;
+}
+
+function defensiveStatItemMultiplier(itemName: string | null, stat: 'defense' | 'specialDefense', environment: EnvironmentState) {
+  if (!itemName || environment.magicRoom) {
+    return 1;
+  }
+
+  if (itemName === 'Assault Vest' && stat === 'specialDefense') {
+    return 1.5;
   }
 
   return 1;
@@ -842,17 +901,38 @@ function weatherModifier(moveType: string, environment: EnvironmentState) {
   return 1;
 }
 
+function helpingHandModifier(environment: EnvironmentState) {
+  return environment.helpingHand ? 1.5 : 1;
+}
+
+function spreadModifier(move: PokemonMove, environment: EnvironmentState) {
+  if (environment.battleFormat !== 'Doubles' || environment.spreadTargetsHit <= 1) {
+    return 1;
+  }
+
+  return spreadMoves.has(move.name) ? 0.75 : 1;
+}
+
 function screenModifier(move: PokemonMove, environment: EnvironmentState, attackerAbilityName: string | null) {
   if (environment.criticalHit || attackerAbilityName === 'Infiltrator') {
     return 1;
   }
 
+  const reduction =
+    environment.battleFormat === 'Doubles' && environment.spreadTargetsHit > 1
+      ? 2 / 3
+      : 0.5;
+
+  if (environment.auroraVeil) {
+    return reduction;
+  }
+
   if (move.category === 'Physical' && environment.reflect) {
-    return 0.5;
+    return reduction;
   }
 
   if (move.category === 'Special' && environment.lightScreen) {
-    return 0.5;
+    return reduction;
   }
 
   return 1;
@@ -1002,8 +1082,8 @@ export function calculateDamage(
   const defenderAbility = moldBreakerAbilities.has(attackerAbility ?? '') ? null : rawDefenderAbility;
   const attackerStats = currentStats(attackerBuild, attacker);
   const defenderStats = currentStats(defenderBuild, defender);
-  const attackerGrounded = grounded(attacker, attackerBuild);
-  const defenderGrounded = grounded(defender, defenderBuild);
+  const attackerGrounded = environment.gravity || grounded(attacker, attackerBuild);
+  const defenderGrounded = environment.gravity || grounded(defender, defenderBuild);
   const notes: string[] = [];
   const attackerItemName = resolveHeldItem(attackerBuild)?.name ?? null;
   const defenderItemName = resolveHeldItem(defenderBuild)?.name ?? null;
@@ -1065,11 +1145,10 @@ export function calculateDamage(
   const ignoreAttackStages = defenderAbility === 'Unaware';
   const ignoreDefenseStages = attackerAbility === 'Unaware';
 
-  let attackStatBase =
+  const attackStatBase =
     profile.useTargetAttack
       ? defenderStats.attack
       : attackerStats[profile.attackStat];
-  let defenseStatBase = defenderStats[profile.defenseStat];
 
   let attackStat = attackStatBase * effectiveStageMultiplier(
     'attacker',
@@ -1079,47 +1158,99 @@ export function calculateDamage(
     profile.useTargetAttack ? false : ignoreAttackStages,
   );
 
-  let defenseStat = defenseStatBase * effectiveStageMultiplier(
+  let attackerDefenseStat = attackerStats.defense * effectiveStageMultiplier(
+    'attacker',
+    'defense',
+    attackerBuild,
+    environment,
+    ignoreAttackStages,
+  );
+  let attackerSpecialDefenseStat = attackerStats.specialDefense * effectiveStageMultiplier(
+    'attacker',
+    'specialDefense',
+    attackerBuild,
+    environment,
+    ignoreAttackStages,
+  );
+  let defenderDefenseStat = defenderStats.defense * effectiveStageMultiplier(
     'defender',
-    profile.defenseStat,
+    'defense',
+    defenderBuild,
+    environment,
+    ignoreDefenseStages,
+  );
+  let defenderSpecialDefenseStat = defenderStats.specialDefense * effectiveStageMultiplier(
+    'defender',
+    'specialDefense',
     defenderBuild,
     environment,
     ignoreDefenseStages,
   );
 
   attackStat *= abilityStatMultiplier(attackerAbility, profile.attackStat, moveType, move.category, environment, attackerBuild);
-  defenseStat *= abilityStatMultiplier(defenderAbility, profile.defenseStat, moveType, move.category, environment, defenderBuild);
+  attackerDefenseStat *= abilityStatMultiplier(attackerAbility, 'defense', moveType, move.category, environment, attackerBuild);
+  attackerSpecialDefenseStat *= abilityStatMultiplier(attackerAbility, 'specialDefense', moveType, move.category, environment, attackerBuild);
+  defenderDefenseStat *= abilityStatMultiplier(defenderAbility, 'defense', moveType, move.category, environment, defenderBuild);
+  defenderSpecialDefenseStat *= abilityStatMultiplier(defenderAbility, 'specialDefense', moveType, move.category, environment, defenderBuild);
+  attackerDefenseStat *= defensiveStatItemMultiplier(attackerItemName, 'defense', environment);
+  attackerSpecialDefenseStat *= defensiveStatItemMultiplier(attackerItemName, 'specialDefense', environment);
+  defenderDefenseStat *= defensiveStatItemMultiplier(defenderItemName, 'defense', environment);
+  defenderSpecialDefenseStat *= defensiveStatItemMultiplier(defenderItemName, 'specialDefense', environment);
 
-  if (move.category === 'Special' && environment.weather === 'sand' && defenderTypes.includes('Rock')) {
-    defenseStat *= 1.5;
-    notes.push('Rock-types gain a sand-boosted special bulk bonus.');
+  if (move.category === 'Special' && environment.weather === 'sand') {
+    if (attackerTypes.includes('Rock')) {
+      attackerSpecialDefenseStat *= 1.5;
+    }
+    if (defenderTypes.includes('Rock')) {
+      defenderSpecialDefenseStat *= 1.5;
+      notes.push('Rock-types gain a sand-boosted special bulk bonus.');
+    }
   }
 
-  if (move.category === 'Physical' && environment.weather === 'snow' && defenderTypes.includes('Ice')) {
-    defenseStat *= 1.5;
-    notes.push('Ice-types gain a snow-boosted physical bulk bonus.');
+  if (move.category === 'Physical' && environment.weather === 'snow') {
+    if (attackerTypes.includes('Ice')) {
+      attackerDefenseStat *= 1.5;
+    }
+    if (defenderTypes.includes('Ice')) {
+      defenderDefenseStat *= 1.5;
+      notes.push('Ice-types gain a snow-boosted physical bulk bonus.');
+    }
   }
+
+  if (environment.wonderRoom) {
+    [attackerDefenseStat, attackerSpecialDefenseStat] = [attackerSpecialDefenseStat, attackerDefenseStat];
+    [defenderDefenseStat, defenderSpecialDefenseStat] = [defenderSpecialDefenseStat, defenderDefenseStat];
+    notes.push('Wonder Room swaps Defense and Sp. Def for this damage line.');
+  }
+
+  if (!profile.useTargetAttack && profile.attackStat === 'defense') {
+    attackStat = attackerDefenseStat;
+  }
+
+  const defenseStat = profile.defenseStat === 'defense' ? defenderDefenseStat : defenderSpecialDefenseStat;
 
   if (attackerBuild.status === 'burn' && move.category === 'Physical' && attackerAbility !== 'Guts' && !burnImmuneFacade.has(move.name)) {
     attackStat *= 0.5;
     notes.push('Burn cuts physical damage on this line.');
   }
 
-  const itemModifier = offensiveItemModifier(attackerItemName, move, moveType, attacker, attackerBuild, effectiveness);
+  const itemModifier = offensiveItemModifier(attackerItemName, move, moveType, attacker, attackerBuild, effectiveness, environment);
   const abilityAttackBoost = abilityAttackModifier(attackerAbility, move, moveType, environment, attackerBuild, effectiveness);
   const abilityDefenseBoost = defensiveAbilityModifier(defenderAbility, move, moveType, effectiveness, defenderBuild);
   const berryModifier = defensiveItemModifier(defenderItemName, moveType, effectiveness, environment);
   const terrainBoost = terrainModifier(move, moveType, environment, attackerGrounded, defenderGrounded);
   const weatherBoost = weatherModifier(moveType, environment);
+  const helpingHandBoost = helpingHandModifier(environment);
+  const spreadBoost = spreadModifier(move, environment);
   const screenBoost = screenModifier(move, environment, attackerAbility);
   const critBoost = critModifier(environment, attackerAbility);
-  const hitProfile = hitCountSummary(move, attackerItemName);
+  const hitProfile = hitCountSummary(move, environment.magicRoom ? null : attackerItemName);
 
   const baseDamage = Math.floor(
     Math.floor((Math.floor((2 * 50) / 5 + 2) * power * Math.max(attackStat, 1)) / Math.max(defenseStat, 1)) / 50 + 2,
   );
 
-  const modifier = stab * effectiveness * itemModifier * abilityAttackBoost * abilityDefenseBoost * berryModifier * terrainBoost * weatherBoost * screenBoost * critBoost;
+  const modifier = stab * effectiveness * itemModifier * abilityAttackBoost * abilityDefenseBoost * berryModifier * terrainBoost * weatherBoost * helpingHandBoost * spreadBoost * screenBoost * critBoost;
   const perHitRolls = randomRollFactors.map((factor) => Math.max(1, Math.floor(baseDamage * modifier * factor / 100)));
   const distribution = mergeDistributions(hitProfile.weights.map((entry) => ({
     distribution: hitDistribution(perHitRolls, entry.hits),
@@ -1136,19 +1267,25 @@ export function calculateDamage(
     `Ability ${abilityAttackBoost.toFixed(2)}x / ${abilityDefenseBoost.toFixed(2)}x`,
     `Terrain ${terrainBoost.toFixed(2)}x`,
     `Weather ${weatherBoost.toFixed(2)}x`,
+    `Helping Hand ${helpingHandBoost.toFixed(2)}x`,
+    `Spread ${spreadBoost.toFixed(2)}x`,
     `Screens ${screenBoost.toFixed(2)}x`,
     `Crit ${critBoost.toFixed(2)}x`,
   ];
 
-  if (defenderItemName === 'Focus Sash' && defenderBuild.currentHpPercent >= 100 && hitProfile.maxHits === 1) {
+  if (environment.magicRoom && (attackerItemName || defenderItemName)) {
+    notes.push('Magic Room suppresses held-item effects on this line.');
+  }
+
+  if (!environment.magicRoom && defenderItemName === 'Focus Sash' && defenderBuild.currentHpPercent >= 100 && hitProfile.maxHits === 1) {
     notes.push('Focus Sash can let the defender survive from full HP.');
   }
 
-  if (defenderItemName === 'Focus Band') {
+  if (!environment.magicRoom && defenderItemName === 'Focus Band') {
     notes.push('Focus Band survival rolls are not folded into KO odds.');
   }
 
-  if (attackerItemName === 'Choice Scarf') {
+  if (!environment.magicRoom && attackerItemName === 'Choice Scarf') {
     notes.push('Choice Scarf affects speed order, not raw move damage.');
   }
 

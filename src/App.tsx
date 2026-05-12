@@ -39,6 +39,19 @@ import {
   weatherOptions,
 } from './lib/champions';
 import { calculateDamage, summaryForResult } from './lib/damage';
+import {
+  battleMusicTracks,
+  createOnlineRoom,
+  ensureOnlineSessionId,
+  fetchOnlineRoom,
+  forfeitOnlineRoom,
+  heartbeatPresence,
+  joinOnlineRoom,
+  loginOnlineAccount,
+  registerOnlineAccount,
+  submitOnlineBringOrder,
+  submitOnlineChoices,
+} from './lib/online';
 import { clearState, loadState, saveState } from './lib/storage';
 import { advancePreviewToBattle, createSimulatorBattle, legalMovesForUnit, resolveTurn } from './lib/simulator';
 import { getMoveUsageInsight, getPokemonUsageInsight, getPopularPresetPatch, getPopularPresetSummary } from './lib/usage';
@@ -48,14 +61,18 @@ import type {
   EnvironmentState,
   GeneratedTeamPlan,
   LayoutMode,
+  OnlineBattleAccount,
+  OnlinePresenceStats,
   PokemonBuild,
   PokemonEntry,
+  PokemonMove,
   SimulatorMatchRecord,
   SimulatorTurnReview,
   TeamAnalysis,
   Team,
 } from './types';
-import type { SimUnit, SimulatorBattleState, SimulatorChoice } from './lib/simulator';
+import type { SimSide, SimUnit, SimulatorBattleState, SimulatorChoice } from './lib/simulator';
+import type { OnlineBattleRoomView } from './lib/online';
 
 type SimulatorPreviewState = {
   format: BattleFormat;
@@ -92,6 +109,7 @@ const appTabs: { id: BattleTab; label: string; short: string; description: strin
   { id: 'ai-builder', label: 'AI Builder', short: 'AI', description: 'Generate meta, anti-meta, and random team plans around your core.' },
   { id: 'analyzer', label: 'Analyzer', short: 'Scan', description: 'Surface survivability, threats, roles, and bring-four ideas.' },
   { id: 'simulator', label: 'Simulator', short: 'Sim', description: 'Preview matchups, pick four, and play a live battle sandbox.' },
+  { id: 'pvp-battles', label: 'PvP Battles', short: 'PvP', description: 'Register, share a 6-digit code, and battle another live player with timers and reveal rules.' },
   { id: 'profile', label: 'Profile', short: 'Save', description: 'Manage your trainer profile and local save data.' },
 ];
 
@@ -146,8 +164,12 @@ const simulatorSupportMoveNames = new Set([
   'Disable',
   'Fake Out',
   'Icy Wind',
+  'Magic Room',
   'Snarl',
+  'Sticky Web',
+  'Toxic Spikes',
   'Will-O-Wisp',
+  'Wonder Room',
   'Reflect',
   'Light Screen',
   'Safeguard',
@@ -165,10 +187,72 @@ const simulatorLeadMoveNames = new Set([
   'Follow Me',
   'Rage Powder',
   'Icy Wind',
+  'Magic Room',
   'Snarl',
+  'Sticky Web',
   'Encore',
   'Taunt',
+  'Toxic Spikes',
+  'Wonder Room',
 ]);
+const simulatorAutoTargetMoves = new Set([
+  'Acid Armor',
+  'Agility',
+  'Amnesia',
+  'Aqua Ring',
+  'Aurora Veil',
+  'Baneful Bunker',
+  'Bulk Up',
+  'Calm Mind',
+  'Charge',
+  'Chilly Reception',
+  'Coil',
+  'Cosmic Power',
+  'Cotton Guard',
+  'Defog',
+  'Detect',
+  'Double Team',
+  'Dragon Dance',
+  'Electric Terrain',
+  'Endure',
+  'Grassy Terrain',
+  'Gravity',
+  'Growth',
+  'Haze',
+  'Heal Bell',
+  'Howl',
+  'Ingrain',
+  'Iron Defense',
+  "King's Shield",
+  'Light Screen',
+  'Life Dew',
+  'Magic Room',
+  'Misty Terrain',
+  'Nasty Plot',
+  'Protect',
+  'Psychic Terrain',
+  'Quick Guard',
+  'Rage Powder',
+  'Rain Dance',
+  'Reflect',
+  'Rest',
+  'Safeguard',
+  'Sandstorm',
+  'Snowscape',
+  'Spikes',
+  'Stealth Rock',
+  'Sticky Web',
+  'Sunny Day',
+  'Swords Dance',
+  'Tailwind',
+  'Toxic Spikes',
+  'Trick Room',
+  'Wonder Room',
+  'Wide Guard',
+]);
+const simulatorAllyTargetMoves = new Set(['Coaching', 'Heal Pulse', 'Helping Hand']);
+
+type SimulatorTargetMode = 'foe' | 'ally' | 'auto';
 
 const announcerScripts: Record<
   'preview' | 'turn' | 'switch' | 'hit' | 'super' | 'resist' | 'miss' | 'status' | 'protect' | 'ko' | 'finish' | 'star',
@@ -326,6 +410,140 @@ function terrainFieldLabel(state: SimulatorBattleState) {
   return state.environment.terrain === 'none' || state.terrainTurns <= 0
     ? 'None'
     : `${titleCaseFieldLabel(state.environment.terrain)} (${state.terrainTurns} turn${state.terrainTurns === 1 ? '' : 's'})`;
+}
+
+function conditionTurnLabel(label: string, turns: number) {
+  return `${label} ${turns}`;
+}
+
+function simulatorGlobalFieldTags(state: SimulatorBattleState) {
+  const tags: BattleTag[] = [];
+  if (state.environment.weather !== 'clear' && state.weatherTurns > 0) {
+    tags.push({
+      key: 'weather',
+      label: conditionTurnLabel(titleCaseFieldLabel(state.environment.weather), state.weatherTurns),
+      tone: 'neutral',
+      title: `${titleCaseFieldLabel(state.environment.weather)} is active for ${state.weatherTurns} more turn${state.weatherTurns === 1 ? '' : 's'}.`,
+    });
+  }
+  if (state.environment.terrain !== 'none' && state.terrainTurns > 0) {
+    tags.push({
+      key: 'terrain',
+      label: conditionTurnLabel(titleCaseFieldLabel(state.environment.terrain), state.terrainTurns),
+      tone: 'positive',
+      title: `${titleCaseFieldLabel(state.environment.terrain)} Terrain is active for ${state.terrainTurns} more turn${state.terrainTurns === 1 ? '' : 's'}.`,
+    });
+  }
+  if (state.trickRoomTurns > 0) {
+    tags.push({
+      key: 'trick-room',
+      label: conditionTurnLabel('Trick Room', state.trickRoomTurns),
+      tone: 'warning',
+      title: `Trick Room is active for ${state.trickRoomTurns} more turn${state.trickRoomTurns === 1 ? '' : 's'}.`,
+    });
+  }
+  if (state.gravityTurns > 0) {
+    tags.push({
+      key: 'gravity',
+      label: conditionTurnLabel('Gravity', state.gravityTurns),
+      tone: 'warning',
+      title: `Gravity is active for ${state.gravityTurns} more turn${state.gravityTurns === 1 ? '' : 's'}.`,
+    });
+  }
+  if (state.magicRoomTurns > 0) {
+    tags.push({
+      key: 'magic-room',
+      label: conditionTurnLabel('Magic Room', state.magicRoomTurns),
+      tone: 'warning',
+      title: `Magic Room is active for ${state.magicRoomTurns} more turn${state.magicRoomTurns === 1 ? '' : 's'}. Held-item effects are suppressed.`,
+    });
+  }
+  if (state.wonderRoomTurns > 0) {
+    tags.push({
+      key: 'wonder-room',
+      label: conditionTurnLabel('Wonder Room', state.wonderRoomTurns),
+      tone: 'warning',
+      title: `Wonder Room is active for ${state.wonderRoomTurns} more turn${state.wonderRoomTurns === 1 ? '' : 's'}. Defense and Sp. Def are swapped.`,
+    });
+  }
+  return tags;
+}
+
+function simulatorSideConditionTags(side: SimSide) {
+  const tags: BattleTag[] = [];
+  if (side.tailwindTurns > 0) {
+    tags.push({
+      key: `${side.name}-tailwind`,
+      label: conditionTurnLabel('Tailwind', side.tailwindTurns),
+      tone: 'positive',
+      title: `Tailwind is active for ${side.tailwindTurns} more turn${side.tailwindTurns === 1 ? '' : 's'}.`,
+    });
+  }
+  if (side.reflectTurns > 0) {
+    tags.push({
+      key: `${side.name}-reflect`,
+      label: conditionTurnLabel('Reflect', side.reflectTurns),
+      tone: 'positive',
+      title: `Reflect is active for ${side.reflectTurns} more turn${side.reflectTurns === 1 ? '' : 's'}.`,
+    });
+  }
+  if (side.lightScreenTurns > 0) {
+    tags.push({
+      key: `${side.name}-light-screen`,
+      label: conditionTurnLabel('Light Screen', side.lightScreenTurns),
+      tone: 'positive',
+      title: `Light Screen is active for ${side.lightScreenTurns} more turn${side.lightScreenTurns === 1 ? '' : 's'}.`,
+    });
+  }
+  if (side.auroraVeilTurns > 0) {
+    tags.push({
+      key: `${side.name}-aurora-veil`,
+      label: conditionTurnLabel('Aurora Veil', side.auroraVeilTurns),
+      tone: 'positive',
+      title: `Aurora Veil is active for ${side.auroraVeilTurns} more turn${side.auroraVeilTurns === 1 ? '' : 's'}.`,
+    });
+  }
+  if (side.safeguardTurns > 0) {
+    tags.push({
+      key: `${side.name}-safeguard`,
+      label: conditionTurnLabel('Safeguard', side.safeguardTurns),
+      tone: 'neutral',
+      title: `Safeguard is active for ${side.safeguardTurns} more turn${side.safeguardTurns === 1 ? '' : 's'}.`,
+    });
+  }
+  if (side.stealthRock) {
+    tags.push({
+      key: `${side.name}-stealth-rock`,
+      label: 'Stealth Rock',
+      tone: 'negative',
+      title: 'Stealth Rock is active on this side.',
+    });
+  }
+  if (side.spikesLayers > 0) {
+    tags.push({
+      key: `${side.name}-spikes`,
+      label: `Spikes ${side.spikesLayers}`,
+      tone: 'negative',
+      title: `${side.spikesLayers} Spikes layer${side.spikesLayers === 1 ? '' : 's'} are active on this side.`,
+    });
+  }
+  if (side.toxicSpikesLayers > 0) {
+    tags.push({
+      key: `${side.name}-toxic-spikes`,
+      label: `Toxic Spikes ${side.toxicSpikesLayers}`,
+      tone: 'negative',
+      title: `${side.toxicSpikesLayers} Toxic Spikes layer${side.toxicSpikesLayers === 1 ? '' : 's'} are active on this side.`,
+    });
+  }
+  if (side.stickyWeb) {
+    tags.push({
+      key: `${side.name}-sticky-web`,
+      label: 'Sticky Web',
+      tone: 'negative',
+      title: 'Sticky Web is active on this side.',
+    });
+  }
+  return tags;
 }
 
 function sleepTimerMeta(unit: SimUnit) {
@@ -755,6 +973,38 @@ function simulatorBattleTags(unit: SimUnit) {
       title: 'Torment is active. This Pokemon cannot select the same move it used last turn until it switches out.',
     });
   }
+  if (unit.trappedByMove) {
+    tags.push({
+      key: 'trapped',
+      label: unit.trappedByMove,
+      tone: 'negative',
+      title: `${unit.trappedByMove} is preventing this Pokemon from switching out right now.`,
+    });
+  }
+  if (unit.saltCure) {
+    tags.push({
+      key: 'salt-cure',
+      label: 'Salt Cure',
+      tone: 'negative',
+      title: 'Salt Cure chip is active and will continue while this Pokemon remains in battle.',
+    });
+  }
+  if (unit.syrupTurns > 0) {
+    tags.push({
+      key: 'syrup',
+      label: `Syrup ${unit.syrupTurns}`,
+      tone: 'warning',
+      title: `Syrup Bomb is active for ${unit.syrupTurns} more end step${unit.syrupTurns === 1 ? '' : 's'}.`,
+    });
+  }
+  if (unit.bindingTurns > 0) {
+    tags.push({
+      key: 'binding',
+      label: `Bind ${unit.bindingTurns}`,
+      tone: 'negative',
+      title: `A binding effect is active for ${unit.bindingTurns} more turn${unit.bindingTurns === 1 ? '' : 's'}.`,
+    });
+  }
   const sleepMeta = sleepTimerMeta(unit);
   if (sleepMeta) {
     tags.push({
@@ -815,6 +1065,18 @@ function simulatorRestrictionNotes(unit: SimUnit) {
   if (unit.tormentActive) {
     notes.push('Torment is active until this Pokemon switches out, so it cannot repeat the last move it used.');
   }
+  if (unit.trappedByMove) {
+    notes.push(`${unit.trappedByMove} is preventing this Pokemon from switching out right now.`);
+  }
+  if (unit.saltCure) {
+    notes.push('Salt Cure is active, so this Pokemon keeps taking chip each turn until it leaves the field.');
+  }
+  if (unit.syrupTurns > 0) {
+    notes.push(`Syrup Bomb is still active for ${unit.syrupTurns} more end step${unit.syrupTurns === 1 ? '' : 's'}.`);
+  }
+  if (unit.bindingTurns > 0) {
+    notes.push(`A binding effect is still active for ${unit.bindingTurns} more turn${unit.bindingTurns === 1 ? '' : 's'}.`);
+  }
   if (unit.build.status === 'freeze') {
     notes.push(freezeTimerMeta(unit)?.note ?? 'Freeze uses the current Champions rule set here: 25% thaw chance on each move attempt, guaranteed thaw by frozen turn 3.');
   }
@@ -828,6 +1090,48 @@ function simulatorRestrictionNotes(unit: SimUnit) {
     notes.push('No legal move is currently available because the active lock effects overlap. Switch if possible, or wait for the restriction to clear.');
   }
   return notes;
+}
+
+function simulatorTargetMode(move: PokemonMove | null, format: BattleFormat): SimulatorTargetMode {
+  if (!move) {
+    return 'foe';
+  }
+
+  if (simulatorAutoTargetMoves.has(move.name)) {
+    return 'auto';
+  }
+
+  if (simulatorAllyTargetMoves.has(move.name)) {
+    return format === 'Doubles' ? 'ally' : 'auto';
+  }
+
+  return 'foe';
+}
+
+function simulatorTargetNote(move: PokemonMove | null, format: BattleFormat, allyName: string | null) {
+  if (!move) {
+    return null;
+  }
+
+  if (simulatorAllyTargetMoves.has(move.name) && format !== 'Doubles') {
+    return `${move.name} needs an ally on the field, so it will fail in Singles.`;
+  }
+
+  const targetMode = simulatorTargetMode(move, format);
+  if (targetMode === 'ally') {
+    return allyName
+      ? `${move.name} targets your ally automatically here: ${allyName}.`
+      : `${move.name} needs an ally on the field to work.`;
+  }
+
+  if (targetMode === 'auto') {
+    if (move.name === 'Aurora Veil') {
+      return 'Aurora Veil applies to your side automatically and only works while snow is active.';
+    }
+    return `${move.name} resolves automatically here, so no opponent target slot is needed.`;
+  }
+
+  return null;
 }
 
 function pickPreferredMaleVoice() {
@@ -865,6 +1169,55 @@ function speakAnnouncerLines(lines: string[], rate: number) {
   }
 }
 
+function battleTrackLabel(trackId: string) {
+  return battleMusicTracks.find((track) => track.id === trackId)?.label ?? 'Battle Music';
+}
+
+function BattleMusicPlayer({
+  trackId,
+  enabled,
+  volume,
+  active,
+}: {
+  trackId: string;
+  enabled: boolean;
+  volume: number;
+  active: boolean;
+}) {
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    const currentTrack = battleMusicTracks.find((track) => track.id === trackId) ?? battleMusicTracks[0];
+    if (!audioRef.current) {
+      audioRef.current = new Audio(currentTrack.audioUrl);
+      audioRef.current.loop = true;
+    }
+
+    if (audioRef.current.src !== currentTrack.audioUrl) {
+      audioRef.current.pause();
+      audioRef.current = new Audio(currentTrack.audioUrl);
+      audioRef.current.loop = true;
+    }
+
+    audioRef.current.volume = Math.max(0, Math.min(1, volume / 100));
+    if (active && enabled) {
+      void audioRef.current.play().catch(() => undefined);
+    } else {
+      audioRef.current.pause();
+    }
+
+    return () => {
+      audioRef.current?.pause();
+    };
+  }, [trackId, active, enabled, volume]);
+
+  return <span className="youtube-audio-player" aria-hidden="true" />;
+}
+
 function battlePerformanceScore(unit: SimUnit) {
   return unit.damageDealt + unit.knockouts * 120 + unit.turnsActive * 8 + (unit.megaEvolved ? 12 : 0);
 }
@@ -886,6 +1239,7 @@ function buildSimulatorMatchRecord(
   timerEnabled: boolean,
   battleLog: string[],
   turnReviews: SimulatorTurnReview[],
+  mode: SimulatorMatchRecord['mode'] = 'AI Simulator',
 ): SimulatorMatchRecord {
   const performers = topBattlePerformers(battle);
   return {
@@ -893,6 +1247,7 @@ function buildSimulatorMatchRecord(
     playedAt: new Date().toISOString(),
     format: battle.format,
     teamName,
+    mode,
     result: battle.winner === 'player' ? 'Win' : 'Loss',
     turns: Math.max(1, battle.turn - 1),
     opponentPreview: battle.opponent.units.map((unit) => unit.basePokemon.displayName),
@@ -977,8 +1332,13 @@ function bestProjectedChoice(battle: SimulatorBattleState, unit: SimUnit) {
         move,
         {
           ...battle.environment,
+          gravity: battle.gravityTurns > 0,
+          magicRoom: battle.magicRoomTurns > 0,
+          wonderRoom: battle.wonderRoomTurns > 0,
+          helpingHand: false,
           reflect: battle.opponent.reflectTurns > 0,
           lightScreen: battle.opponent.lightScreenTurns > 0,
+          auroraVeil: battle.opponent.auroraVeilTurns > 0,
         },
       );
       if (!result) {
@@ -1019,8 +1379,13 @@ function chosenProjection(battle: SimulatorBattleState, unit: SimUnit, choice: S
     move,
     {
       ...battle.environment,
+      gravity: battle.gravityTurns > 0,
+      magicRoom: battle.magicRoomTurns > 0,
+      wonderRoom: battle.wonderRoomTurns > 0,
+      helpingHand: false,
       reflect: battle.opponent.reflectTurns > 0,
       lightScreen: battle.opponent.lightScreenTurns > 0,
+      auroraVeil: battle.opponent.auroraVeilTurns > 0,
     },
   );
   if (!result) {
@@ -1174,7 +1539,10 @@ function App() {
   const [selectedSlotIndex, setSelectedSlotIndex] = useState(0);
   const [calcAttacker, setCalcAttacker] = useState<PokemonBuild>(() => copyBuild(loadState().teams[0]?.slots[0] ?? createDefaultState().teams[0].slots[0]));
   const [calcDefender, setCalcDefender] = useState<PokemonBuild>(() => copyBuild(loadState().teams[0]?.slots[1] ?? createDefaultState().teams[0].slots[1]));
-  const [environment, setEnvironment] = useState<EnvironmentState>(defaultEnvironment);
+  const [environment, setEnvironment] = useState<EnvironmentState>(() => ({
+    ...defaultEnvironment,
+    battleFormat: activeTeamFromState(loadState()).format,
+  }));
   const [selectedDamageMoveId, setSelectedDamageMoveId] = useState<string | null>(null);
   const [pokedexSearch, setPokedexSearch] = useState('');
   const [selectedPokedexId, setSelectedPokedexId] = useState<string>(dataset.pokemon[0]?.id ?? '');
@@ -1201,17 +1569,35 @@ function App() {
   const [simTurnReviews, setSimTurnReviews] = useState<SimulatorTurnReview[]>([]);
   const [simCountdown, setSimCountdown] = useState(0);
   const [simPreviewMessage, setSimPreviewMessage] = useState<string | null>(null);
+  const [presenceStats, setPresenceStats] = useState<OnlinePresenceStats>({ activeUsers: 0, totalVisits: 0, activeBattles: 0 });
+  const [onlineSessionId] = useState(() => ensureOnlineSessionId());
+  const [onlineAuthMode, setOnlineAuthMode] = useState<'register' | 'login'>('register');
+  const [onlineEmail, setOnlineEmail] = useState('');
+  const [onlinePassword, setOnlinePassword] = useState('');
+  const [onlineLookup, setOnlineLookup] = useState('');
+  const [onlineStatusMessage, setOnlineStatusMessage] = useState<string | null>(null);
+  const [pvpRoomCodeInput, setPvpRoomCodeInput] = useState('');
+  const [pvpRoom, setPvpRoom] = useState<OnlineBattleRoomView | null>(null);
+  const [pvpBringOrder, setPvpBringOrder] = useState<number[]>([]);
+  const [pvpChoiceDrafts, setPvpChoiceDrafts] = useState<Record<number, ChoiceDraft>>({});
+  const [pvpCountdown, setPvpCountdown] = useState(0);
+  const [pvpMessage, setPvpMessage] = useState<string | null>(null);
+  const [pvpAnnouncerFeed, setPvpAnnouncerFeed] = useState<string[]>([]);
   const [lastSavedAt, setLastSavedAt] = useState<string | null>(null);
   const [saveMessage, setSaveMessage] = useState('Autosave ready');
   const [selectedReplayId, setSelectedReplayId] = useState<string | null>(null);
   const simBattleRef = useRef<SimulatorBattleState | null>(null);
+  const pvpRoomRef = useRef<OnlineBattleRoomView | null>(null);
   const simChoiceDraftsRef = useRef<Record<number, ChoiceDraft>>({});
   const simTurnReviewsRef = useRef<SimulatorTurnReview[]>([]);
   const previousBattleRef = useRef<SimulatorBattleState | null>(null);
+  const previousPvpBattleRef = useRef<SimulatorBattleState | null>(null);
   const recordedBattleKeyRef = useRef<string | null>(null);
+  const recordedPvpBattleKeyRef = useRef<string | null>(null);
 
   const team = activeTeamFromState(state);
   const analysis = analyzeTeam(team);
+  const onlineAccount = state.profile.onlineAccount;
   const selectedTeamSlot = team.slots[selectedSlotIndex] ?? team.slots[0];
   const deferredDexSearch = useDeferredValue(pokedexSearch);
   const pokedexMatches = useMemo(
@@ -1243,6 +1629,9 @@ function App() {
     state.profile.matchHistory.find((record) => record.id === selectedReplayId) ??
     state.profile.matchHistory[state.profile.matchHistory.length - 1] ??
     null;
+  const aiBattleMusicActive = activeTab === 'simulator' && Boolean(simPreview || simBattle);
+  const pvpBattleMusicActive = activeTab === 'pvp-battles' && Boolean(pvpRoom && (pvpRoom.stage === 'preview' || pvpRoom.stage === 'battle'));
+  const activeBattleMusicTrackId = activeTab === 'pvp-battles' ? pvpRoom?.musicTrackId ?? state.profile.preferredBattleTrackId : state.profile.preferredBattleTrackId;
 
   const selectedResult = attackerMoveResults.find(({ move }) => move.id === selectedDamageMoveId)?.result ?? null;
 
@@ -1279,12 +1668,36 @@ function App() {
   }, [simBattle]);
 
   useEffect(() => {
+    pvpRoomRef.current = pvpRoom;
+  }, [pvpRoom]);
+
+  useEffect(() => {
     simChoiceDraftsRef.current = simChoiceDrafts;
   }, [simChoiceDrafts]);
 
   useEffect(() => {
     simTurnReviewsRef.current = simTurnReviews;
   }, [simTurnReviews]);
+
+  useEffect(() => {
+    let mounted = true;
+    const tick = async () => {
+      const nextStats = await heartbeatPresence(onlineSessionId);
+      if (mounted) {
+        setPresenceStats(nextStats);
+      }
+    };
+
+    void tick();
+    const handle = window.setInterval(() => {
+      void tick();
+    }, 15_000);
+
+    return () => {
+      mounted = false;
+      window.clearInterval(handle);
+    };
+  }, [onlineSessionId]);
 
   useEffect(() => {
     if (!simBattle) {
@@ -1331,6 +1744,92 @@ function App() {
 
     previousBattleRef.current = simBattle;
   }, [simBattle, simAnnouncerEnabled, simAnnouncerStyle, simTurnTimerEnabled, team.name]);
+
+  useEffect(() => {
+    if (!pvpRoom || !onlineAccount) {
+      previousPvpBattleRef.current = null;
+      recordedPvpBattleKeyRef.current = null;
+      return;
+    }
+
+    if (pvpRoom.battle) {
+      const pvpAnnouncerEnabled = pvpRoom.seat === 'host' ? pvpRoom.hostAnnouncerEnabled : pvpRoom.guestAnnouncerEnabled;
+      const pvpLines = announcerLinesFromBattleUpdate(previousPvpBattleRef.current, pvpRoom.battle, 'Arena');
+      if (pvpAnnouncerEnabled && pvpLines.length) {
+        setPvpAnnouncerFeed((current) => [...pvpLines.slice().reverse(), ...current].slice(0, 16));
+        speakAnnouncerLines(pvpLines, 1);
+      }
+
+      if (pvpRoom.stage === 'finished' && pvpRoom.battle.winner) {
+        const battleKey = `${pvpRoom.code}-${pvpRoom.battle.turn}-${pvpRoom.battle.winner}`;
+        if (recordedPvpBattleKeyRef.current !== battleKey) {
+          const record = buildSimulatorMatchRecord(
+            pvpRoom.battle,
+            team.name,
+            pvpAnnouncerEnabled,
+            true,
+            [...pvpRoom.battle.log].reverse(),
+            [],
+            'PvP',
+          );
+          setState((current) => ({
+            ...current,
+            profile: {
+              ...current.profile,
+              matchHistory: [...current.profile.matchHistory, record].slice(-80),
+            },
+          }));
+          setSelectedReplayId(record.id);
+          recordedPvpBattleKeyRef.current = battleKey;
+        }
+      }
+      previousPvpBattleRef.current = pvpRoom.battle;
+    }
+  }, [pvpRoom, onlineAccount]);
+
+  useEffect(() => {
+    if (!pvpRoom || !onlineAccount || !pvpRoom.code) {
+      return;
+    }
+
+    let mounted = true;
+    const poll = async () => {
+      const latest = await fetchOnlineRoom({ account: onlineAccount, code: pvpRoom.code });
+      if (mounted && latest) {
+        setPvpRoom(latest);
+      }
+    };
+
+    void poll();
+    const handle = window.setInterval(() => {
+      void poll();
+    }, 2_500);
+
+    return () => {
+      mounted = false;
+      window.clearInterval(handle);
+    };
+  }, [pvpRoom?.code, onlineAccount]);
+
+  useEffect(() => {
+    if (!pvpRoom?.deadlineAt) {
+      setPvpCountdown(0);
+      return;
+    }
+
+    const tick = () => setPvpCountdown(Math.max(0, Math.ceil((new Date(pvpRoom.deadlineAt!).getTime() - Date.now()) / 1000)));
+    tick();
+    const handle = window.setInterval(tick, 1000);
+    return () => window.clearInterval(handle);
+  }, [pvpRoom?.deadlineAt]);
+
+  useEffect(() => {
+    if (!pvpRoom || pvpRoom.stage !== 'battle' || !pvpRoom.battle || pvpRoom.playerChoicesLocked || pvpCountdown > 0) {
+      return;
+    }
+
+    void submitPvpTurn(true);
+  }, [pvpCountdown, pvpRoom?.code, pvpRoom?.stage, pvpRoom?.playerChoicesLocked, pvpRoom?.battle]);
 
   useEffect(() => {
     if (!simBattle || simBattle.stage !== 'battle' || simBattle.winner || !simTurnTimerEnabled) {
@@ -1686,7 +2185,10 @@ function App() {
     setState(next);
     setCalcAttacker(copyBuild(next.teams[0].slots[0]));
     setCalcDefender(copyBuild(next.teams[0].slots[1]));
-    setEnvironment(defaultEnvironment);
+    setEnvironment({
+      ...defaultEnvironment,
+      battleFormat: next.teams[0].format,
+    });
     setGeneratedPlans([]);
     setSelectedGeneratedPlanId(null);
     setSimPreview(null);
@@ -1719,7 +2221,8 @@ function App() {
     setSimTurnReviews([]);
     setSimAnnouncerFeed([]);
     setSimTurnNotice(null);
-    if (simAnnouncerEnabled) {
+    setSimAnnouncerEnabled(state.profile.announcerDefaultEnabled);
+    if (state.profile.announcerDefaultEnabled) {
       const spotlight = filledSlotIndices(opponentTeam)
         .slice(0, 2)
         .map((slotIndex) => {
@@ -1784,12 +2287,191 @@ function App() {
     }));
   }
 
+  function updatePvpChoiceDraft(actor: number, partial: Partial<ChoiceDraft>) {
+    setPvpChoiceDrafts((current) => ({
+      ...current,
+      [actor]: {
+        ...(current[actor] ?? {
+          type: 'move' as const,
+          moveId: pvpRoom?.battle?.player.units[pvpRoom.battle.player.active[actor]]?.build.moveIds[0] ?? '',
+          target: 0,
+          switchTarget: pvpRoom?.battle?.player.bench[0] ?? 0,
+        }),
+        ...partial,
+      } satisfies ChoiceDraft,
+    }));
+  }
+
   function submitSimTurn() {
     resolveSimulatorTurn(false);
   }
 
+  async function registerForOnlineBattles() {
+    try {
+      const account = await registerOnlineAccount({
+        trainerName: state.profile.trainerName.trim() || onlineLookup.trim(),
+        email: onlineEmail,
+        password: onlinePassword,
+      });
+      setState((current) => ({
+        ...current,
+        profile: {
+          ...current.profile,
+          trainerName: current.profile.trainerName || account.trainerName,
+          onlineAccount: account,
+        },
+      }));
+      setOnlineStatusMessage(`Registered ${account.trainerName} for live battles.`);
+    } catch (error) {
+      setOnlineStatusMessage(error instanceof Error ? error.message : 'Registration failed.');
+    }
+  }
+
+  async function loginForOnlineBattles() {
+    try {
+      const account = await loginOnlineAccount({
+        trainerNameOrEmail: onlineLookup,
+        password: onlinePassword,
+      });
+      setState((current) => ({
+        ...current,
+        profile: {
+          ...current.profile,
+          trainerName: current.profile.trainerName || account.trainerName,
+          onlineAccount: account,
+        },
+      }));
+      setOnlineStatusMessage(`Signed in as ${account.trainerName}.`);
+    } catch (error) {
+      setOnlineStatusMessage(error instanceof Error ? error.message : 'Sign-in failed.');
+    }
+  }
+
+  async function createPvpRoomNow() {
+    if (!onlineAccount) {
+      setOnlineStatusMessage('Register or sign in before creating a live battle room.');
+      return;
+    }
+
+    try {
+      const room = await createOnlineRoom({
+        account: onlineAccount,
+        team: sanitizeTeamForChampions(cloneTeam(team)),
+        format: team.format,
+        musicTrackId: state.profile.preferredBattleTrackId,
+        announcerEnabled: state.profile.announcerDefaultEnabled,
+      });
+      setPvpRoom(room);
+      setPvpRoomCodeInput(room.code);
+      setPvpBringOrder([]);
+      setPvpChoiceDrafts({});
+      setPvpMessage(`Room ${room.code} is live. Share the 6-digit code with your opponent.`);
+    } catch (error) {
+      setPvpMessage(error instanceof Error ? error.message : 'Could not create the live room.');
+    }
+  }
+
+  async function joinPvpRoomNow() {
+    if (!onlineAccount) {
+      setOnlineStatusMessage('Register or sign in before joining a live room.');
+      return;
+    }
+
+    try {
+      const room = await joinOnlineRoom({
+        account: onlineAccount,
+        code: pvpRoomCodeInput.trim(),
+        team: sanitizeTeamForChampions(cloneTeam(team)),
+        musicTrackId: state.profile.preferredBattleTrackId,
+        announcerEnabled: state.profile.announcerDefaultEnabled,
+      });
+      setPvpRoom(room);
+      setPvpBringOrder([]);
+      setPvpChoiceDrafts({});
+      setPvpMessage(`Joined room ${room.code}. Team preview is live.`);
+    } catch (error) {
+      setPvpMessage(error instanceof Error ? error.message : 'Could not join the live room.');
+    }
+  }
+
+  function togglePvpBringIndex(slotIndex: number) {
+    setPvpMessage(null);
+    setPvpBringOrder((current) => {
+      if (current.includes(slotIndex)) {
+        return current.filter((entry) => entry !== slotIndex);
+      }
+      if (current.length >= 4) {
+        return current;
+      }
+      return [...current, slotIndex];
+    });
+  }
+
+  async function submitPvpBringOrderSelection() {
+    if (!onlineAccount || !pvpRoom) {
+      return;
+    }
+
+    try {
+      const room = await submitOnlineBringOrder({
+        account: onlineAccount,
+        code: pvpRoom.code,
+        bringOrder: pvpBringOrder,
+      });
+      setPvpRoom(room);
+      setPvpMessage('Bring order submitted. Waiting for the other player if needed.');
+    } catch (error) {
+      setPvpMessage(error instanceof Error ? error.message : 'Could not lock the bring order.');
+    }
+  }
+
+  async function submitPvpTurn(timedOut = false) {
+    if (!onlineAccount || !pvpRoom?.battle) {
+      return;
+    }
+
+    try {
+      const { choices, notices } = buildSimulatorChoices(pvpRoom.battle, pvpChoiceDrafts, timedOut);
+      const room = await submitOnlineChoices({
+        account: onlineAccount,
+        code: pvpRoom.code,
+        choices,
+      });
+      setPvpRoom(room);
+      setPvpChoiceDrafts({});
+      setPvpMessage(notices[0] ?? 'Turn submitted.');
+    } catch (error) {
+      setPvpMessage(error instanceof Error ? error.message : 'Could not submit the turn.');
+    }
+  }
+
+  async function handlePvpForfeit() {
+    if (!onlineAccount || !pvpRoom) {
+      return;
+    }
+
+    try {
+      const room = await forfeitOnlineRoom({
+        account: onlineAccount,
+        code: pvpRoom.code,
+      });
+      setPvpRoom(room);
+      setPvpMessage('You forfeited the battle. The result counts as a loss.');
+    } catch (error) {
+      setPvpMessage(error instanceof Error ? error.message : 'Could not forfeit the room.');
+    }
+  }
+
   return (
     <div className={`app-shell layout-${state.profile.layoutMode.toLowerCase()}${state.profile.resizablePanels ? ' panels-resizable' : ''}`}>
+      {state.profile.battleMusicEnabled && (aiBattleMusicActive || pvpBattleMusicActive) ? (
+        <BattleMusicPlayer
+          trackId={activeBattleMusicTrackId}
+          enabled={state.profile.battleMusicEnabled}
+          volume={state.profile.battleMusicVolume}
+          active={aiBattleMusicActive || pvpBattleMusicActive}
+        />
+      ) : null}
       <aside className="sidebar">
         <div className="brand-panel">
           <div className="brand-kicker">Pokemon Champions Lab</div>
@@ -1828,6 +2510,11 @@ function App() {
             <span>Champions Data</span>
             <strong>{dataset.pokemon.length} forms / {dataset.moves.length} moves / {dataset.items.length} items</strong>
             <small>Release date confirmed from Serebii: {dataset.mechanics.releaseDate}</small>
+          </div>
+          <div className="info-card compact">
+            <span>Live Site Pulse</span>
+            <strong>{presenceStats.activeUsers} online now</strong>
+            <small>{presenceStats.totalVisits} total visits tracked | {presenceStats.activeBattles} live battles</small>
           </div>
         </div>
       </aside>
@@ -2042,6 +2729,14 @@ function App() {
               <SectionHeader title="Environment" subtitle="Toggle battle state, then swap directions to see the reverse line." />
               <div className="control-grid two">
                 <label className="field">
+                  <span>Battle Format</span>
+                  <select value={environment.battleFormat} onChange={(event) => setEnvironment((current) => ({ ...current, battleFormat: event.target.value as BattleFormat, spreadTargetsHit: event.target.value === 'Doubles' ? current.spreadTargetsHit : 1 }))}>
+                    {battleFormats.map((format) => (
+                      <option key={format} value={format}>{format}</option>
+                    ))}
+                  </select>
+                </label>
+                <label className="field">
                   <span>Weather</span>
                   <select value={environment.weather} onChange={(event) => setEnvironment((current) => ({ ...current, weather: event.target.value as EnvironmentState['weather'] }))}>
                     {weatherOptions.map((weather) => (
@@ -2057,9 +2752,21 @@ function App() {
                     ))}
                   </select>
                 </label>
+                <label className="field">
+                  <span>Spread Targets Hit</span>
+                  <select value={environment.spreadTargetsHit} onChange={(event) => setEnvironment((current) => ({ ...current, spreadTargetsHit: Number(event.target.value) === 2 ? 2 : 1 }))} disabled={environment.battleFormat !== 'Doubles'}>
+                    <option value={1}>1 target</option>
+                    <option value={2}>2 targets</option>
+                  </select>
+                </label>
                 <ToggleField label="Critical hit" checked={environment.criticalHit} onChange={(checked) => setEnvironment((current) => ({ ...current, criticalHit: checked }))} />
+                <ToggleField label="Helping Hand" checked={environment.helpingHand} onChange={(checked) => setEnvironment((current) => ({ ...current, helpingHand: checked }))} />
+                <ToggleField label="Gravity" checked={environment.gravity} onChange={(checked) => setEnvironment((current) => ({ ...current, gravity: checked }))} />
+                <ToggleField label="Magic Room" checked={environment.magicRoom} onChange={(checked) => setEnvironment((current) => ({ ...current, magicRoom: checked }))} />
+                <ToggleField label="Wonder Room" checked={environment.wonderRoom} onChange={(checked) => setEnvironment((current) => ({ ...current, wonderRoom: checked }))} />
                 <ToggleField label="Reflect" checked={environment.reflect} onChange={(checked) => setEnvironment((current) => ({ ...current, reflect: checked }))} />
                 <ToggleField label="Light Screen" checked={environment.lightScreen} onChange={(checked) => setEnvironment((current) => ({ ...current, lightScreen: checked }))} />
+                <ToggleField label="Aurora Veil" checked={environment.auroraVeil} onChange={(checked) => setEnvironment((current) => ({ ...current, auroraVeil: checked }))} />
                 <ToggleField label="Auto-resist berries" checked={environment.defenderProtectedByBerry} onChange={(checked) => setEnvironment((current) => ({ ...current, defenderProtectedByBerry: checked }))} />
               </div>
               <button className="action-button" onClick={() => { const nextAttacker = copyBuild(calcDefender); const nextDefender = copyBuild(calcAttacker); setCalcAttacker(nextAttacker); setCalcDefender(nextDefender); }}>
@@ -2586,6 +3293,41 @@ function App() {
                         <InfoStat label="AI Tailwind" value={simBattle.opponent.tailwindTurns ? `${simBattle.opponent.tailwindTurns}` : 'Off'} />
                         <InfoStat label="Move Clock" value={simTurnTimerEnabled && !simBattle.winner ? `${simTurnClock}s` : 'Off'} />
                       </div>
+                      <div className="subpanel sim-field-panel">
+                        <SectionHeader title="Board State" subtitle="Live field, screen, and hazard conditions pulled from the simulator state." compact />
+                        <div className="sim-field-stack">
+                          {simulatorGlobalFieldTags(simBattle).length ? (
+                            <div className="sim-field-section">
+                              <strong>Global Field</strong>
+                              <div className="battle-tag-row">
+                                {simulatorGlobalFieldTags(simBattle).map((tag) => (
+                                  <span key={tag.key} className={`battle-tag battle-tag-${tag.tone}`} title={tag.title}>
+                                    {tag.label}
+                                  </span>
+                                ))}
+                              </div>
+                            </div>
+                          ) : null}
+                          {[
+                            { label: 'Your Side', side: simBattle.player },
+                            { label: 'AI Side', side: simBattle.opponent },
+                          ].map(({ label, side }) => {
+                            const sideTags = simulatorSideConditionTags(side);
+                            return sideTags.length ? (
+                              <div key={label} className="sim-field-section">
+                                <strong>{label}</strong>
+                                <div className="battle-tag-row">
+                                  {sideTags.map((tag) => (
+                                    <span key={tag.key} className={`battle-tag battle-tag-${tag.tone}`} title={tag.title}>
+                                      {tag.label}
+                                    </span>
+                                  ))}
+                                </div>
+                              </div>
+                            ) : null;
+                          })}
+                        </div>
+                      </div>
                       {simTurnNotice ? <div className="note-row compact-note">{simTurnNotice}</div> : null}
                       {simAnnouncerEnabled ? (
                         <div className="notes-list compact-scroll announcer-feed">
@@ -2623,11 +3365,18 @@ function App() {
                           const canMegaEvolve = Boolean(unit.megaPokemon && !unit.megaEvolved && !simBattle.player.megaUsed);
                           const otherMegaReserved = Object.entries(simChoiceDrafts).some(([draftActor, entry]) => Number(draftActor) !== actor && entry.type === 'mega');
                           const allowMegaOption = canMegaEvolve && (!otherMegaReserved || draft.type === 'mega');
-                          const canSwitch = switchTargets.length > 0;
+                          const canSwitch = switchTargets.length > 0 && !unit.trappedByMove && unit.bindingTurns <= 0;
                           const statusBadge = simulatorStatusBadge(unit);
                           const battleTags = simulatorBattleTags(unit);
                           const effectiveDraftType = draft.type === 'switch' && !canSwitch ? 'move' : draft.type;
                           const selectedMoveId = legalMoves.some((move) => move.id === draft.moveId) ? draft.moveId : legalMoves[0]?.id ?? '';
+                          const selectedMove = legalMoves.find((move) => move.id === selectedMoveId) ?? legalMoves[0] ?? null;
+                          const allyUnit =
+                            simBattle.player.active
+                              .map((activeIndex) => simBattle.player.units[activeIndex])
+                              .find((candidate) => candidate && candidate !== unit && !candidate.fainted) ?? null;
+                          const targetMode = simulatorTargetMode(selectedMove, simBattle.format);
+                          const targetNote = simulatorTargetNote(selectedMove, simBattle.format, allyUnit?.pokemon.displayName ?? null);
                           const restrictionNotes = simulatorRestrictionNotes(unit);
 
                           return (
@@ -2668,15 +3417,21 @@ function App() {
                                       })}
                                     </select>
                                   </label>
-                                  <label className="field">
-                                    <span>Target</span>
-                                    <select value={draft.target} onChange={(event) => updateChoiceDraft(actor, { target: Number(event.target.value) })}>
-                                      {simBattle.opponent.active.map((enemyIndex, targetIndex) => {
-                                        const enemy = simBattle.opponent.units[enemyIndex];
-                                        return <option key={`${enemy?.pokemon.id}-${targetIndex}`} value={targetIndex}>{enemy?.pokemon.displayName ?? `Target ${targetIndex + 1}`}</option>;
-                                      })}
-                                    </select>
-                                  </label>
+                                  {targetMode === 'foe' ? (
+                                    <label className="field">
+                                      <span>Target</span>
+                                      <select value={draft.target} onChange={(event) => updateChoiceDraft(actor, { target: Number(event.target.value) })}>
+                                        {simBattle.opponent.active.map((enemyIndex, targetIndex) => {
+                                          const enemy = simBattle.opponent.units[enemyIndex];
+                                          return <option key={`${enemy?.pokemon.id}-${targetIndex}`} value={targetIndex}>{enemy?.pokemon.displayName ?? `Target ${targetIndex + 1}`}</option>;
+                                        })}
+                                      </select>
+                                    </label>
+                                  ) : targetNote ? (
+                                    <div className="note-row compact-note">
+                                      {targetNote}
+                                    </div>
+                                  ) : null}
                                   {restrictionNotes.map((note) => (
                                     <div key={note} className="note-row compact-note">
                                       {note}
@@ -2730,6 +3485,318 @@ function App() {
           </section>
         )}
 
+        {activeTab === 'pvp-battles' && (
+          <section className="page-grid">
+            <div className="panel tall">
+              <SectionHeader title="Player vs Player" subtitle="Register, lock a saved team, and use a 6-digit room code to battle another live player." />
+              <div className="notes-list compact-scroll">
+                <div className="note-row">PvP uses the same battle engine as the AI simulator, but the turn clock is always on, opponent backline slots stay hidden until revealed, and a forfeit counts as a loss.</div>
+                <div className="note-row">Your active Team Builder squad is the team that gets imported into a live room, so AI-generated teams can be saved, edited, and battled immediately.</div>
+                <div className="note-row">Current music preset: {battleTrackLabel(state.profile.preferredBattleTrackId)}. Adjust battle audio, announcer defaults, and volume in the Profile tab.</div>
+              </div>
+
+              {!onlineAccount ? (
+                <>
+                  <div className="team-actions">
+                    <button className={onlineAuthMode === 'register' ? 'action-button primary' : 'action-button'} onClick={() => setOnlineAuthMode('register')}>Register</button>
+                    <button className={onlineAuthMode === 'login' ? 'action-button primary' : 'action-button'} onClick={() => setOnlineAuthMode('login')}>Sign In</button>
+                  </div>
+                  {onlineAuthMode === 'register' ? (
+                    <>
+                      <label className="field">
+                        <span>Trainer Name</span>
+                        <input value={state.profile.trainerName} onChange={(event) => setState((current) => ({ ...current, profile: { ...current.profile, trainerName: event.target.value } }))} placeholder="Registered battle name" />
+                      </label>
+                      <label className="field">
+                        <span>Email</span>
+                        <input value={onlineEmail} onChange={(event) => setOnlineEmail(event.target.value)} placeholder="Optional email for your battle account" />
+                      </label>
+                      <label className="field">
+                        <span>Password</span>
+                        <input type="password" value={onlinePassword} onChange={(event) => setOnlinePassword(event.target.value)} placeholder="At least 4 characters" />
+                      </label>
+                      <button className="action-button primary" onClick={() => { void registerForOnlineBattles(); }}>Register for PvP</button>
+                    </>
+                  ) : (
+                    <>
+                      <label className="field">
+                        <span>Trainer Name or Email</span>
+                        <input value={onlineLookup} onChange={(event) => setOnlineLookup(event.target.value)} placeholder="Use your registered trainer name or email" />
+                      </label>
+                      <label className="field">
+                        <span>Password</span>
+                        <input type="password" value={onlinePassword} onChange={(event) => setOnlinePassword(event.target.value)} placeholder="Your battle password" />
+                      </label>
+                      <button className="action-button primary" onClick={() => { void loginForOnlineBattles(); }}>Sign In</button>
+                    </>
+                  )}
+                  {onlineStatusMessage ? <div className="note-row compact-note">{onlineStatusMessage}</div> : null}
+                </>
+              ) : (
+                <>
+                  <div className="result-grid">
+                    <InfoStat label="Account" value={onlineAccount.trainerName} />
+                    <InfoStat label="Format" value={team.format} />
+                    <InfoStat label="Imported Team" value={team.name} />
+                    <InfoStat label="Music" value={battleTrackLabel(state.profile.preferredBattleTrackId)} />
+                  </div>
+                  <div className="team-actions">
+                    <button className="action-button primary" onClick={() => { void createPvpRoomNow(); }}>Create 6-Digit Room</button>
+                  </div>
+                  <label className="field">
+                    <span>Join Room Code</span>
+                    <input value={pvpRoomCodeInput} onChange={(event) => setPvpRoomCodeInput(event.target.value)} placeholder="Enter a 6-digit code" />
+                  </label>
+                  <div className="team-actions">
+                    <button className="action-button" onClick={() => { void joinPvpRoomNow(); }}>Join Live Room</button>
+                    <button className="action-button" onClick={() => {
+                      setPvpRoom(null);
+                      setPvpBringOrder([]);
+                      setPvpChoiceDrafts({});
+                      setPvpMessage(null);
+                    }}>Clear Room</button>
+                  </div>
+                  {onlineStatusMessage ? <div className="note-row compact-note">{onlineStatusMessage}</div> : null}
+                </>
+              )}
+            </div>
+
+            <div className="panel tall span-two">
+              {!pvpRoom ? (
+                <div className="empty-state">
+                  <strong>No live room open yet.</strong>
+                  <span>Register or sign in, then create a room or join one with a 6-digit code to start PvP preview.</span>
+                </div>
+              ) : pvpRoom.stage === 'lobby' ? (
+                <>
+                  <SectionHeader title="Waiting Room" subtitle={`Room ${pvpRoom.code} is open. Share the code and wait for a second battler.`} />
+                  <div className="result-grid">
+                    <InfoStat label="Host" value={pvpRoom.hostTrainerName} />
+                    <InfoStat label="Guest" value={pvpRoom.guestTrainerName ?? 'Waiting'} />
+                    <InfoStat label="Timer" value={`${pvpRoom.timerSeconds}s mandatory`} />
+                    <InfoStat label="Music" value={battleTrackLabel(pvpRoom.musicTrackId)} />
+                  </div>
+                  <div className="note-row">{pvpRoom.lastActionSummary}</div>
+                </>
+              ) : pvpRoom.stage === 'preview' ? (
+                <>
+                  <SectionHeader title="PvP Team Preview" subtitle={`Room ${pvpRoom.code} | ${pvpCountdown}s left to lock your four.`} />
+                  <div className="sim-preview-grid">
+                    <div className="subpanel">
+                      <SectionHeader title="Opponent Preview" subtitle="All 6 species are visible, but items, abilities, and moves remain hidden." compact />
+                      <div className="sim-team-preview">
+                        {filledSlotIndices(pvpRoom.opponentTeam ?? createTeam('Empty')).map((slotIndex) => {
+                          const build = pvpRoom.opponentTeam?.slots[slotIndex];
+                          const pokemon = build ? selectedPokemon(build) ?? resolvePokemonForm(build) : null;
+                          return (
+                            <div key={build?.id ?? slotIndex} className="sim-team-card static">
+                              <PokemonSpriteFrame pokemon={pokemon} size="standard" />
+                              <strong>{pokemon?.displayName ?? `Slot ${slotIndex + 1}`}</strong>
+                              <span>Live reveal only</span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                    <div className="subpanel">
+                      <SectionHeader title="Your Bring Order" subtitle="Select exactly 4 Pokemon in the order you want to bring them." compact />
+                      <div className="sim-team-preview">
+                        {filledSlotIndices(team).map((slotIndex) => {
+                          const build = team.slots[slotIndex];
+                          const pokemon = resolvePokemonForm(build);
+                          const selected = pvpBringOrder.includes(slotIndex);
+                          return (
+                            <button key={build.id} className={selected ? 'sim-team-card selectable active' : 'sim-team-card selectable'} onClick={() => togglePvpBringIndex(slotIndex)}>
+                              <PokemonSpriteFrame pokemon={pokemon} size="standard" label={selected ? `${pvpBringOrder.indexOf(slotIndex) + 1}` : undefined} />
+                              <strong>{pokemon?.displayName ?? `Slot ${slotIndex + 1}`}</strong>
+                              <span>{selected ? `Locked #${pvpBringOrder.indexOf(slotIndex) + 1}` : 'Tap to bring'}</span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="note-row">{pvpMessage ?? `Your opponent has locked ${pvpRoom.opponentBringCount}/4 Pokemon so far.`}</div>
+                  <div className="team-actions">
+                    <button className="action-button primary" onClick={() => { void submitPvpBringOrderSelection(); }}>Submit Bring Order</button>
+                    <button className="action-button" onClick={() => setPvpBringOrder([])}>Clear Picks</button>
+                  </div>
+                </>
+              ) : pvpRoom.battle ? (
+                <>
+                  <SectionHeader title="Live PvP Battle" subtitle={`Room ${pvpRoom.code} | ${pvpRoom.stage === 'finished' ? 'Battle complete' : `${pvpCountdown}s on the mandatory move clock`}`} />
+                  <div className="result-grid">
+                    <InfoStat label="Track" value={battleTrackLabel(pvpRoom.musicTrackId)} />
+                    <InfoStat label="Clock" value={`${pvpRoom.timerSeconds}s`} />
+                    <InfoStat label="Choices Locked" value={pvpRoom.playerChoicesLocked ? 'Yes' : 'No'} />
+                    <InfoStat label="Opponent Locked" value={pvpRoom.opponentChoicesLocked ? 'Yes' : 'No'} />
+                  </div>
+                  <div className="battle-layout">
+                    <BattleSideView side={pvpRoom.battle.opponent} format={pvpRoom.battle.format} />
+                    <div className="battle-center">
+                      <div className="subpanel sim-field-panel">
+                        <SectionHeader title="Active Effects" subtitle="Weather, terrain, rooms, screens, hazards, and live turn counters." compact />
+                        <div className="sim-field-stack">
+                          {simulatorGlobalFieldTags(pvpRoom.battle).length ? (
+                            <div className="sim-field-section">
+                              <strong>Global Field</strong>
+                              <div className="battle-tag-row">
+                                {simulatorGlobalFieldTags(pvpRoom.battle).map((tag) => (
+                                  <span key={tag.key} className={`battle-tag battle-tag-${tag.tone}`} title={tag.title}>
+                                    {tag.label}
+                                  </span>
+                                ))}
+                              </div>
+                            </div>
+                          ) : null}
+                          {[{ label: 'Your Side', side: pvpRoom.battle.player }, { label: 'Opponent Side', side: pvpRoom.battle.opponent }].map(({ label, side }) => {
+                            const sideTags = simulatorSideConditionTags(side);
+                            return sideTags.length ? (
+                              <div key={label} className="sim-field-section">
+                                <strong>{label}</strong>
+                                <div className="battle-tag-row">
+                                  {sideTags.map((tag) => (
+                                    <span key={tag.key} className={`battle-tag battle-tag-${tag.tone}`} title={tag.title}>
+                                      {tag.label}
+                                    </span>
+                                  ))}
+                                </div>
+                              </div>
+                            ) : null;
+                          })}
+                        </div>
+                      </div>
+                      <div className="notes-list scroll-stack sim-log">
+                        {pvpRoom.battle.log.slice(0, 16).map((entry, index) => (
+                          <div key={`${entry}-${index}`} className="note-row">{entry}</div>
+                        ))}
+                      </div>
+                      {pvpAnnouncerFeed.length ? (
+                        <div className="notes-list compact-scroll">
+                          {pvpAnnouncerFeed.slice(0, 6).map((entry, index) => (
+                            <div key={`${entry}-${index}`} className="note-row">{entry}</div>
+                          ))}
+                        </div>
+                      ) : null}
+                    </div>
+                    <BattleSideView side={pvpRoom.battle.player} format={pvpRoom.battle.format} friendly />
+                  </div>
+
+                  {!pvpRoom.battle.winner ? (
+                    <>
+                      <div className="sim-action-grid">
+                        {pvpRoom.battle!.player.active.map((unitIndex, actor) => {
+                          const unit = pvpRoom.battle!.player.units[unitIndex];
+                          if (!unit || unit.fainted) {
+                            return null;
+                          }
+
+                          const legalMoves = legalMovesForUnit(unit);
+                          const switchTargets = pvpRoom.battle!.player.bench.filter((benchIndex) => !pvpRoom.battle!.player.units[benchIndex]?.fainted);
+                          const draft = pvpChoiceDrafts[actor] ?? {
+                            type: 'move' as const,
+                            moveId: legalMoves[0]?.id ?? unit.build.moveIds[0] ?? '',
+                            target: 0,
+                            switchTarget: switchTargets[0] ?? 0,
+                          };
+                          const canMegaEvolve = Boolean(unit.megaPokemon && !unit.megaEvolved && !pvpRoom.battle!.player.megaUsed);
+                          const otherMegaReserved = Object.entries(pvpChoiceDrafts).some(([draftActor, entry]) => Number(draftActor) !== actor && entry.type === 'mega');
+                          const allowMegaOption = canMegaEvolve && (!otherMegaReserved || draft.type === 'mega');
+                          const canSwitch = switchTargets.length > 0 && !unit.trappedByMove && unit.bindingTurns <= 0;
+                          const statusBadge = simulatorStatusBadge(unit);
+                          const battleTags = simulatorBattleTags(unit);
+                          const effectiveDraftType = draft.type === 'switch' && !canSwitch ? 'move' : draft.type;
+                          const selectedMoveId = legalMoves.some((move) => move.id === draft.moveId) ? draft.moveId : legalMoves[0]?.id ?? '';
+                          const selectedMove = legalMoves.find((move) => move.id === selectedMoveId) ?? legalMoves[0] ?? null;
+                          const allyUnit =
+                            pvpRoom.battle!.player.active
+                              .map((activeIndex) => pvpRoom.battle!.player.units[activeIndex])
+                              .find((candidate) => candidate && candidate !== unit && !candidate.fainted) ?? null;
+                          const targetMode = simulatorTargetMode(selectedMove, pvpRoom.battle!.format);
+                          const targetNote = simulatorTargetNote(selectedMove, pvpRoom.battle!.format, allyUnit?.pokemon.displayName ?? null);
+                          const restrictionNotes = simulatorRestrictionNotes(unit);
+
+                          return (
+                            <div key={`${unit.pokemon.id}-${actor}`} className="subpanel sim-action-card">
+                              <SectionHeader title={unit.pokemon.displayName} subtitle={describeBuildRole(unit.build, pvpRoom.battle!.format)} compact />
+                              {battleTags.length || statusBadge ? (
+                                <div className="battle-tag-row action-tag-row">
+                                  {battleTags.map((tag) => (
+                                    <span key={tag.key} className={`battle-tag battle-tag-${tag.tone}`} title={tag.title}>
+                                      {tag.label}
+                                    </span>
+                                  ))}
+                                  {statusBadge ? (
+                                    <span className={`battle-tag battle-tag-${statusBadge.tone === 'sleep' ? 'warning' : 'neutral'}`} title={statusBadge.title}>
+                                      Status {statusBadge.label}
+                                    </span>
+                                  ) : null}
+                                </div>
+                              ) : null}
+                              <label className="field">
+                                <span>Action</span>
+                                <select value={effectiveDraftType} onChange={(event) => updatePvpChoiceDraft(actor, { type: event.target.value as ChoiceDraft['type'] })}>
+                                  <option value="move">Move</option>
+                                  {allowMegaOption ? <option value="mega">Mega Evolve</option> : null}
+                                  {canSwitch ? <option value="switch">Switch</option> : null}
+                                </select>
+                              </label>
+                              {effectiveDraftType !== 'switch' ? (
+                                <>
+                                  <label className="field">
+                                    <span>{effectiveDraftType === 'mega' ? 'Move After Mega' : 'Move'}</span>
+                                    <select value={selectedMoveId} onChange={(event) => updatePvpChoiceDraft(actor, { moveId: event.target.value })} disabled={!legalMoves.length}>
+                                      {legalMoves.map((move) => <option key={move.id} value={move.id}>{move.name}</option>)}
+                                    </select>
+                                  </label>
+                                  {targetMode === 'foe' ? (
+                                    <label className="field">
+                                      <span>Target</span>
+                                      <select value={draft.target} onChange={(event) => updatePvpChoiceDraft(actor, { target: Number(event.target.value) })}>
+                                        {pvpRoom.battle!.opponent.active.map((enemyIndex, targetIndex) => {
+                                          const enemy = pvpRoom.battle!.opponent.units[enemyIndex];
+                                          return <option key={`${enemy?.pokemon.id}-${targetIndex}`} value={targetIndex}>{enemy?.pokemon.displayName ?? `Target ${targetIndex + 1}`}</option>;
+                                        })}
+                                      </select>
+                                    </label>
+                                  ) : targetNote ? <div className="note-row compact-note">{targetNote}</div> : null}
+                                  {restrictionNotes.map((note) => (
+                                    <div key={note} className="note-row compact-note">
+                                      {note}
+                                    </div>
+                                  ))}
+                                </>
+                              ) : (
+                                <label className="field">
+                                  <span>Switch To</span>
+                                  <select value={draft.switchTarget} onChange={(event) => updatePvpChoiceDraft(actor, { switchTarget: Number(event.target.value) })}>
+                                    {switchTargets.map((benchIndex) => (
+                                      <option key={benchIndex} value={benchIndex}>{pvpRoom.battle!.player.units[benchIndex]?.pokemon.displayName}</option>
+                                    ))}
+                                  </select>
+                                </label>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                      <div className="team-actions">
+                        <button className="action-button primary" onClick={() => { void submitPvpTurn(false); }}>Lock Turn</button>
+                        <button className="action-button danger" onClick={() => { void handlePvpForfeit(); }}>Forfeit Match</button>
+                      </div>
+                      {pvpMessage ? <div className="note-row">{pvpMessage}</div> : null}
+                    </>
+                  ) : (
+                    <div className="team-actions">
+                      <button className="action-button primary" onClick={() => setPvpRoom(null)}>Close Room</button>
+                    </div>
+                  )}
+                </>
+              ) : null}
+            </div>
+          </section>
+        )}
+
         {activeTab === 'profile' && (
           <section className="page-grid">
             <div className="panel tall">
@@ -2750,6 +3817,39 @@ function App() {
                 <span>Player Notes</span>
                 <textarea rows={6} value={state.profile.playerNote} onChange={(event) => setState((current) => ({ ...current, profile: { ...current.profile, playerNote: event.target.value } }))} placeholder="Personal metagame reads, comfort picks, anti-meta angles..." />
               </label>
+              <ToggleField
+                label="Battle Music"
+                checked={state.profile.battleMusicEnabled}
+                onChange={(checked) => setState((current) => ({ ...current, profile: { ...current.profile, battleMusicEnabled: checked } }))}
+              />
+              <label className="field">
+                <span>Battle Music Track</span>
+                <select value={state.profile.preferredBattleTrackId} onChange={(event) => setState((current) => ({ ...current, profile: { ...current.profile, preferredBattleTrackId: event.target.value } }))}>
+                  {battleMusicTracks.map((track) => (
+                    <option key={track.id} value={track.id}>{track.generation} - {track.label}</option>
+                  ))}
+                </select>
+              </label>
+              <label className="field">
+                <span>Battle Music Volume</span>
+                <input
+                  type="range"
+                  min={0}
+                  max={40}
+                  value={state.profile.battleMusicVolume}
+                  onChange={(event) => setState((current) => ({ ...current, profile: { ...current.profile, battleMusicVolume: Number(event.target.value) } }))}
+                />
+                <small>{state.profile.battleMusicVolume}% background volume for AI and PvP battles.</small>
+              </label>
+              <ToggleField
+                label="Announcer Default"
+                checked={state.profile.announcerDefaultEnabled}
+                onChange={(checked) => setState((current) => ({ ...current, profile: { ...current.profile, announcerDefaultEnabled: checked } }))}
+              />
+              <div className="notes-list compact-scroll">
+                <div className="note-row">Online battle account: {onlineAccount ? `${onlineAccount.trainerName} registered` : 'Not signed in yet'}</div>
+                {onlineAccount ? <div className="note-row">Email on file: {onlineAccount.email || 'Not provided'}</div> : null}
+              </div>
               <div className="save-status-row">
                 <span>{saveStatusLabel}</span>
                 <button className="action-button primary" onClick={() => persistNow('Profile saved locally')}>Save Profile</button>
@@ -2771,7 +3871,7 @@ function App() {
                   <button key={record.id} className={selectedReplay?.id === record.id ? 'saved-team-card active growth-row' : 'saved-team-card growth-row'} onClick={() => setSelectedReplayId(record.id)}>
                     <div className="growth-row-copy">
                       <strong>{new Date(record.playedAt).toLocaleDateString()} - {record.result}</strong>
-                      <small>{record.teamName} | {record.format} | Star: {record.starPokemon ?? 'None logged'}</small>
+                      <small>{record.mode} | {record.teamName} | {record.format} | Star: {record.starPokemon ?? 'None logged'}</small>
                     </div>
                     <div className="growth-row-bar">
                       <div className="growth-row-track">
@@ -2781,7 +3881,7 @@ function App() {
                     </div>
                   </button>
                 )) : (
-                  <div className="note-row">No simulator matches logged yet. Run battles in the Simulator to build a growth chart and replay library.</div>
+                  <div className="note-row">No battle logs yet. Run AI Simulator or PvP battles to build a growth chart and replay library.</div>
                 )}
               </div>
             </div>
@@ -2792,6 +3892,7 @@ function App() {
                 <>
                   <div className="result-grid">
                     <InfoStat label="Result" value={selectedReplay.result} />
+                    <InfoStat label="Mode" value={selectedReplay.mode} />
                     <InfoStat label="Format" value={selectedReplay.format} />
                     <InfoStat label="Star" value={selectedReplay.starPokemon ?? 'None'} />
                     <InfoStat label="Timer" value={selectedReplay.timerEnabled ? '30s On' : 'Off'} />
@@ -2814,7 +3915,7 @@ function App() {
               ) : (
                 <div className="empty-state">
                   <strong>No replay selected yet.</strong>
-                  <span>Your next simulator battle will appear here with replay logs and turn-by-turn coaching notes.</span>
+                    <span>Your next battle will appear here with replay logs and turn-by-turn coaching notes.</span>
                 </div>
               )}
               <div className="notes-list">
