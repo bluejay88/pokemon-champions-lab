@@ -41,6 +41,16 @@ body,
   min-height: 100%;
 }
 
+html,
+body {
+  width: 100%;
+  overflow-x: clip;
+}
+
+#root {
+  min-width: 0;
+}
+
 button,
 input,
 select,
@@ -53,17 +63,19 @@ button {
 }
 
 .app-shell {
+  width: 100%;
   min-height: 100vh;
+  min-width: 0;
   display: grid;
   grid-template-columns: minmax(280px, clamp(288px, 20vw, 340px)) minmax(0, 1fr);
 }
 
-.app-shell.layout-auto {
-  --content-max: 1680px;
+.app-shell > * {
+  min-width: 0;
 }
 
-.app-shell.layout-stretch {
-  --content-max: none;
+.app-shell.layout-auto {
+  --content-max: 1760px;
 }
 
 .app-shell.layout-focus {
@@ -74,6 +86,7 @@ button {
   position: sticky;
   top: 0;
   height: 100vh;
+  min-width: 0;
   padding: 28px 22px;
   border-right: 1px solid var(--line);
   background:
@@ -83,6 +96,11 @@ button {
   flex-direction: column;
   gap: 18px;
   backdrop-filter: blur(22px);
+}
+
+.sidebar > * {
+  min-width: 0;
+  max-width: 100%;
 }
 
 .brand-panel,
@@ -175,6 +193,9 @@ button {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  min-width: 0;
+  width: 100%;
+  max-width: 100%;
 }
 
 .nav-item {
@@ -217,13 +238,20 @@ button {
 
 .main-shell {
   padding: clamp(16px, 2vw, 28px);
+  min-width: 0;
   overflow-x: hidden;
   overflow-y: auto;
 }
 
 .main-shell > * {
-  width: min(100%, var(--content-max, 1680px));
+  width: 100%;
+  min-width: 0;
+  max-width: var(--content-max, 1760px);
   margin-inline: auto;
+}
+
+.app-shell.layout-stretch .main-shell > * {
+  max-width: none;
 }
 
 .topbar {
@@ -232,6 +260,7 @@ button {
   gap: 16px;
   align-items: flex-start;
   margin-bottom: 24px;
+  min-width: 0;
 }
 
 .topbar h2 {
@@ -265,6 +294,7 @@ button {
   gap: 14px;
   justify-items: end;
   min-width: min(100%, 860px);
+  max-width: 100%;
 }
 
 .layout-toolbar {
@@ -274,6 +304,8 @@ button {
   gap: 12px;
   justify-content: flex-end;
   align-items: stretch;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .toolbar-field {
@@ -305,6 +337,7 @@ button {
   grid-template-columns: minmax(280px, 0.95fr) minmax(340px, 1.08fr) minmax(300px, 1fr);
   gap: 22px;
   align-items: start;
+  min-width: 0;
 }
 
 .page-grid-wide {
@@ -339,6 +372,7 @@ button {
   gap: 12px;
   align-items: flex-start;
   margin-bottom: 0;
+  min-width: 0;
 }
 
 .section-header.compact {
@@ -370,6 +404,7 @@ button {
   display: flex;
   flex-wrap: wrap;
   gap: 14px;
+  min-width: 0;
 }
 
 .action-button,
@@ -570,6 +605,7 @@ button {
   display: grid;
   gap: 8px;
   flex: 1 1 200px;
+  min-width: 0;
 }
 
 .field.grow {
@@ -1298,7 +1334,7 @@ button {
 
 @media (max-width: 1280px) {
   .app-shell {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .sidebar {
@@ -1310,7 +1346,7 @@ button {
 
   .page-grid,
   .page-grid-wide {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .span-two {
@@ -1319,7 +1355,7 @@ button {
 
   .sim-preview-grid,
   .sim-battle-grid {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .panel.tall,
@@ -1339,6 +1375,51 @@ button {
 }
 
 @media (max-width: 860px) {
+  .sidebar {
+    gap: 12px;
+    padding: 18px 16px;
+  }
+
+  .brand-panel {
+    padding: 18px;
+  }
+
+  .brand-panel h1 {
+    font-size: 1.42rem;
+  }
+
+  .profile-chip {
+    padding: 14px 16px;
+  }
+
+  .side-nav {
+    flex-direction: row;
+    gap: 12px;
+    width: 100%;
+    max-width: 100%;
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding-bottom: 4px;
+    scroll-snap-type: x proximity;
+  }
+
+  .side-nav::-webkit-scrollbar {
+    height: 6px;
+  }
+
+  .side-nav::-webkit-scrollbar-thumb {
+    background: rgba(94, 199, 255, 0.26);
+    border-radius: 999px;
+  }
+
+  .nav-item {
+    flex: 0 0 210px;
+    min-width: 210px;
+    max-width: calc(100vw - 48px);
+    padding: 12px;
+    scroll-snap-align: start;
+  }
+
   .main-shell {
     padding: 16px;
   }
@@ -1376,6 +1457,50 @@ button {
   .sidebar,
   .main-shell {
     padding: 14px;
+  }
+
+  .sidebar {
+    gap: 10px;
+  }
+
+  .brand-panel {
+    padding: 16px;
+  }
+
+  .brand-panel p {
+    font-size: 0.92rem;
+  }
+
+  .profile-chip {
+    padding: 12px 14px;
+    align-items: start;
+  }
+
+  .profile-chip .pill {
+    padding: 6px 10px;
+  }
+
+  .side-nav {
+    gap: 10px;
+  }
+
+  .nav-item {
+    flex: 0 0 148px;
+    min-width: 148px;
+    max-width: calc(100vw - 40px);
+    grid-template-columns: 40px 1fr;
+    gap: 10px;
+    padding: 12px;
+  }
+
+  .nav-item span {
+    width: 40px;
+    height: 40px;
+    border-radius: 14px;
+  }
+
+  .nav-item small {
+    display: none;
   }
 
   .brand-panel,
