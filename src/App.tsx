@@ -281,6 +281,14 @@ function natureBenefitLabel(natureId: string) {
   return labels.join(' | ');
 }
 
+function effortSpreadLabel(evs: PokemonBuild['evs']) {
+  const parts = statOrder
+    .map((stat) => (evs[stat] > 0 ? `${statLabels[stat]} ${evs[stat]}` : null))
+    .filter((entry): entry is string => Boolean(entry));
+
+  return parts.length ? parts.join(' / ') : 'No EV investment';
+}
+
 function buildTeamFromPlan(plan: GeneratedTeamPlan) {
   const team = createTeam(plan.name, plan.format);
   team.name = plan.name;
@@ -1075,23 +1083,29 @@ function App() {
 
         {activeTab === 'team-builder' && (
           <section className="page-grid page-grid-wide">
-            <div className="panel tall">
-              <SectionHeader title="Saved Teams" subtitle="Create, duplicate, rename, and rotate through up to ten squads." />
-              <div className="team-actions">
-                <button className="action-button primary" onClick={createNewTeam} disabled={state.teams.length >= 10}>New Team</button>
-                <button className="action-button" onClick={duplicateCurrentTeam} disabled={state.teams.length >= 10}>Duplicate</button>
-                <button className="action-button danger" onClick={deleteCurrentTeam}>Delete</button>
+            <div className="team-builder-sidebar-stack">
+              <div className="panel">
+                <SectionHeader title="Saved Teams" subtitle="Create, duplicate, rename, and rotate through up to ten squads." />
+                <div className="team-actions">
+                  <button className="action-button primary" onClick={createNewTeam} disabled={state.teams.length >= 10}>New Team</button>
+                  <button className="action-button" onClick={duplicateCurrentTeam} disabled={state.teams.length >= 10}>Duplicate</button>
+                  <button className="action-button danger" onClick={deleteCurrentTeam}>Delete</button>
+                </div>
+                <div className="saved-team-list scroll-stack">
+                  {state.teams.map((savedTeam) => (
+                    <button key={savedTeam.id} className={savedTeam.id === team.id ? 'saved-team-card active' : 'saved-team-card'} onClick={() => setState((current) => ({ ...current, activeTeamId: savedTeam.id }))}>
+                      <div>
+                        <strong>{savedTeam.name}</strong>
+                        <small>{savedTeam.format} - {savedTeam.slots.filter((slot) => slot.pokemonId).length}/6 filled</small>
+                      </div>
+                      <span>{new Date(savedTeam.updatedAt).toLocaleDateString()}</span>
+                    </button>
+                  ))}
+                </div>
               </div>
-              <div className="saved-team-list scroll-stack">
-                {state.teams.map((savedTeam) => (
-                  <button key={savedTeam.id} className={savedTeam.id === team.id ? 'saved-team-card active' : 'saved-team-card'} onClick={() => setState((current) => ({ ...current, activeTeamId: savedTeam.id }))}>
-                    <div>
-                      <strong>{savedTeam.name}</strong>
-                      <small>{savedTeam.format} - {savedTeam.slots.filter((slot) => slot.pokemonId).length}/6 filled</small>
-                    </div>
-                    <span>{new Date(savedTeam.updatedAt).toLocaleDateString()}</span>
-                  </button>
-                ))}
+
+              <div className="panel selected-slot-panel">
+                <SelectedSlotSpotlight build={selectedTeamSlot} format={team.format} slotIndex={selectedSlotIndex} />
               </div>
             </div>
 
@@ -1502,14 +1516,34 @@ function App() {
                       <div className="generated-team-row">
                         {selectedGeneratedPlan.slots.map((slot) => {
                           const pokemon = resolvePokemonForm(slot);
+                          const slotStats = pokemon ? buildStats(pokemon.baseStats, slot.evs, slot.natureId) : null;
                           return (
                             <div key={slot.id} className="generated-slot">
                               <PokemonSpriteFrame pokemon={pokemon} size="standard" />
                               <strong>{pokemon?.displayName ?? 'Open'}</strong>
                               <small>{describeBuildRole(slot, selectedGeneratedPlan.format)}</small>
                               <UsagePill insight={getPokemonUsageInsight(pokemon, selectedGeneratedPlan.format)} small />
-                              <span>{slot.moveIds.map((moveId) => pokemon?.movePool.find((move) => move.id === moveId)?.name).filter(Boolean).join(' / ')}</span>
-                              <span>{getItemById(slot.itemId)?.name ?? 'No item'} - {slot.abilityName ?? pokemon?.abilities[0]?.name ?? 'Ability'}</span>
+                              <div className="generated-slot-meta">
+                                <span>{getItemById(slot.itemId)?.name ?? 'No item'} - {slot.abilityName ?? pokemon?.abilities[0]?.name ?? 'Ability'}</span>
+                                <span>{natureBenefitLabel(slot.natureId)}</span>
+                                <span>EV Spread: {effortSpreadLabel(slot.evs)}</span>
+                              </div>
+                              {slotStats ? (
+                                <div className="generated-slot-stat-grid">
+                                  {statOrder.map((stat) => (
+                                    <div key={stat} className="slot-stat-pill compact">
+                                      <small>{statLabels[stat]}</small>
+                                      <strong>{slotStats[stat]}</strong>
+                                    </div>
+                                  ))}
+                                </div>
+                              ) : null}
+                              <div className="move-chip-row generated-move-chip-row">
+                                {slot.moveIds.map((moveId) => {
+                                  const move = pokemon?.movePool.find((entry) => entry.id === moveId);
+                                  return <span key={moveId} className="move-chip">{move?.name ?? 'Move'}</span>;
+                                })}
+                              </div>
                             </div>
                           );
                         })}
@@ -1984,6 +2018,82 @@ function PokemonSpriteFrame({
       ) : null}
       {syntheticMega ? <span className="mega-pill">Mega</span> : null}
     </div>
+  );
+}
+
+function SelectedSlotSpotlight({ build, format, slotIndex }: { build: PokemonBuild; format: BattleFormat; slotIndex: number }) {
+  const normalizedBuild = normalizeBuildForChampions(build);
+  const basePokemon = selectedPokemon(normalizedBuild);
+  const activePokemon = resolvePokemonForm(normalizedBuild);
+  const stats = activePokemon ? buildStats(activePokemon.baseStats, normalizedBuild.evs, normalizedBuild.natureId) : null;
+  const moves = activePokemon
+    ? normalizedBuild.moveIds.map((moveId) => activePokemon.movePool.find((move) => move.id === moveId)?.name).filter((name): name is string => Boolean(name))
+    : [];
+  const usage = getPokemonUsageInsight(activePokemon ?? basePokemon, format);
+
+  if (!activePokemon) {
+    return (
+      <>
+        <SectionHeader title="Selected Slot Preview" subtitle="This space now tracks the slot you are editing so the desktop column stays useful instead of empty." />
+        <div className="selected-slot-hero empty">
+          <PokemonSpriteFrame pokemon={null} size="pokedex" label={`${slotIndex + 1}`} />
+          <div className="selected-slot-meta">
+            <div className="validation-banner info">
+              <strong>{`Slot ${slotIndex + 1} is open`}</strong>
+              <small>Click a slot on the right, then pick a Pokemon from the live Champions roster to see its art, spread, item, and move plan here.</small>
+            </div>
+            <div className="notes-list">
+              <div className="note-row">Use the type filters in the Inspector to narrow the roster before selecting a Pokemon.</div>
+              <div className="note-row">Once you pick a species, this panel will show the larger sprite, EV spread, nature bonuses, and move package for that slot.</div>
+            </div>
+          </div>
+        </div>
+      </>
+    );
+  }
+
+  return (
+    <>
+      <SectionHeader title={`${activePokemon.displayName} Spotlight`} subtitle={`Selected slot ${slotIndex + 1} preview with the live spread, nature, and move package for ${format}.`} />
+      <div className="selected-slot-hero">
+        <PokemonSpriteFrame pokemon={activePokemon} size="pokedex" />
+        <div className="selected-slot-meta">
+          <div className="selected-slot-title-row">
+            <div>
+              <strong>{buildLabel(normalizedBuild, activePokemon)}</strong>
+              <small>{activePokemon.types.join(' / ')} - {describeBuildRole(normalizedBuild, format)}</small>
+            </div>
+            <UsagePill insight={usage} />
+          </div>
+
+          <div className="result-grid">
+            <InfoStat label="Item" value={getItemById(normalizedBuild.itemId)?.name ?? 'No item'} />
+            <InfoStat label="Ability" value={normalizedBuild.abilityName ?? activePokemon.abilities[0]?.name ?? 'Ability'} />
+            <InfoStat label="Nature" value={natureBenefitLabel(normalizedBuild.natureId)} />
+            <InfoStat label="Mega" value={describeMegaState(normalizedBuild, basePokemon)} />
+          </div>
+
+          <div className="note-row compact-note">EV Spread: {effortSpreadLabel(normalizedBuild.evs)}</div>
+
+          {stats ? (
+            <div className="selected-slot-stat-grid">
+              {statOrder.map((stat) => (
+                <div key={stat} className="slot-stat-pill compact">
+                  <small>{statLabels[stat]}</small>
+                  <strong>{stats[stat]}</strong>
+                </div>
+              ))}
+            </div>
+          ) : null}
+
+          <div className="move-chip-row generated-move-chip-row">
+            {moves.map((moveName) => (
+              <span key={moveName} className="move-chip">{moveName}</span>
+            ))}
+          </div>
+        </div>
+      </div>
+    </>
   );
 }
 

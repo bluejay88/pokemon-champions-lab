@@ -368,6 +368,14 @@ button {
   grid-template-columns: minmax(260px, 0.82fr) minmax(380px, 1.35fr) minmax(320px, 1.08fr);
 }
 
+.team-builder-sidebar-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+  align-self: stretch;
+  min-width: 0;
+}
+
 .panel {
   border-radius: var(--radius-xl);
   padding: 24px;
@@ -585,6 +593,15 @@ button {
   font-size: 1rem;
 }
 
+.slot-stat-pill.compact {
+  padding: 8px 9px;
+  gap: 2px;
+}
+
+.slot-stat-pill.compact strong {
+  font-size: 0.92rem;
+}
+
 .move-chip {
   padding: 8px 10px;
   border-radius: 999px;
@@ -668,6 +685,64 @@ button {
 .editor-stack {
   display: grid;
   gap: 14px;
+}
+
+.selected-slot-panel {
+  flex: 1 1 auto;
+  min-height: 320px;
+  justify-content: flex-start;
+}
+
+.selected-slot-hero {
+  display: grid;
+  gap: 18px;
+  justify-items: center;
+  text-align: center;
+}
+
+.selected-slot-hero.empty {
+  align-content: center;
+}
+
+.selected-slot-meta {
+  width: 100%;
+  display: grid;
+  gap: 16px;
+}
+
+.selected-slot-title-row {
+  display: grid;
+  gap: 10px;
+  justify-items: center;
+}
+
+.selected-slot-title-row strong {
+  font-size: 1.18rem;
+}
+
+.selected-slot-title-row small {
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.selected-slot-stat-grid,
+.generated-slot-stat-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.generated-slot-meta {
+  width: 100%;
+  display: grid;
+  gap: 6px;
+  font-size: 0.84rem;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.generated-move-chip-row {
+  width: 100%;
 }
 
 .editor-stack.condensed {
@@ -1233,12 +1308,13 @@ button {
 }
 
 .generated-slot {
-  min-height: 286px;
-  gap: 10px;
+  min-height: 386px;
+  gap: 12px;
+  align-items: flex-start;
 }
 
 .generated-slot .usage-pill {
-  margin-top: auto;
+  margin-top: 0;
 }
 
 .threat-card-block {
@@ -1515,6 +1591,10 @@ button {
     grid-template-columns: minmax(280px, 0.92fr) minmax(320px, 1.08fr);
   }
 
+  .team-builder-sidebar-stack {
+    align-self: auto;
+  }
+
   .page-grid-wide > .span-two {
     grid-column: span 2;
   }
@@ -1571,6 +1651,10 @@ button {
   .panels-resizable .panel {
     min-height: auto;
     max-height: none;
+  }
+
+  .selected-slot-panel {
+    min-height: auto;
   }
 
   .inspector-summary-panel {
