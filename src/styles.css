@@ -1582,6 +1582,8 @@ button {
 }
 
 .battlefield-showcase-row {
+  display: grid;
+  gap: 18px;
   margin-top: 18px;
 }
 
@@ -1592,19 +1594,30 @@ button {
 
 .battlefield-panel-expansive {
   width: 100%;
+  gap: 18px;
+  padding: 22px;
 }
 
 .battlefield-panel-expansive .battlefield-layout {
-  grid-template-columns: minmax(0, 1.72fr) minmax(280px, 0.58fr);
+  grid-template-columns: minmax(0, 1fr);
+  gap: 18px;
 }
 
 .battlefield-panel-expansive .battlefield-scroll-panel {
   max-height: none;
+  overflow-x: auto;
+  overflow-y: visible;
+  padding-right: 0;
+}
+
+.battlefield-panel-expansive .battlefield-stage-shell {
+  width: 100%;
 }
 
 .battlefield-panel-expansive .battlefield-stage {
-  min-height: 760px;
-  padding: 28px;
+  gap: 28px;
+  min-height: clamp(780px, 76vh, 1040px);
+  padding: clamp(28px, 2vw, 36px);
 }
 
 .battlefield-layout {
@@ -1693,6 +1706,11 @@ button {
   box-shadow: 0 14px 36px rgba(0, 0, 0, 0.24);
 }
 
+.battlefield-panel-expansive .battlefield-event {
+  width: min(100%, 880px);
+  padding: 16px 22px;
+}
+
 .battlefield-event span {
   font-size: 0.74rem;
   font-weight: 700;
@@ -1736,6 +1754,10 @@ button {
   gap: 14px;
 }
 
+.battlefield-panel-expansive .battlefield-side {
+  gap: 18px;
+}
+
 .battlefield-side-top {
   align-self: start;
 }
@@ -1765,12 +1787,24 @@ button {
   gap: 18px;
 }
 
+.battlefield-panel-expansive .battlefield-active-lanes {
+  gap: 22px;
+}
+
 .battlefield-active-lanes.lanes-1 {
   grid-template-columns: minmax(0, 1fr);
 }
 
+.battlefield-panel-expansive .battlefield-active-lanes.lanes-1 {
+  justify-content: center;
+}
+
 .battlefield-active-lanes.lanes-2 {
   grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.battlefield-panel-expansive .battlefield-active-lanes.lanes-2 {
+  grid-template-columns: repeat(2, minmax(280px, 1fr));
 }
 
 .battlefield-card {
@@ -1793,25 +1827,26 @@ button {
 }
 
 .battlefield-panel-expansive .battlefield-card {
-  min-height: 176px;
-  padding: 20px 22px;
+  min-height: 210px;
+  gap: 18px;
+  padding: 22px 24px;
 }
 
 .battlefield-panel-expansive .battlefield-card .sprite-shell.standard {
-  width: 168px;
-  height: 168px;
+  width: 196px;
+  height: 196px;
 }
 
 .battlefield-panel-expansive .battlefield-card-copy strong {
-  font-size: 1.18rem;
+  font-size: 1.3rem;
 }
 
 .battlefield-panel-expansive .battlefield-card-copy small {
-  font-size: 0.98rem;
+  font-size: 1.04rem;
 }
 
 .battlefield-panel-expansive .battlefield-hp-label {
-  font-size: 0.92rem;
+  font-size: 0.98rem;
 }
 
 .battlefield-card.is-actor {
@@ -1885,12 +1920,18 @@ button {
 }
 
 .battlefield-panel-expansive .battlefield-bench-card {
-  padding: 14px 16px;
+  min-height: 112px;
+  padding: 16px 18px;
 }
 
 .battlefield-panel-expansive .battlefield-bench-card .sprite-shell.tiny {
-  width: 74px;
-  height: 74px;
+  width: 86px;
+  height: 86px;
+}
+
+.battlefield-panel-expansive .battlefield-bench-strip {
+  grid-auto-columns: minmax(230px, 1fr);
+  gap: 14px;
 }
 
 .battlefield-side-rail {
@@ -1904,9 +1945,19 @@ button {
   background: rgba(5, 16, 28, 0.62);
 }
 
+.battlefield-panel-expansive .battlefield-side-rail {
+  order: 1;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  align-items: start;
+}
+
 .battlefield-rail-header {
   display: grid;
   gap: 6px;
+}
+
+.battlefield-panel-expansive .battlefield-rail-header {
+  grid-column: 1 / -1;
 }
 
 .battlefield-rail-header strong {
@@ -1932,6 +1983,13 @@ button {
   padding-right: 6px;
 }
 
+.battlefield-panel-expansive .battlefield-condition-stack {
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  max-height: none;
+  overflow: visible;
+  padding-right: 0;
+}
+
 .battlefield-condition-group,
 .battlefield-empty-rail {
   display: grid;
@@ -1940,6 +1998,10 @@ button {
   border-radius: 18px;
   border: 1px solid rgba(162, 201, 255, 0.12);
   background: rgba(255, 255, 255, 0.03);
+}
+
+.battlefield-panel-expansive .battlefield-empty-rail {
+  grid-column: 1 / -1;
 }
 
 .battlefield-condition-group strong,
@@ -2199,7 +2261,7 @@ button {
   }
 
   .battlefield-panel-expansive .battlefield-stage {
-    min-height: 700px;
+    min-height: 760px;
   }
 
   .battlefield-side-rail {
@@ -2243,8 +2305,17 @@ button {
   }
 
   .battlefield-panel-expansive .battlefield-stage {
-    min-height: 620px;
-    padding: 22px;
+    min-height: 700px;
+    padding: 24px;
+  }
+
+  .battlefield-panel-expansive .battlefield-card .sprite-shell.standard {
+    width: 176px;
+    height: 176px;
+  }
+
+  .battlefield-panel-expansive .battlefield-active-lanes.lanes-2 {
+    grid-template-columns: repeat(2, minmax(240px, 1fr));
   }
 
   .panel.tall,
@@ -2337,12 +2408,31 @@ button {
     margin-top: 14px;
   }
 
-  .battlefield-panel-expansive .battlefield-stage {
-    min-height: 560px;
-    padding: 18px;
+  .battlefield-panel-expansive .battlefield-scroll-panel {
+    overflow: auto;
   }
 
-  .battlefield-panel-expansive .battlefield-card .sprite-shell.standard,
+  .battlefield-panel-expansive .battlefield-stage-shell {
+    min-width: 700px;
+  }
+
+  .battlefield-panel-expansive .battlefield-stage {
+    min-height: 640px;
+    padding: 20px;
+  }
+
+  .battlefield-panel-expansive .battlefield-card,
+  .battlefield-panel-expansive .battlefield-bench-card {
+    grid-template-columns: auto minmax(0, 1fr);
+    justify-items: stretch;
+    text-align: left;
+  }
+
+  .battlefield-panel-expansive .battlefield-card .sprite-shell.standard {
+    width: 154px;
+    height: 154px;
+  }
+
   .battlefield-card .sprite-shell.standard {
     width: 124px;
     height: 124px;
@@ -2351,6 +2441,11 @@ button {
   .battlefield-card-copy,
   .battlefield-bench-card > div {
     justify-items: center;
+  }
+
+  .battlefield-panel-expansive .battlefield-card-copy,
+  .battlefield-panel-expansive .battlefield-bench-card > div {
+    justify-items: start;
   }
 
   .battlefield-bench-strip {
@@ -2404,7 +2499,15 @@ button {
     padding: 16px;
   }
 
-  .battlefield-panel-expansive .battlefield-card .sprite-shell.standard,
+  .battlefield-panel-expansive .battlefield-stage-shell {
+    min-width: 620px;
+  }
+
+  .battlefield-panel-expansive .battlefield-card .sprite-shell.standard {
+    width: 136px;
+    height: 136px;
+  }
+
   .battlefield-card .sprite-shell.standard {
     width: 104px;
     height: 104px;
