@@ -155,7 +155,7 @@ const { calculateDamage } = damage;
 const { generateTeamPlans } = ai;
 const { buildMoveParitySummary, moveParityForMove } = moveParity;
 const { createRoomState, forfeitRoomState, joinRoomState, submitBringOrderState, submitTurnChoicesState, touchRoomState } = online;
-const { advancePreviewToBattle, createSimulatorBattle, legalMovesForUnit, randomChoicesForSide, resolveTurn, resolveTurnWithChoices } = simulator;
+const { advancePreviewToBattle, applyReplacementChoices, buildAutoReplacementChoices, createSimulatorBattle, legalMovesForUnit, randomChoicesForSide, resolveTurn, resolveTurnWithChoices } = simulator;
 
 const statKeys = ['hp', 'attack', 'defense', 'specialAttack', 'specialDefense', 'speed'];
 const failures = [];
@@ -638,6 +638,7 @@ stickyWebBattle = withMockRandom([0.2, 0.2, 0.2, 0.2], () => resolveTurn(stickyW
   { type: 'move', actor: 0, moveId: stickyWebChoiceId, target: 0 },
   { type: 'move', actor: 1, moveId: slowEarthquakeChoiceId, target: 0 },
 ]));
+stickyWebBattle = applyReplacementChoices(stickyWebBattle, [], buildAutoReplacementChoices(stickyWebBattle, 'opponent'));
 assert.equal(stickyWebBattle.opponent.units[2].revealed, true, 'A replacement switch-in should reveal the incoming Pokemon.');
 assert.equal(stickyWebBattle.opponent.units[2].build.speedStage, -1, 'Sticky Web should lower the Speed of grounded switch-ins.');
 
@@ -658,6 +659,7 @@ toxicSpikesBattle = withMockRandom([0.2, 0.2, 0.2, 0.2], () => resolveTurn(toxic
   { type: 'move', actor: 0, moveId: toxicSpikesChoiceId, target: 0 },
   { type: 'move', actor: 1, moveId: slowEarthquakeChoiceId, target: 0 },
 ]));
+toxicSpikesBattle = applyReplacementChoices(toxicSpikesBattle, [], buildAutoReplacementChoices(toxicSpikesBattle, 'opponent'));
 assert.equal(toxicSpikesBattle.opponent.units[2].build.status, 'poison', 'Toxic Spikes should poison grounded switch-ins when one layer is active.');
 
 let freezeBattle = buildBattle(
@@ -848,6 +850,7 @@ let revealBattle = buildBattle(
 assert.equal(revealBattle.opponent.units[1].revealed, false, 'Opponent bench Pokemon should stay hidden before they are switched in.');
 revealBattle.opponent.units[0].currentHp = 1;
 revealBattle = withMockRandom([0.1, 0.1, 0.1], () => resolveTurn(revealBattle, [{ type: 'move', actor: 0, moveId: earthquakeChoiceId, target: 0 }]));
+revealBattle = applyReplacementChoices(revealBattle, [], buildAutoReplacementChoices(revealBattle, 'opponent'));
 assert.equal(revealBattle.opponent.units[1].revealed, true, 'Opponent bench Pokemon should become revealed after they first switch into battle.');
 
 let hyperBeamBattle = buildBattle(
@@ -1082,6 +1085,7 @@ healingWishBattle = withMockRandom([0.1, 0.1, 0.1], () =>
     [{ type: 'move', actor: 0, moveId: protectUser.movePool.find((move) => move.name === 'Protect')?.id ?? 'protect', target: 0 }],
   ));
 assert.ok(healingWishBattle.player.units[0].fainted, 'Healing Wish should faint the user.');
+healingWishBattle = applyReplacementChoices(healingWishBattle, [{ type: 'switch', actor: 0, target: 1 }], []);
 assert.equal(healingWishBattle.player.units[1].currentHp, healingWishBattle.player.units[1].maxHp, 'Healing Wish should fully restore the replacement Pokemon.');
 assert.equal(healingWishBattle.player.units[1].build.status, 'healthy', 'Healing Wish should cure the replacement Pokemon status.');
 
@@ -1274,7 +1278,9 @@ replacementBattle = withMockRandom([0.1, 0.1, 0.1, 0.1], () =>
     [{ type: 'move', actor: 0, moveId: slowEarthquakeChoiceId, target: 0 }],
     [{ type: 'move', actor: 0, moveId: specialTargetBAttackId, target: 0 }],
   ));
-assert.equal(replacementBattle.player.active[0], 1, 'When the lead is knocked out, the first bench Pokemon should replace it immediately.');
+assert.equal(replacementBattle.player.active[0], -1, 'When the lead is knocked out, the slot should stay empty until the next turn replacement phase.');
+replacementBattle = applyReplacementChoices(replacementBattle, [{ type: 'switch', actor: 0, target: 1 }], []);
+assert.equal(replacementBattle.player.active[0], 1, 'The chosen replacement should enter at the top of the next turn.');
 assert.equal(replacementBattle.player.units.filter((unit) => !unit.fainted).length, 3, 'The battle should still preserve the remaining three player Pokemon after the first knockout.');
 
 let redirectBattle = buildBattle(

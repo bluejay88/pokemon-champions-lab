@@ -1581,9 +1581,30 @@ button {
   align-content: start;
 }
 
+.battlefield-showcase-row {
+  margin-top: 18px;
+}
+
 .battlefield-panel {
   gap: 16px;
   overflow: hidden;
+}
+
+.battlefield-panel-expansive {
+  width: 100%;
+}
+
+.battlefield-panel-expansive .battlefield-layout {
+  grid-template-columns: minmax(0, 1.72fr) minmax(280px, 0.58fr);
+}
+
+.battlefield-panel-expansive .battlefield-scroll-panel {
+  max-height: none;
+}
+
+.battlefield-panel-expansive .battlefield-stage {
+  min-height: 760px;
+  padding: 28px;
 }
 
 .battlefield-layout {
@@ -1705,6 +1726,11 @@ button {
   background: rgba(14, 11, 28, 0.8);
 }
 
+.battlefield-event-ability {
+  border-color: rgba(115, 229, 182, 0.3);
+  background: rgba(8, 24, 18, 0.82);
+}
+
 .battlefield-side {
   display: grid;
   gap: 14px;
@@ -1759,6 +1785,33 @@ button {
   background: rgba(3, 11, 24, 0.68);
   backdrop-filter: blur(10px);
   transition: transform 180ms ease, box-shadow 180ms ease, border-color 180ms ease;
+}
+
+.battlefield-card .sprite-shell.standard {
+  width: 132px;
+  height: 132px;
+}
+
+.battlefield-panel-expansive .battlefield-card {
+  min-height: 176px;
+  padding: 20px 22px;
+}
+
+.battlefield-panel-expansive .battlefield-card .sprite-shell.standard {
+  width: 168px;
+  height: 168px;
+}
+
+.battlefield-panel-expansive .battlefield-card-copy strong {
+  font-size: 1.18rem;
+}
+
+.battlefield-panel-expansive .battlefield-card-copy small {
+  font-size: 0.98rem;
+}
+
+.battlefield-panel-expansive .battlefield-hp-label {
+  font-size: 0.92rem;
 }
 
 .battlefield-card.is-actor {
@@ -1829,6 +1882,15 @@ button {
 .battlefield-bench-card strong {
   color: #eef8ff;
   font-size: 0.92rem;
+}
+
+.battlefield-panel-expansive .battlefield-bench-card {
+  padding: 14px 16px;
+}
+
+.battlefield-panel-expansive .battlefield-bench-card .sprite-shell.tiny {
+  width: 74px;
+  height: 74px;
 }
 
 .battlefield-side-rail {
@@ -2132,6 +2194,14 @@ button {
     grid-template-columns: minmax(0, 1fr);
   }
 
+  .battlefield-panel-expansive .battlefield-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .battlefield-panel-expansive .battlefield-stage {
+    min-height: 700px;
+  }
+
   .battlefield-side-rail {
     order: -1;
   }
@@ -2170,6 +2240,11 @@ button {
 
   .battlefield-stage {
     min-height: 540px;
+  }
+
+  .battlefield-panel-expansive .battlefield-stage {
+    min-height: 620px;
+    padding: 22px;
   }
 
   .panel.tall,
@@ -2258,6 +2333,21 @@ button {
     text-align: center;
   }
 
+  .battlefield-showcase-row {
+    margin-top: 14px;
+  }
+
+  .battlefield-panel-expansive .battlefield-stage {
+    min-height: 560px;
+    padding: 18px;
+  }
+
+  .battlefield-panel-expansive .battlefield-card .sprite-shell.standard,
+  .battlefield-card .sprite-shell.standard {
+    width: 124px;
+    height: 124px;
+  }
+
   .battlefield-card-copy,
   .battlefield-bench-card > div {
     justify-items: center;
@@ -2306,6 +2396,18 @@ button {
 
   .profile-chip .pill {
     padding: 6px 10px;
+  }
+
+  .battlefield-panel-expansive .battlefield-stage,
+  .battlefield-stage {
+    min-height: 500px;
+    padding: 16px;
+  }
+
+  .battlefield-panel-expansive .battlefield-card .sprite-shell.standard,
+  .battlefield-card .sprite-shell.standard {
+    width: 104px;
+    height: 104px;
   }
 
   .side-nav {

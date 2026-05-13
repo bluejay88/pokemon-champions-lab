@@ -57,7 +57,7 @@ import {
 import { clearState, listStoredProfiles, loadState, saveState } from './lib/storage';
 import { buildMoveParitySummary, moveParityForMove } from './lib/moveParity';
 import { buildAbilityParitySummary } from './lib/abilityParity';
-import { advancePreviewToBattle, createSimulatorBattle, legalMovesForUnit, resolveTurn } from './lib/simulator';
+import { advancePreviewToBattle, applyReplacementChoices, battleHasPendingReplacements, buildAutoReplacementChoices, createSimulatorBattle, legalMovesForUnit, pendingReplacementActors, resolveTurn } from './lib/simulator';
 import { getMoveUsageInsight, getPokemonUsageInsight, getPopularPresetPatch, getPopularPresetSummary } from './lib/usage';
 import type {
   BattleFormat,
@@ -116,7 +116,7 @@ type BattlefieldBackdrop = {
 };
 type BattlefieldPlaybackEvent = {
   id: string;
-  tone: 'impact' | 'guard' | 'switch' | 'ko' | 'status' | 'field';
+  tone: 'impact' | 'guard' | 'switch' | 'ko' | 'status' | 'field' | 'ability';
   message: string;
   actorName?: string | null;
   targetName?: string | null;
@@ -1338,29 +1338,83 @@ function speechFriendlyText(line: string) {
   return announcerSpeechReplacements.reduce((nextLine, [pattern, replacement]) => nextLine.replace(pattern, replacement), line);
 }
 
+let announcerSpeechQueue: { line: string; rate: number }[] = [];
+let announcerSpeechActive = false;
+
+function humanizeAnnouncerLine(line: string) {
+  const trimmed = line.trim();
+  if (!trimmed) {
+    return '';
+  }
+
+  const punctuated = /[.!?]$/.test(trimmed) ? trimmed : `${trimmed}.`;
+  return punctuated
+    .replace(/:\s+/g, ', ')
+    .replace(/\s+\|\s+/g, '. ')
+    .replace(/\s{2,}/g, ' ');
+}
+
+function flushAnnouncerQueue() {
+  if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
+    announcerSpeechQueue = [];
+    announcerSpeechActive = false;
+    return;
+  }
+
+  if (announcerSpeechActive || !announcerSpeechQueue.length) {
+    return;
+  }
+
+  const synth = window.speechSynthesis;
+  const nextUtterance = announcerSpeechQueue.shift();
+  if (!nextUtterance?.line) {
+    announcerSpeechActive = false;
+    return;
+  }
+
+  announcerSpeechActive = true;
+  const voice = pickPreferredMaleVoice();
+  const utterance = new SpeechSynthesisUtterance(speechFriendlyText(nextUtterance.line));
+  utterance.rate = nextUtterance.rate;
+  utterance.pitch = 0.94;
+  utterance.volume = 1;
+  if (voice) {
+    utterance.voice = voice;
+  }
+  utterance.onend = () => {
+    announcerSpeechActive = false;
+    if (typeof window !== 'undefined') {
+      window.setTimeout(() => flushAnnouncerQueue(), 140);
+    }
+  };
+  utterance.onerror = () => {
+    announcerSpeechActive = false;
+    if (typeof window !== 'undefined') {
+      window.setTimeout(() => flushAnnouncerQueue(), 140);
+    }
+  };
+  synth.speak(utterance);
+}
+
 function speakAnnouncerLines(lines: string[], rate: number, interrupt = false) {
   if (typeof window === 'undefined' || !('speechSynthesis' in window) || !lines.length) {
     return;
   }
 
   const synth = window.speechSynthesis;
-  if (synth.speaking && !interrupt) {
-    return;
-  }
   if (interrupt) {
     synth.cancel();
+    announcerSpeechQueue = [];
+    announcerSpeechActive = false;
   }
-  const voice = pickPreferredMaleVoice();
-  for (const line of lines.slice(0, 2)) {
-    const utterance = new SpeechSynthesisUtterance(speechFriendlyText(line));
-    utterance.rate = rate;
-    utterance.pitch = 0.96;
-    utterance.volume = 1;
-    if (voice) {
-      utterance.voice = voice;
-    }
-    synth.speak(utterance);
-  }
+  announcerSpeechQueue.push(
+    ...lines
+      .slice(0, 2)
+      .map((line) => humanizeAnnouncerLine(line))
+      .filter(Boolean)
+      .map((line) => ({ line, rate })),
+  );
+  flushAnnouncerQueue();
 }
 
 function battleTrackLabel(trackId: string) {
@@ -1414,6 +1468,17 @@ function parseBattlefieldPlaybackEvent(entries: string[], battle: SimulatorBattl
   const fallbackName = (entry: string) => knownNames.find((name) => entry.includes(name)) ?? null;
 
   for (const entry of entries) {
+    const abilityMatch = entry.match(/^(.+?) (?:set .+ with|boosted .+ with|lowered .+ with|stood firm against .+ with|ignored .+ because of) (.+?)\.$/);
+    if (abilityMatch) {
+      return {
+        id: makeId('battlefield-event'),
+        tone: 'ability',
+        message: entry,
+        actorName: fallbackName(entry),
+        moveName: abilityMatch[2],
+      };
+    }
+
     const koMatch = entry.match(/^(.+?) was knocked out by (.+?) using (.+?)\.$/);
     if (koMatch) {
       return {
@@ -1927,6 +1992,7 @@ function announcerLinesFromBattleUpdate(previous: SimulatorBattleState | null, c
     const statusMatch = entry.match(/^(.+?) was afflicted by (.+?) \((.+?)\)\.$/);
     const koMatch = entry.match(/^(.+?) was knocked out by (.+?) using (.+?)\.$/);
     const legacyKoMatch = entry.match(/^(.+?) was knocked out\.$/);
+    const abilityCueMatch = entry.match(/^(.+?) (?:set .+ with|boosted .+ with|lowered .+ with|stood firm against .+ with|ignored .+ because of) (.+?)\.$/);
     const turnMatch = entry.match(/^Turn (\d+) ended\./);
 
     if (hitMatch) {
@@ -1943,10 +2009,14 @@ function announcerLinesFromBattleUpdate(previous: SimulatorBattleState | null, c
       line = fillAnnouncerLine(pickLine(announcerScripts.ko), { target: koMatch[1], attacker: koMatch[2], move: koMatch[3], pokemon: koMatch[2] });
     } else if (legacyKoMatch) {
       line = fillAnnouncerLine(pickLine(announcerScripts.ko), { target: legacyKoMatch[1], attacker: 'the attacker', move: 'the finishing move', pokemon: 'the attacker' });
+    } else if (abilityCueMatch) {
+      line = `${abilityCueMatch[1]} just triggered ${abilityCueMatch[2]}, and the board is shifting around it.`;
     } else if (switchMatch) {
       line = fillAnnouncerLine(pickLine(announcerScripts.switch), { pokemon: switchMatch[1] });
     } else if (/blocked .+ with|braced itself with|set Quick Guard|set Wide Guard/i.test(entry)) {
       line = fillAnnouncerLine(pickLine(announcerScripts.protect), { pokemon: entry.split(' ')[0] });
+    } else if (/replacement send-outs are complete/i.test(entry)) {
+      line = 'Fresh replacements are on the field now, and the next exchange is about to begin.';
     } else if (turnMatch) {
       line = fillAnnouncerLine(pickLine(announcerScripts.turn), { turn: Number(turnMatch[1]) + 1 });
     } else if (/Mega Evolved|set .* terrain|changed the weather|called in snow|twisted the dimensions|returned the dimensions to normal/i.test(entry)) {
@@ -2011,6 +2081,7 @@ function App() {
   const [simPreview, setSimPreview] = useState<SimulatorPreviewState | null>(null);
   const [simBringOrder, setSimBringOrder] = useState<number[]>([]);
   const [simBattle, setSimBattle] = useState<SimulatorBattleState | null>(null);
+  const [simBattlefieldSeed, setSimBattlefieldSeed] = useState<string>(() => `sim-idle-${activeTeamFromState(initialState).format}`);
   const [simChoiceDrafts, setSimChoiceDrafts] = useState<Record<number, ChoiceDraft>>({});
   const [simTurnTimerEnabled, setSimTurnTimerEnabled] = useState(false);
   const [simTurnClock, setSimTurnClock] = useState(30);
@@ -2092,6 +2163,9 @@ function App() {
     null;
   const aiBattleMusicActive = activeTab === 'simulator' && Boolean(simPreview || simBattle);
   const pvpBattleMusicActive = activeTab === 'pvp-battles' && Boolean(pvpRoom && (pvpRoom.stage === 'preview' || pvpRoom.stage === 'battle'));
+  const simDecisionPhaseKey = simBattle
+    ? `${simBattle.turn}-${simBattle.player.active.join(',')}-${simBattle.opponent.active.join(',')}-${simBattle.player.bench.join(',')}-${simBattle.opponent.bench.join(',')}`
+    : 'sim-idle';
   const activeBattleMusicTrackId = activeTab === 'pvp-battles'
     ? pvpRoom?.musicTrackId ?? primaryBattleMusicTrackId(state.profile.preferredBattleTrackId, state.profile.battleMusicPlaylistIds)
     : primaryBattleMusicTrackId(state.profile.preferredBattleTrackId, state.profile.battleMusicPlaylistIds);
@@ -2121,19 +2195,10 @@ function App() {
       entry.trainerName.toLowerCase().includes(query),
     );
   }, [pvpHistorySearch, pvpRoomHistory]);
-  const simBackdrop = useMemo(
-    () => battlefieldBackdropForSeed(
-      simBattle
-        ? `sim-battle-${simBattle.turn}-${simBattle.player.name}-${simBattle.opponent.name}-${simBattle.format}`
-        : simPreview
-          ? `sim-preview-${simPreview.previewEndsAt}-${simPreview.opponentTeam.id}-${simPreview.format}`
-          : `sim-idle-${simFormat}`,
-    ),
-    [simBattle, simPreview, simFormat],
-  );
+  const simBackdrop = useMemo(() => battlefieldBackdropForSeed(simBattlefieldSeed), [simBattlefieldSeed]);
   const pvpBackdrop = useMemo(
-    () => battlefieldBackdropForSeed(`pvp-${pvpRoom?.code ?? 'idle'}-${pvpRoom?.stage ?? 'idle'}-${pvpRoom?.battle?.turn ?? 0}`),
-    [pvpRoom?.code, pvpRoom?.stage, pvpRoom?.battle?.turn],
+    () => battlefieldBackdropForSeed(`pvp-${pvpRoom?.code ?? 'idle'}`),
+    [pvpRoom?.code],
   );
   const simPreviewPlayerOrder = useMemo(
     () => (simBringOrder.length ? simBringOrder : filledSlotIndices(team).slice(0, 4)),
@@ -2208,6 +2273,22 @@ function App() {
     ] : [],
     [pvpRoom, pvpCountdown, pvpBringOrder.length],
   );
+  const simPendingReplacementActors = useMemo(
+    () => simBattle ? pendingReplacementActors(simBattle.player) : [],
+    [simBattle],
+  );
+  const pvpPendingReplacementActors = useMemo(
+    () => pvpRoom?.battle ? pendingReplacementActors(pvpRoom.battle.player) : [],
+    [pvpRoom?.battle],
+  );
+  const simBattleNeedsReplacementPhase = useMemo(
+    () => Boolean(simBattle && battleHasPendingReplacements(simBattle)),
+    [simBattle],
+  );
+  const pvpBattleNeedsReplacementPhase = useMemo(
+    () => Boolean(pvpRoom?.battle && battleHasPendingReplacements(pvpRoom.battle)),
+    [pvpRoom?.battle],
+  );
 
   const selectedResult = attackerMoveResults.find(({ move }) => move.id === selectedDamageMoveId)?.result ?? null;
 
@@ -2240,6 +2321,12 @@ function App() {
       setSelectedDamageMoveId(attackerMoves[0].id);
     }
   }, [attackerMoves, selectedDamageMoveId]);
+
+  useEffect(() => {
+    if (!simPreview && !simBattle) {
+      setSimBattlefieldSeed(`sim-idle-${simFormat}`);
+    }
+  }, [simBattle, simFormat, simPreview]);
 
   useEffect(() => {
     if (!simPreview) {
@@ -2355,6 +2442,22 @@ function App() {
 
     previousBattleRef.current = simBattle;
   }, [simBattle, simAnnouncerEnabled, simAnnouncerStyle, simTurnTimerEnabled, team.name]);
+
+  useEffect(() => {
+    if (!simBattle || simBattle.stage !== 'battle' || simBattle.winner) {
+      return;
+    }
+
+    const playerPending = pendingReplacementActors(simBattle.player);
+    const opponentPending = pendingReplacementActors(simBattle.opponent);
+    if (playerPending.length || !opponentPending.length) {
+      return;
+    }
+
+    const nextBattle = applyReplacementChoices(simBattle, [], buildAutoReplacementChoices(simBattle, 'opponent'));
+    setSimBattle(nextBattle);
+    setSimTurnNotice('Arena AI sent out its replacement at the top of the turn. Pick your next action when ready.');
+  }, [simBattle]);
 
   useEffect(() => {
     if (!pvpRoom || !onlineAccount) {
@@ -2517,7 +2620,7 @@ function App() {
       window.clearInterval(intervalHandle);
       window.clearTimeout(timeoutHandle);
     };
-  }, [simBattle?.turn, simBattle?.stage, simBattle?.winner, simTurnTimerEnabled]);
+  }, [simDecisionPhaseKey, simBattle?.stage, simBattle?.winner, simTurnTimerEnabled]);
 
   useEffect(() => {
     if (!simBattle || simBattle.stage !== 'battle' || simBattle.winner || !simAnnouncerEnabled || !simTurnTimerEnabled) {
@@ -2681,9 +2784,64 @@ function App() {
     };
   }
 
+  function buildReplacementChoices(
+    battle: SimulatorBattleState,
+    drafts: Record<number, ChoiceDraft>,
+    timedOut = false,
+  ) {
+    const requiredActors = pendingReplacementActors(battle.player);
+    const availableBench = battle.player.bench.filter((unitIndex) => unitIndex >= 0 && !battle.player.units[unitIndex]?.fainted);
+    const claimedTargets = new Set<number>();
+    const notices: string[] = [];
+    const choices: SimulatorChoice[] = [];
+
+    for (const actor of requiredActors) {
+      const draft = drafts[actor];
+      const preferredTarget = draft?.type === 'switch' ? draft.switchTarget : null;
+      const replacementTarget =
+        typeof preferredTarget === 'number' && availableBench.includes(preferredTarget) && !claimedTargets.has(preferredTarget)
+          ? preferredTarget
+          : availableBench.find((unitIndex) => !claimedTargets.has(unitIndex)) ?? null;
+      if (replacementTarget === null) {
+        continue;
+      }
+
+      claimedTargets.add(replacementTarget);
+      choices.push({
+        type: 'switch',
+        actor,
+        target: replacementTarget,
+      } satisfies SimulatorChoice);
+
+      if (timedOut && preferredTarget !== replacementTarget) {
+        const replacement = battle.player.units[replacementTarget];
+        notices.push(`Your replacement for lane ${actor + 1} was auto-selected as ${replacement?.pokemon.displayName ?? 'a legal bench option'} due to no selection made.`);
+      }
+    }
+
+    return {
+      choices,
+      notices,
+    };
+  }
+
   function resolveSimulatorTurn(timedOut = false) {
     const currentBattle = simBattleRef.current;
     if (!currentBattle || currentBattle.stage !== 'battle') {
+      return;
+    }
+
+    if (battleHasPendingReplacements(currentBattle)) {
+      const { choices, notices } = buildReplacementChoices(currentBattle, simChoiceDraftsRef.current, timedOut);
+      const nextBattle = applyReplacementChoices(currentBattle, choices, buildAutoReplacementChoices(currentBattle, 'opponent'));
+      setSimBattle(nextBattle);
+      setSimChoiceDrafts({});
+      setSimChoicesLocked(false);
+      setSimTurnNotice(
+        notices.length
+          ? notices.join(' ')
+          : 'Replacement choices are locked. The next turn will begin once the new Pokemon hit the field.',
+      );
       return;
     }
 
@@ -2924,6 +3082,7 @@ function App() {
     }
 
     const opponentTeam = randomOpponentTeam(simFormat, state.profile.offMetaBias);
+    setSimBattlefieldSeed(`sim-preview-${Date.now()}-${opponentTeam.id}-${simFormat}`);
     setSimPreview({
       format: simFormat,
       opponentTeam,
@@ -3030,6 +3189,16 @@ function App() {
   }
 
   function submitSimTurn() {
+    if (simBattle && simBattleNeedsReplacementPhase) {
+      if (simTurnTimerEnabled && simBattle.stage === 'battle' && !simBattle.winner) {
+        setSimChoicesLocked(true);
+        setSimTurnNotice('Replacement picks are locked in. The battle will resume when the turn clock expires and the new Pokemon enter at the top of the turn.');
+        return;
+      }
+      resolveSimulatorTurn(false);
+      return;
+    }
+
     if (simTurnTimerEnabled && simBattle?.stage === 'battle' && !simBattle.winner) {
       setSimChoicesLocked(true);
       setSimTurnNotice('Choices locked in. The announcer will keep the countdown going until the move clock expires, then the turn will resolve.');
@@ -3163,7 +3332,9 @@ function App() {
     }
 
     try {
-      const { choices, notices } = buildSimulatorChoices(pvpRoom.battle, pvpChoiceDrafts, timedOut);
+      const { choices, notices } = battleHasPendingReplacements(pvpRoom.battle)
+        ? buildReplacementChoices(pvpRoom.battle, pvpChoiceDrafts, timedOut)
+        : buildSimulatorChoices(pvpRoom.battle, pvpChoiceDrafts, timedOut);
       const room = await submitOnlineChoices({
         account: onlineAccount,
         code: pvpRoom.code,
@@ -4042,18 +4213,21 @@ function App() {
                     <button className="action-button" onClick={() => setSimPreview(null)}>Cancel Preview</button>
                   </div>
 
-                  <BattlefieldArena
-                    title="Preview Battle Camera"
-                    subtitle="This live stage reserves space for the opening board, the scrolling battle log, and the action feed once the match starts."
-                    backdrop={simBackdrop}
-                    topLabel="Opponent Preview"
-                    bottomLabel="Your Locked Order"
-                    topSlots={previewBattlefieldSlots(simPreview.opponentTeam, simPreview.format, simPreviewOpponentOrder, 'Species shown, full set still hidden.')}
-                    bottomSlots={previewBattlefieldSlots(team, simPreview.format, simPreviewPlayerOrder, 'Projected lead lane from your current bring order.')}
-                    topBench={previewBattlefieldBench(simPreview.opponentTeam, simPreview.format, simPreviewOpponentOrder, 'Preview species still hidden in battle order.')}
-                    bottomBench={previewBattlefieldBench(team, simPreview.format, simPreviewPlayerOrder, 'Backline order from your current lock.')}
-                    conditionSections={simPreviewFieldSections}
-                  />
+                  <div className="battlefield-showcase-row">
+                    <BattlefieldArena
+                      title="Preview Battle Camera"
+                      subtitle="This larger battle stage now sits in its own dedicated section so you can read the map, sprite spacing, and projected opening lanes more clearly before the match starts."
+                      backdrop={simBackdrop}
+                      topLabel="Opponent Preview"
+                      bottomLabel="Your Locked Order"
+                      topSlots={previewBattlefieldSlots(simPreview.opponentTeam, simPreview.format, simPreviewOpponentOrder, 'Species shown, full set still hidden.')}
+                      bottomSlots={previewBattlefieldSlots(team, simPreview.format, simPreviewPlayerOrder, 'Projected lead lane from your current bring order.')}
+                      topBench={previewBattlefieldBench(simPreview.opponentTeam, simPreview.format, simPreviewOpponentOrder, 'Preview species still hidden in battle order.')}
+                      bottomBench={previewBattlefieldBench(team, simPreview.format, simPreviewPlayerOrder, 'Backline order from your current lock.')}
+                      conditionSections={simPreviewFieldSections}
+                      expansive
+                    />
+                  </div>
                 </>
               ) : simBattle ? (
                 <>
@@ -4070,19 +4244,6 @@ function App() {
                         <InfoStat label="AI Tailwind" value={simBattle.opponent.tailwindTurns ? `${simBattle.opponent.tailwindTurns}` : 'Off'} />
                         <InfoStat label="Move Clock" value={simTurnTimerEnabled && !simBattle.winner ? `${simTurnClock}s` : 'Off'} />
                       </div>
-                      <BattlefieldArena
-                        title="Live Battle Stage"
-                        subtitle="The battlefield camera now tracks the active board with health bars, status badges, hidden backlines, and a dedicated conditions rail."
-                        backdrop={simBackdrop}
-                        topLabel={simBattle.opponent.name}
-                        bottomLabel={simBattle.player.name}
-                        topSlots={battlefieldActiveSlotsFromSide(simBattle.opponent, simBattle.format)}
-                        bottomSlots={battlefieldActiveSlotsFromSide(simBattle.player, simBattle.format, true)}
-                        topBench={battlefieldBenchSlotsFromSide(simBattle.opponent)}
-                        bottomBench={battlefieldBenchSlotsFromSide(simBattle.player, true)}
-                        event={simBattlefieldEvent}
-                        conditionSections={simFieldSections}
-                      />
                       <div className="subpanel sim-field-panel">
                         <SectionHeader title="Board State" subtitle="Live field, screen, and hazard conditions pulled from the simulator state." compact />
                         <div className="sim-field-stack">
@@ -4136,134 +4297,181 @@ function App() {
                     <BattleSideView side={simBattle.player} format={simBattle.format} friendly />
                   </div>
 
+                  <div className="battlefield-showcase-row">
+                    <BattlefieldArena
+                      title="Live Battle Stage"
+                      subtitle="This dedicated lower stage stays locked to one battle map for the full match, with larger sprite lanes, clearer HP reads, and room for hit, KO, and ability cues to breathe."
+                      backdrop={simBackdrop}
+                      topLabel={simBattle.opponent.name}
+                      bottomLabel={simBattle.player.name}
+                      topSlots={battlefieldActiveSlotsFromSide(simBattle.opponent, simBattle.format)}
+                      bottomSlots={battlefieldActiveSlotsFromSide(simBattle.player, simBattle.format, true)}
+                      topBench={battlefieldBenchSlotsFromSide(simBattle.opponent)}
+                      bottomBench={battlefieldBenchSlotsFromSide(simBattle.player, true)}
+                      event={simBattlefieldEvent}
+                      conditionSections={simFieldSections}
+                      expansive
+                    />
+                  </div>
+
                   {!simBattle.winner ? (
                     <>
-                      <div className="sim-action-grid">
-                        {simBattle.player.active.map((unitIndex, actor) => {
-                          const unit = simBattle.player.units[unitIndex];
-                          if (!unit || unit.fainted) {
-                            return null;
-                          }
-
-                          const legalMoves = legalMovesForUnit(unit);
-                          const switchTargets = simBattle.player.bench.filter((benchIndex) => !simBattle.player.units[benchIndex]?.fainted);
-                          const draft = simChoiceDrafts[actor] ?? {
-                            type: 'move' as const,
-                            moveId: legalMoves[0]?.id ?? unit.build.moveIds[0] ?? '',
-                            target: 0,
-                            switchTarget: switchTargets[0] ?? 0,
-                          };
-                          const canMegaEvolve = Boolean(unit.megaPokemon && !unit.megaEvolved && !simBattle.player.megaUsed);
-                          const otherMegaReserved = Object.entries(simChoiceDrafts).some(([draftActor, entry]) => Number(draftActor) !== actor && entry.type === 'mega');
-                          const allowMegaOption = canMegaEvolve && (!otherMegaReserved || draft.type === 'mega');
-                          const canSwitch = switchTargets.length > 0 && !unit.trappedByMove && unit.bindingTurns <= 0;
-                          const statusBadge = simulatorStatusBadge(unit);
-                          const battleTags = simulatorBattleTags(unit);
-                          const effectiveDraftType = draft.type === 'switch' && !canSwitch ? 'move' : draft.type;
-                          const selectedMoveId = legalMoves.some((move) => move.id === draft.moveId) ? draft.moveId : legalMoves[0]?.id ?? '';
-                          const selectedMove = legalMoves.find((move) => move.id === selectedMoveId) ?? legalMoves[0] ?? null;
-                          const allyUnit =
-                            simBattle.player.active
-                              .map((activeIndex) => simBattle.player.units[activeIndex])
-                              .find((candidate) => candidate && candidate !== unit && !candidate.fainted) ?? null;
-                          const liveEnemyTargets = livingTargetSlots(simBattle.opponent);
-                          const selectedTarget = liveEnemyTargets.some((entry) => entry.targetIndex === draft.target)
-                            ? draft.target
-                            : (liveEnemyTargets[0]?.targetIndex ?? 0);
-                          const targetMode = simulatorTargetMode(selectedMove, simBattle.format);
-                          const targetNote = simulatorTargetNote(selectedMove, simBattle.format, allyUnit?.pokemon.displayName ?? null);
-                          const restrictionNotes = simulatorRestrictionNotes(unit);
-
-                          return (
-                            <div key={`${unit.pokemon.id}-${actor}`} className="subpanel sim-action-card">
-                              <SectionHeader title={unit.pokemon.displayName} subtitle={describeBuildRole(unit.build, simBattle.format)} compact />
-                              {battleTags.length || statusBadge ? (
-                                <div className="battle-tag-row action-tag-row">
-                                  {battleTags.map((tag) => (
-                                    <span key={tag.key} className={`battle-tag battle-tag-${tag.tone}`} title={tag.title}>
-                                      {tag.label}
-                                    </span>
-                                  ))}
-                                  {statusBadge ? (
-                                    <span
-                                      className={`battle-tag battle-tag-${statusBadge.tone === 'sleep' ? 'warning' : 'neutral'}`}
-                                      title={statusBadge.title}
-                                    >
-                                      Status {statusBadge.label}
-                                    </span>
-                                  ) : null}
-                                </div>
-                              ) : null}
-                              <label className="field">
-                                <span>Action</span>
-                                <select value={effectiveDraftType} onChange={(event) => updateChoiceDraft(actor, { type: event.target.value as ChoiceDraft['type'] })} disabled={unit.rechargeTurns > 0 || unit.chargingTurns > 0}>
-                                  <option value="move">Move</option>
-                                  {allowMegaOption ? <option value="mega">Mega Evolve</option> : null}
-                                  {canSwitch ? <option value="switch">Switch</option> : null}
-                                </select>
-                              </label>
-                              {effectiveDraftType !== 'switch' ? (
-                                <>
-                                  <label className="field">
-                                    <span>{effectiveDraftType === 'mega' ? 'Move After Mega' : 'Move'}</span>
-                                    <select value={selectedMoveId} onChange={(event) => updateChoiceDraft(actor, { moveId: event.target.value })} disabled={!legalMoves.length}>
-                                      {legalMoves.map((move) => {
-                                        return <option key={move.id} value={move.id}>{move.name}</option>;
-                                      })}
-                                    </select>
-                                  </label>
-                                  {targetMode === 'foe' ? (
-                                    <label className="field">
-                                      <span>Target</span>
-                                      <select value={selectedTarget} onChange={(event) => updateChoiceDraft(actor, { target: Number(event.target.value) })}>
-                                        {liveEnemyTargets.map(({ unit: enemy, targetIndex }) => (
-                                          <option key={`${enemy.pokemon.id}-${targetIndex}`} value={targetIndex}>{enemy.pokemon.displayName}</option>
-                                        ))}
-                                      </select>
-                                    </label>
-                                  ) : targetNote ? (
-                                    <div className="note-row compact-note">
-                                      {targetNote}
-                                    </div>
-                                  ) : null}
-                                  {restrictionNotes.map((note) => (
-                                    <div key={note} className="note-row compact-note">
-                                      {note}
-                                    </div>
-                                  ))}
-                                  {!legalMoves.length ? (
-                                    <div className="note-row compact-note">
-                                      {unit.rechargeTurns > 0
-                                        ? 'This slot is spending the turn recharging, so it cannot pick a move or switch.'
-                                        : unit.chargingTurns > 0
-                                          ? 'This slot is already charging a two-turn move and will fire that stored move automatically on its next action.'
-                                          : 'No legal move is currently available under the active locks. If the turn timer expires here, the sandbox will fall back to the correct forced line automatically.'}
-                                    </div>
-                                  ) : null}
-                                  {effectiveDraftType === 'mega' && unit.megaPokemon ? (
-                                    <div className="note-row compact-note">
-                                      {unit.basePokemon.displayName} will Mega Evolve into {unit.megaPokemon.displayName} before acting this turn.
-                                    </div>
-                                  ) : null}
-                                </>
-                              ) : (
+                      {simPendingReplacementActors.length ? (
+                        <div className="sim-action-grid replacement-phase-grid">
+                          {simPendingReplacementActors.map((actor) => {
+                            const availableBench = simBattle.player.bench.filter((benchIndex) => !simBattle.player.units[benchIndex]?.fainted);
+                            const draft = simChoiceDrafts[actor] ?? {
+                              type: 'switch' as const,
+                              moveId: '',
+                              target: 0,
+                              switchTarget: availableBench[0] ?? 0,
+                            };
+                            return (
+                              <div key={`replacement-${actor}`} className="subpanel sim-action-card">
+                                <SectionHeader title={`Replacement Lane ${actor + 1}`} subtitle="This slot was knocked out last turn. Pick the Pokemon that should enter at the top of the next turn." compact />
+                                <div className="note-row compact-note">The KOed slot stays empty for the rest of the resolved turn. Your replacement will not enter until the new turn begins.</div>
                                 <label className="field">
-                                  <span>Switch To</span>
-                                  <select value={draft.switchTarget} onChange={(event) => updateChoiceDraft(actor, { switchTarget: Number(event.target.value) })}>
-                                    {switchTargets.map((benchIndex) => (
+                                  <span>Send In</span>
+                                  <select value={draft.switchTarget} onChange={(event) => updateChoiceDraft(actor, { type: 'switch', switchTarget: Number(event.target.value) })}>
+                                    {availableBench.map((benchIndex) => (
                                       <option key={benchIndex} value={benchIndex}>{simBattle.player.units[benchIndex]?.pokemon.displayName}</option>
                                     ))}
                                   </select>
                                 </label>
-                              )}
-                              {unit.megaEvolved ? <div className="note-row compact-note">Mega active. The Mega ability now applies on the field and on re-entry.</div> : null}
-                            </div>
-                          );
-                        })}
-                      </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      ) : (
+                        <div className="sim-action-grid">
+                          {simBattle.player.active.map((unitIndex, actor) => {
+                            const unit = simBattle.player.units[unitIndex];
+                            if (!unit || unit.fainted) {
+                              return null;
+                            }
+
+                            const legalMoves = legalMovesForUnit(unit);
+                            const switchTargets = simBattle.player.bench.filter((benchIndex) => !simBattle.player.units[benchIndex]?.fainted);
+                            const draft = simChoiceDrafts[actor] ?? {
+                              type: 'move' as const,
+                              moveId: legalMoves[0]?.id ?? unit.build.moveIds[0] ?? '',
+                              target: 0,
+                              switchTarget: switchTargets[0] ?? 0,
+                            };
+                            const canMegaEvolve = Boolean(unit.megaPokemon && !unit.megaEvolved && !simBattle.player.megaUsed);
+                            const otherMegaReserved = Object.entries(simChoiceDrafts).some(([draftActor, entry]) => Number(draftActor) !== actor && entry.type === 'mega');
+                            const allowMegaOption = canMegaEvolve && (!otherMegaReserved || draft.type === 'mega');
+                            const canSwitch = switchTargets.length > 0 && !unit.trappedByMove && unit.bindingTurns <= 0;
+                            const statusBadge = simulatorStatusBadge(unit);
+                            const battleTags = simulatorBattleTags(unit);
+                            const effectiveDraftType = draft.type === 'switch' && !canSwitch ? 'move' : draft.type;
+                            const selectedMoveId = legalMoves.some((move) => move.id === draft.moveId) ? draft.moveId : legalMoves[0]?.id ?? '';
+                            const selectedMove = legalMoves.find((move) => move.id === selectedMoveId) ?? legalMoves[0] ?? null;
+                            const allyUnit =
+                              simBattle.player.active
+                                .map((activeIndex) => simBattle.player.units[activeIndex])
+                                .find((candidate) => candidate && candidate !== unit && !candidate.fainted) ?? null;
+                            const liveEnemyTargets = livingTargetSlots(simBattle.opponent);
+                            const selectedTarget = liveEnemyTargets.some((entry) => entry.targetIndex === draft.target)
+                              ? draft.target
+                              : (liveEnemyTargets[0]?.targetIndex ?? 0);
+                            const targetMode = simulatorTargetMode(selectedMove, simBattle.format);
+                            const targetNote = simulatorTargetNote(selectedMove, simBattle.format, allyUnit?.pokemon.displayName ?? null);
+                            const restrictionNotes = simulatorRestrictionNotes(unit);
+
+                            return (
+                              <div key={`${unit.pokemon.id}-${actor}`} className="subpanel sim-action-card">
+                                <SectionHeader title={unit.pokemon.displayName} subtitle={describeBuildRole(unit.build, simBattle.format)} compact />
+                                {battleTags.length || statusBadge ? (
+                                  <div className="battle-tag-row action-tag-row">
+                                    {battleTags.map((tag) => (
+                                      <span key={tag.key} className={`battle-tag battle-tag-${tag.tone}`} title={tag.title}>
+                                        {tag.label}
+                                      </span>
+                                    ))}
+                                    {statusBadge ? (
+                                      <span
+                                        className={`battle-tag battle-tag-${statusBadge.tone === 'sleep' ? 'warning' : 'neutral'}`}
+                                        title={statusBadge.title}
+                                      >
+                                        Status {statusBadge.label}
+                                      </span>
+                                    ) : null}
+                                  </div>
+                                ) : null}
+                                <label className="field">
+                                  <span>Action</span>
+                                  <select value={effectiveDraftType} onChange={(event) => updateChoiceDraft(actor, { type: event.target.value as ChoiceDraft['type'] })} disabled={unit.rechargeTurns > 0 || unit.chargingTurns > 0}>
+                                    <option value="move">Move</option>
+                                    {allowMegaOption ? <option value="mega">Mega Evolve</option> : null}
+                                    {canSwitch ? <option value="switch">Switch</option> : null}
+                                  </select>
+                                </label>
+                                {effectiveDraftType !== 'switch' ? (
+                                  <>
+                                    <label className="field">
+                                      <span>{effectiveDraftType === 'mega' ? 'Move After Mega' : 'Move'}</span>
+                                      <select value={selectedMoveId} onChange={(event) => updateChoiceDraft(actor, { moveId: event.target.value })} disabled={!legalMoves.length}>
+                                        {legalMoves.map((move) => {
+                                          return <option key={move.id} value={move.id}>{move.name}</option>;
+                                        })}
+                                      </select>
+                                    </label>
+                                    {targetMode === 'foe' ? (
+                                      <label className="field">
+                                        <span>Target</span>
+                                        <select value={selectedTarget} onChange={(event) => updateChoiceDraft(actor, { target: Number(event.target.value) })}>
+                                          {liveEnemyTargets.map(({ unit: enemy, targetIndex }) => (
+                                            <option key={`${enemy.pokemon.id}-${targetIndex}`} value={targetIndex}>{enemy.pokemon.displayName}</option>
+                                          ))}
+                                        </select>
+                                      </label>
+                                    ) : targetNote ? (
+                                      <div className="note-row compact-note">
+                                        {targetNote}
+                                      </div>
+                                    ) : null}
+                                    {restrictionNotes.map((note) => (
+                                      <div key={note} className="note-row compact-note">
+                                        {note}
+                                      </div>
+                                    ))}
+                                    {!legalMoves.length ? (
+                                      <div className="note-row compact-note">
+                                        {unit.rechargeTurns > 0
+                                          ? 'This slot is spending the turn recharging, so it cannot pick a move or switch.'
+                                          : unit.chargingTurns > 0
+                                            ? 'This slot is already charging a two-turn move and will fire that stored move automatically on its next action.'
+                                            : 'No legal move is currently available under the active locks. If the turn timer expires here, the sandbox will fall back to the correct forced line automatically.'}
+                                      </div>
+                                    ) : null}
+                                    {effectiveDraftType === 'mega' && unit.megaPokemon ? (
+                                      <div className="note-row compact-note">
+                                        {unit.basePokemon.displayName} will Mega Evolve into {unit.megaPokemon.displayName} before acting this turn.
+                                      </div>
+                                    ) : null}
+                                  </>
+                                ) : (
+                                  <label className="field">
+                                    <span>Switch To</span>
+                                    <select value={draft.switchTarget} onChange={(event) => updateChoiceDraft(actor, { switchTarget: Number(event.target.value) })}>
+                                      {switchTargets.map((benchIndex) => (
+                                        <option key={benchIndex} value={benchIndex}>{simBattle.player.units[benchIndex]?.pokemon.displayName}</option>
+                                      ))}
+                                    </select>
+                                  </label>
+                                )}
+                                {unit.megaEvolved ? <div className="note-row compact-note">Mega active. The Mega ability now applies on the field and on re-entry.</div> : null}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
                       <div className="team-actions">
                         <button className="action-button primary" onClick={submitSimTurn} disabled={simTurnTimerEnabled && simChoicesLocked}>
-                          {simTurnTimerEnabled ? (simChoicesLocked ? 'Choices Locked' : 'Lock Turn') : 'Resolve Turn'}
+                          {simBattleNeedsReplacementPhase
+                            ? (simTurnTimerEnabled ? (simChoicesLocked ? 'Replacements Locked' : 'Lock Replacements') : 'Send Replacements')
+                            : (simTurnTimerEnabled ? (simChoicesLocked ? 'Choices Locked' : 'Lock Turn') : 'Resolve Turn')}
                         </button>
                         <button className="action-button" onClick={() => { setSimBattle(null); setSimChoiceDrafts({}); setSimChoicesLocked(false); }}>End Simulation</button>
                       </div>
@@ -4421,18 +4629,21 @@ function App() {
                     <button className="action-button primary" onClick={() => { void submitPvpBringOrderSelection(); }}>Submit Bring Order</button>
                     <button className="action-button" onClick={() => setPvpBringOrder([])}>Clear Picks</button>
                   </div>
-                  <BattlefieldArena
-                    title="PvP Preview Camera"
-                    subtitle="This lower battle window stays reserved for the live stage, the reveal flow, and the text log once the room opens the battle."
-                    backdrop={pvpBackdrop}
-                    topLabel="Opponent Preview"
-                    bottomLabel="Your Locked Order"
-                    topSlots={previewBattlefieldSlots(pvpRoom.opponentTeam ?? createTeam('Empty'), pvpRoom.format, pvpPreviewOpponentOrder, 'Preview species only, battle order unrevealed.')}
-                    bottomSlots={previewBattlefieldSlots(team, pvpRoom.format, pvpPreviewPlayerOrder, 'Projected lead lane from your current bring order.')}
-                    topBench={previewBattlefieldBench(pvpRoom.opponentTeam ?? createTeam('Empty'), pvpRoom.format, pvpPreviewOpponentOrder, 'Preview species only until live reveal.')}
-                    bottomBench={previewBattlefieldBench(team, pvpRoom.format, pvpPreviewPlayerOrder, 'Backline order from your current lock.')}
-                    conditionSections={pvpPreviewFieldSections}
-                  />
+                  <div className="battlefield-showcase-row">
+                    <BattlefieldArena
+                      title="PvP Preview Camera"
+                      subtitle="The room preview now keeps a larger dedicated battlefield section reserved below the preview lists so the lead lanes and reveal rules are easier to read."
+                      backdrop={pvpBackdrop}
+                      topLabel="Opponent Preview"
+                      bottomLabel="Your Locked Order"
+                      topSlots={previewBattlefieldSlots(pvpRoom.opponentTeam ?? createTeam('Empty'), pvpRoom.format, pvpPreviewOpponentOrder, 'Preview species only, battle order unrevealed.')}
+                      bottomSlots={previewBattlefieldSlots(team, pvpRoom.format, pvpPreviewPlayerOrder, 'Projected lead lane from your current bring order.')}
+                      topBench={previewBattlefieldBench(pvpRoom.opponentTeam ?? createTeam('Empty'), pvpRoom.format, pvpPreviewOpponentOrder, 'Preview species only until live reveal.')}
+                      bottomBench={previewBattlefieldBench(team, pvpRoom.format, pvpPreviewPlayerOrder, 'Backline order from your current lock.')}
+                      conditionSections={pvpPreviewFieldSections}
+                      expansive
+                    />
+                  </div>
                 </>
               ) : pvpRoom.battle ? (
                 <>
@@ -4446,19 +4657,6 @@ function App() {
                   <div className="battle-layout">
                     <BattleSideView side={pvpRoom.battle.opponent} format={pvpRoom.battle.format} />
                     <div className="battle-center">
-                      <BattlefieldArena
-                        title="Live PvP Stage"
-                        subtitle="Both battlers share this broadcast view with hidden opponent backline slots, live status readouts, and the real room conditions rail."
-                        backdrop={pvpBackdrop}
-                        topLabel={pvpRoom.battle.opponent.name}
-                        bottomLabel={pvpRoom.battle.player.name}
-                        topSlots={battlefieldActiveSlotsFromSide(pvpRoom.battle.opponent, pvpRoom.battle.format)}
-                        bottomSlots={battlefieldActiveSlotsFromSide(pvpRoom.battle.player, pvpRoom.battle.format, true)}
-                        topBench={battlefieldBenchSlotsFromSide(pvpRoom.battle.opponent)}
-                        bottomBench={battlefieldBenchSlotsFromSide(pvpRoom.battle.player, true)}
-                        event={pvpBattlefieldEvent}
-                        conditionSections={pvpFieldSections}
-                      />
                       <div className="subpanel sim-field-panel">
                         <SectionHeader title="Active Effects" subtitle="Weather, terrain, rooms, screens, hazards, and live turn counters." compact />
                         <div className="sim-field-stack">
@@ -4508,118 +4706,165 @@ function App() {
                     <BattleSideView side={pvpRoom.battle.player} format={pvpRoom.battle.format} friendly />
                   </div>
 
+                  <div className="battlefield-showcase-row">
+                    <BattlefieldArena
+                      title="Live PvP Stage"
+                      subtitle="This full-width broadcast field stays locked to one map for the whole room, with larger active lanes, clearer backline reveal space, and more readable battle flow."
+                      backdrop={pvpBackdrop}
+                      topLabel={pvpRoom.battle.opponent.name}
+                      bottomLabel={pvpRoom.battle.player.name}
+                      topSlots={battlefieldActiveSlotsFromSide(pvpRoom.battle.opponent, pvpRoom.battle.format)}
+                      bottomSlots={battlefieldActiveSlotsFromSide(pvpRoom.battle.player, pvpRoom.battle.format, true)}
+                      topBench={battlefieldBenchSlotsFromSide(pvpRoom.battle.opponent)}
+                      bottomBench={battlefieldBenchSlotsFromSide(pvpRoom.battle.player, true)}
+                      event={pvpBattlefieldEvent}
+                      conditionSections={pvpFieldSections}
+                      expansive
+                    />
+                  </div>
+
                   {!pvpRoom.battle.winner ? (
                     <>
-                      <div className="sim-action-grid">
-                        {pvpRoom.battle!.player.active.map((unitIndex, actor) => {
-                          const unit = pvpRoom.battle!.player.units[unitIndex];
-                          if (!unit || unit.fainted) {
-                            return null;
-                          }
-
-                          const legalMoves = legalMovesForUnit(unit);
-                          const switchTargets = pvpRoom.battle!.player.bench.filter((benchIndex) => !pvpRoom.battle!.player.units[benchIndex]?.fainted);
-                          const draft = pvpChoiceDrafts[actor] ?? {
-                            type: 'move' as const,
-                            moveId: legalMoves[0]?.id ?? unit.build.moveIds[0] ?? '',
-                            target: 0,
-                            switchTarget: switchTargets[0] ?? 0,
-                          };
-                          const canMegaEvolve = Boolean(unit.megaPokemon && !unit.megaEvolved && !pvpRoom.battle!.player.megaUsed);
-                          const otherMegaReserved = Object.entries(pvpChoiceDrafts).some(([draftActor, entry]) => Number(draftActor) !== actor && entry.type === 'mega');
-                          const allowMegaOption = canMegaEvolve && (!otherMegaReserved || draft.type === 'mega');
-                          const canSwitch = switchTargets.length > 0 && !unit.trappedByMove && unit.bindingTurns <= 0;
-                          const statusBadge = simulatorStatusBadge(unit);
-                          const battleTags = simulatorBattleTags(unit);
-                          const effectiveDraftType = draft.type === 'switch' && !canSwitch ? 'move' : draft.type;
-                          const selectedMoveId = legalMoves.some((move) => move.id === draft.moveId) ? draft.moveId : legalMoves[0]?.id ?? '';
-                          const selectedMove = legalMoves.find((move) => move.id === selectedMoveId) ?? legalMoves[0] ?? null;
-                          const allyUnit =
-                            pvpRoom.battle!.player.active
-                              .map((activeIndex) => pvpRoom.battle!.player.units[activeIndex])
-                              .find((candidate) => candidate && candidate !== unit && !candidate.fainted) ?? null;
-                          const liveEnemyTargets = livingTargetSlots(pvpRoom.battle!.opponent);
-                          const selectedTarget = liveEnemyTargets.some((entry) => entry.targetIndex === draft.target)
-                            ? draft.target
-                            : (liveEnemyTargets[0]?.targetIndex ?? 0);
-                          const targetMode = simulatorTargetMode(selectedMove, pvpRoom.battle!.format);
-                          const targetNote = simulatorTargetNote(selectedMove, pvpRoom.battle!.format, allyUnit?.pokemon.displayName ?? null);
-                          const restrictionNotes = simulatorRestrictionNotes(unit);
-
-                          return (
-                            <div key={`${unit.pokemon.id}-${actor}`} className="subpanel sim-action-card">
-                              <SectionHeader title={unit.pokemon.displayName} subtitle={describeBuildRole(unit.build, pvpRoom.battle!.format)} compact />
-                              {battleTags.length || statusBadge ? (
-                                <div className="battle-tag-row action-tag-row">
-                                  {battleTags.map((tag) => (
-                                    <span key={tag.key} className={`battle-tag battle-tag-${tag.tone}`} title={tag.title}>
-                                      {tag.label}
-                                    </span>
-                                  ))}
-                                  {statusBadge ? (
-                                    <span className={`battle-tag battle-tag-${statusBadge.tone === 'sleep' ? 'warning' : 'neutral'}`} title={statusBadge.title}>
-                                      Status {statusBadge.label}
-                                    </span>
-                                  ) : null}
-                                </div>
-                              ) : null}
-                              <label className="field">
-                                <span>Action</span>
-                                <select value={effectiveDraftType} onChange={(event) => updatePvpChoiceDraft(actor, { type: event.target.value as ChoiceDraft['type'] })} disabled={unit.rechargeTurns > 0 || unit.chargingTurns > 0}>
-                                  <option value="move">Move</option>
-                                  {allowMegaOption ? <option value="mega">Mega Evolve</option> : null}
-                                  {canSwitch ? <option value="switch">Switch</option> : null}
-                                </select>
-                              </label>
-                              {effectiveDraftType !== 'switch' ? (
-                                <>
-                                  <label className="field">
-                                    <span>{effectiveDraftType === 'mega' ? 'Move After Mega' : 'Move'}</span>
-                                    <select value={selectedMoveId} onChange={(event) => updatePvpChoiceDraft(actor, { moveId: event.target.value })} disabled={!legalMoves.length}>
-                                      {legalMoves.map((move) => <option key={move.id} value={move.id}>{move.name}</option>)}
-                                    </select>
-                                  </label>
-                                  {targetMode === 'foe' ? (
-                                    <label className="field">
-                                      <span>Target</span>
-                                      <select value={selectedTarget} onChange={(event) => updatePvpChoiceDraft(actor, { target: Number(event.target.value) })}>
-                                        {liveEnemyTargets.map(({ unit: enemy, targetIndex }) => (
-                                          <option key={`${enemy.pokemon.id}-${targetIndex}`} value={targetIndex}>{enemy.pokemon.displayName}</option>
-                                        ))}
-                                      </select>
-                                    </label>
-                                  ) : targetNote ? <div className="note-row compact-note">{targetNote}</div> : null}
-                                  {restrictionNotes.map((note) => (
-                                    <div key={note} className="note-row compact-note">
-                                      {note}
-                                    </div>
-                                  ))}
-                                  {!legalMoves.length ? (
-                                    <div className="note-row compact-note">
-                                      {unit.rechargeTurns > 0
-                                        ? 'This slot is spending the turn recharging, so it cannot pick a move or switch.'
-                                        : unit.chargingTurns > 0
-                                          ? 'This slot is already charging a two-turn move and will fire that stored move automatically on its next action.'
-                                          : 'No legal move is currently available under the active locks. If the PvP timer expires here, the correct forced line will be submitted automatically.'}
-                                    </div>
-                                  ) : null}
-                                </>
-                              ) : (
+                      {pvpPendingReplacementActors.length ? (
+                        <div className="sim-action-grid replacement-phase-grid">
+                          {pvpPendingReplacementActors.map((actor) => {
+                            const availableBench = pvpRoom.battle!.player.bench.filter((benchIndex) => !pvpRoom.battle!.player.units[benchIndex]?.fainted);
+                            const draft = pvpChoiceDrafts[actor] ?? {
+                              type: 'switch' as const,
+                              moveId: '',
+                              target: 0,
+                              switchTarget: availableBench[0] ?? 0,
+                            };
+                            return (
+                              <div key={`pvp-replacement-${actor}`} className="subpanel sim-action-card">
+                                <SectionHeader title={`Replacement Lane ${actor + 1}`} subtitle="This slot was knocked out during the last turn. Pick who enters at the top of the next turn." compact />
+                                <div className="note-row compact-note">Your opponent will not see the full backline details here. The send-out resolves when the replacement clock expires or both battlers lock in.</div>
                                 <label className="field">
-                                  <span>Switch To</span>
-                                  <select value={draft.switchTarget} onChange={(event) => updatePvpChoiceDraft(actor, { switchTarget: Number(event.target.value) })}>
-                                    {switchTargets.map((benchIndex) => (
+                                  <span>Send In</span>
+                                  <select value={draft.switchTarget} onChange={(event) => updatePvpChoiceDraft(actor, { type: 'switch', switchTarget: Number(event.target.value) })}>
+                                    {availableBench.map((benchIndex) => (
                                       <option key={benchIndex} value={benchIndex}>{pvpRoom.battle!.player.units[benchIndex]?.pokemon.displayName}</option>
                                     ))}
                                   </select>
                                 </label>
-                              )}
-                            </div>
-                          );
-                        })}
-                      </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      ) : (
+                        <div className="sim-action-grid">
+                          {pvpRoom.battle!.player.active.map((unitIndex, actor) => {
+                            const unit = pvpRoom.battle!.player.units[unitIndex];
+                            if (!unit || unit.fainted) {
+                              return null;
+                            }
+
+                            const legalMoves = legalMovesForUnit(unit);
+                            const switchTargets = pvpRoom.battle!.player.bench.filter((benchIndex) => !pvpRoom.battle!.player.units[benchIndex]?.fainted);
+                            const draft = pvpChoiceDrafts[actor] ?? {
+                              type: 'move' as const,
+                              moveId: legalMoves[0]?.id ?? unit.build.moveIds[0] ?? '',
+                              target: 0,
+                              switchTarget: switchTargets[0] ?? 0,
+                            };
+                            const canMegaEvolve = Boolean(unit.megaPokemon && !unit.megaEvolved && !pvpRoom.battle!.player.megaUsed);
+                            const otherMegaReserved = Object.entries(pvpChoiceDrafts).some(([draftActor, entry]) => Number(draftActor) !== actor && entry.type === 'mega');
+                            const allowMegaOption = canMegaEvolve && (!otherMegaReserved || draft.type === 'mega');
+                            const canSwitch = switchTargets.length > 0 && !unit.trappedByMove && unit.bindingTurns <= 0;
+                            const statusBadge = simulatorStatusBadge(unit);
+                            const battleTags = simulatorBattleTags(unit);
+                            const effectiveDraftType = draft.type === 'switch' && !canSwitch ? 'move' : draft.type;
+                            const selectedMoveId = legalMoves.some((move) => move.id === draft.moveId) ? draft.moveId : legalMoves[0]?.id ?? '';
+                            const selectedMove = legalMoves.find((move) => move.id === selectedMoveId) ?? legalMoves[0] ?? null;
+                            const allyUnit =
+                              pvpRoom.battle!.player.active
+                                .map((activeIndex) => pvpRoom.battle!.player.units[activeIndex])
+                                .find((candidate) => candidate && candidate !== unit && !candidate.fainted) ?? null;
+                            const liveEnemyTargets = livingTargetSlots(pvpRoom.battle!.opponent);
+                            const selectedTarget = liveEnemyTargets.some((entry) => entry.targetIndex === draft.target)
+                              ? draft.target
+                              : (liveEnemyTargets[0]?.targetIndex ?? 0);
+                            const targetMode = simulatorTargetMode(selectedMove, pvpRoom.battle!.format);
+                            const targetNote = simulatorTargetNote(selectedMove, pvpRoom.battle!.format, allyUnit?.pokemon.displayName ?? null);
+                            const restrictionNotes = simulatorRestrictionNotes(unit);
+
+                            return (
+                              <div key={`${unit.pokemon.id}-${actor}`} className="subpanel sim-action-card">
+                                <SectionHeader title={unit.pokemon.displayName} subtitle={describeBuildRole(unit.build, pvpRoom.battle!.format)} compact />
+                                {battleTags.length || statusBadge ? (
+                                  <div className="battle-tag-row action-tag-row">
+                                    {battleTags.map((tag) => (
+                                      <span key={tag.key} className={`battle-tag battle-tag-${tag.tone}`} title={tag.title}>
+                                        {tag.label}
+                                      </span>
+                                    ))}
+                                    {statusBadge ? (
+                                      <span className={`battle-tag battle-tag-${statusBadge.tone === 'sleep' ? 'warning' : 'neutral'}`} title={statusBadge.title}>
+                                        Status {statusBadge.label}
+                                      </span>
+                                    ) : null}
+                                  </div>
+                                ) : null}
+                                <label className="field">
+                                  <span>Action</span>
+                                  <select value={effectiveDraftType} onChange={(event) => updatePvpChoiceDraft(actor, { type: event.target.value as ChoiceDraft['type'] })} disabled={unit.rechargeTurns > 0 || unit.chargingTurns > 0}>
+                                    <option value="move">Move</option>
+                                    {allowMegaOption ? <option value="mega">Mega Evolve</option> : null}
+                                    {canSwitch ? <option value="switch">Switch</option> : null}
+                                  </select>
+                                </label>
+                                {effectiveDraftType !== 'switch' ? (
+                                  <>
+                                    <label className="field">
+                                      <span>{effectiveDraftType === 'mega' ? 'Move After Mega' : 'Move'}</span>
+                                      <select value={selectedMoveId} onChange={(event) => updatePvpChoiceDraft(actor, { moveId: event.target.value })} disabled={!legalMoves.length}>
+                                        {legalMoves.map((move) => <option key={move.id} value={move.id}>{move.name}</option>)}
+                                      </select>
+                                    </label>
+                                    {targetMode === 'foe' ? (
+                                      <label className="field">
+                                        <span>Target</span>
+                                        <select value={selectedTarget} onChange={(event) => updatePvpChoiceDraft(actor, { target: Number(event.target.value) })}>
+                                          {liveEnemyTargets.map(({ unit: enemy, targetIndex }) => (
+                                            <option key={`${enemy.pokemon.id}-${targetIndex}`} value={targetIndex}>{enemy.pokemon.displayName}</option>
+                                          ))}
+                                        </select>
+                                      </label>
+                                    ) : targetNote ? <div className="note-row compact-note">{targetNote}</div> : null}
+                                    {restrictionNotes.map((note) => (
+                                      <div key={note} className="note-row compact-note">
+                                        {note}
+                                      </div>
+                                    ))}
+                                    {!legalMoves.length ? (
+                                      <div className="note-row compact-note">
+                                        {unit.rechargeTurns > 0
+                                          ? 'This slot is spending the turn recharging, so it cannot pick a move or switch.'
+                                          : unit.chargingTurns > 0
+                                            ? 'This slot is already charging a two-turn move and will fire that stored move automatically on its next action.'
+                                            : 'No legal move is currently available under the active locks. If the PvP timer expires here, the correct forced line will be submitted automatically.'}
+                                      </div>
+                                    ) : null}
+                                  </>
+                                ) : (
+                                  <label className="field">
+                                    <span>Switch To</span>
+                                    <select value={draft.switchTarget} onChange={(event) => updatePvpChoiceDraft(actor, { switchTarget: Number(event.target.value) })}>
+                                      {switchTargets.map((benchIndex) => (
+                                        <option key={benchIndex} value={benchIndex}>{pvpRoom.battle!.player.units[benchIndex]?.pokemon.displayName}</option>
+                                      ))}
+                                    </select>
+                                  </label>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
                       <div className="team-actions">
-                        <button className="action-button primary" onClick={() => { void submitPvpTurn(false); }}>Lock Turn</button>
+                        <button className="action-button primary" onClick={() => { void submitPvpTurn(false); }}>
+                          {pvpBattleNeedsReplacementPhase ? 'Lock Replacements' : 'Lock Turn'}
+                        </button>
                         <button className="action-button danger" onClick={() => { void handlePvpForfeit(); }}>Forfeit Match</button>
                       </div>
                       {pvpMessage ? <div className="note-row">{pvpMessage}</div> : null}
@@ -5244,6 +5489,7 @@ function BattlefieldArena({
   bottomBench = [],
   event = null,
   conditionSections = [],
+  expansive = false,
 }: {
   title: string;
   subtitle: string;
@@ -5256,9 +5502,10 @@ function BattlefieldArena({
   bottomBench?: BattlefieldSlotModel[];
   event?: BattlefieldPlaybackEvent | null;
   conditionSections?: BattlefieldConditionSection[];
+  expansive?: boolean;
 }) {
   return (
-    <div className="subpanel battlefield-panel">
+    <div className={expansive ? 'subpanel battlefield-panel battlefield-panel-expansive' : 'subpanel battlefield-panel'}>
       <SectionHeader title={title} subtitle={subtitle} compact />
       <div className="battlefield-layout">
         <div className="battlefield-scroll-panel">

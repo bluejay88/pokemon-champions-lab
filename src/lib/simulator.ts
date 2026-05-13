@@ -727,6 +727,30 @@ function firstAvailableBench(side: SimSide) {
   return side.bench.find((unitIndex) => unitIndex >= 0 && !side.units[unitIndex]?.fainted) ?? null;
 }
 
+function livingBenchTargets(side: SimSide) {
+  return side.bench.filter((unitIndex) => unitIndex >= 0 && !side.units[unitIndex]?.fainted);
+}
+
+function pendingReplacementActorsForSide(side: SimSide) {
+  const livingBench = livingBenchTargets(side);
+  if (!livingBench.length) {
+    return [];
+  }
+
+  return side.active.flatMap((unitIndex, activeSlot) => {
+    const unit = typeof unitIndex === 'number' && unitIndex >= 0 ? side.units[unitIndex] ?? null : null;
+    return !unit || unit.fainted ? [activeSlot] : [];
+  });
+}
+
+export function pendingReplacementActors(side: SimSide) {
+  return pendingReplacementActorsForSide(side);
+}
+
+export function battleHasPendingReplacements(state: SimulatorBattleState) {
+  return pendingReplacementActorsForSide(state.player).length > 0 || pendingReplacementActorsForSide(state.opponent).length > 0;
+}
+
 function canUnitSwitchOut(state: SimulatorBattleState, unit: SimUnit) {
   if (unit.escapeBlockedBySideId && unit.escapeBlockedByUnitIndex !== null) {
     const sourceSide = sideForId(state, unit.escapeBlockedBySideId);
@@ -1267,31 +1291,22 @@ function blockedBySideProtection(move: PokemonMove, priority: number, targetRef:
   return null;
 }
 
-function refillActive(side: SimSide) {
-  const replacements: number[] = [];
+function clearFaintedActiveSlots(side: SimSide) {
   for (let index = 0; index < side.active.length; index += 1) {
     const unitIndex = side.active[index];
-    const unit = typeof unitIndex === 'number' ? side.units[unitIndex] ?? null : null;
-    if (unit && !unit.fainted) {
-      continue;
-    }
-
-    const replacement = firstAvailableBench(side);
-    if (replacement === null) {
+    const unit = typeof unitIndex === 'number' && unitIndex >= 0 ? side.units[unitIndex] ?? null : null;
+    if (!unit || unit.fainted) {
       side.active[index] = -1;
-      continue;
     }
-
-    side.active[index] = replacement;
-    side.bench = side.bench.filter((entry) => entry !== replacement);
-    side.units[replacement].turnsActive = 0;
-    replacements.push(replacement);
   }
+
   side.bench = side.bench.filter((entry) => entry >= 0 && !side.units[entry]?.fainted && !side.active.includes(entry));
-  if (side.redirectionUnitIndex !== null && side.units[side.redirectionUnitIndex]?.fainted) {
+  if (
+    side.redirectionUnitIndex !== null
+    && (!side.units[side.redirectionUnitIndex] || side.units[side.redirectionUnitIndex].fainted || !side.active.includes(side.redirectionUnitIndex))
+  ) {
     side.redirectionUnitIndex = null;
   }
-  return replacements;
 }
 
 function updateWinner(state: SimulatorBattleState) {
@@ -1525,11 +1540,87 @@ function forceSwitchTarget(state: SimulatorBattleState, targetRef: TargetRef, re
   return true;
 }
 
-function integrateReplacements(state: SimulatorBattleState, sideId: SideId) {
-  const replacements = refillActive(sideForId(state, sideId));
-  for (const unitIndex of replacements) {
-    switchInUnit(state, sideId, unitIndex, true);
+function normalizeReplacementChoicesForSide(state: SimulatorBattleState, sideId: SideId, choices: SimulatorChoice[]) {
+  const side = sideForId(state, sideId);
+  const pendingActors = pendingReplacementActorsForSide(side);
+  const livingBench = livingBenchTargets(side);
+  const usedTargets = new Set<number>();
+  const normalized: Extract<SimulatorChoice, { type: 'switch' }>[] = [];
+
+  for (const actor of pendingActors) {
+    const submitted = choices.find((choice) => choice.type === 'switch' && choice.actor === actor);
+    const preferredTarget = submitted?.target ?? null;
+    const resolvedTarget =
+      typeof preferredTarget === 'number' && livingBench.includes(preferredTarget) && !usedTargets.has(preferredTarget)
+        ? preferredTarget
+        : livingBench.find((unitIndex) => !usedTargets.has(unitIndex)) ?? null;
+    if (resolvedTarget === null) {
+      continue;
+    }
+
+    usedTargets.add(resolvedTarget);
+    normalized.push({
+      type: 'switch',
+      actor,
+      target: resolvedTarget,
+    });
   }
+
+  return normalized;
+}
+
+function applyReplacementChoice(state: SimulatorBattleState, sideId: SideId, actor: number, targetIndex: number) {
+  const actingSide = sideForId(state, sideId);
+  const replacement = actingSide.units[targetIndex] ?? null;
+  if (!replacement || replacement.fainted || !actingSide.bench.includes(targetIndex)) {
+    return;
+  }
+
+  actingSide.active[actor] = targetIndex;
+  actingSide.bench = actingSide.bench.filter((entry) => entry !== targetIndex);
+  replacement.turnsActive = 0;
+  switchInUnit(state, sideId, targetIndex, true);
+  clearFaintedActiveSlots(actingSide);
+}
+
+export function buildAutoReplacementChoices(state: SimulatorBattleState, sideId: SideId) {
+  return normalizeReplacementChoicesForSide(state, sideId, []);
+}
+
+export function applyReplacementChoices(
+  state: SimulatorBattleState,
+  playerChoices: SimulatorChoice[],
+  opponentChoices: SimulatorChoice[],
+) {
+  const next = structuredClone(state) as SimulatorBattleState;
+  const normalizedPlayerChoices = normalizeReplacementChoicesForSide(next, 'player', playerChoices);
+  const normalizedOpponentChoices = normalizeReplacementChoicesForSide(next, 'opponent', opponentChoices);
+  const queued = [
+    ...normalizedPlayerChoices.map((choice) => ({ sideId: 'player' as SideId, choice })),
+    ...normalizedOpponentChoices.map((choice) => ({ sideId: 'opponent' as SideId, choice })),
+  ];
+
+  queued.sort((left, right) => {
+    const leftSide = sideForId(next, left.sideId);
+    const rightSide = sideForId(next, right.sideId);
+    const leftUnit = leftSide.units[left.choice.target] ?? null;
+    const rightUnit = rightSide.units[right.choice.target] ?? null;
+    const leftSpeed = leftUnit ? combatSpeed(leftUnit, leftSide.tailwindTurns, next.trickRoomTurns) : 0;
+    const rightSpeed = rightUnit ? combatSpeed(rightUnit, rightSide.tailwindTurns, next.trickRoomTurns) : 0;
+    return compareActionSpeed(leftSpeed, rightSpeed);
+  });
+
+  for (const queuedChoice of queued) {
+    applyReplacementChoice(next, queuedChoice.sideId, queuedChoice.choice.actor, queuedChoice.choice.target);
+  }
+
+  clearFaintedActiveSlots(next.player);
+  clearFaintedActiveSlots(next.opponent);
+  updateWinner(next);
+  if (!next.winner && queued.length) {
+    next.log.unshift(`Turn ${next.turn} replacement send-outs are complete. Choose moves for the new board.`);
+  }
+  return next;
 }
 
 function simultaneousSwitchInOrder(state: SimulatorBattleState) {
@@ -4161,8 +4252,8 @@ export function advancePreviewToBattle(state: SimulatorBattleState) {
     switchInUnit(next, entry.sideId, entry.unitIndex, false);
   }
 
-  integrateReplacements(next, 'player');
-  integrateReplacements(next, 'opponent');
+  clearFaintedActiveSlots(next.player);
+  clearFaintedActiveSlots(next.opponent);
   updateWinner(next);
   return next;
 }
@@ -4346,6 +4437,7 @@ export function resolveTurnWithChoices(
       actor.actedThisTurn = true;
       next.log.unshift(`${actor.pokemon.displayName} switched out for ${actingSide.units[targetIndex].pokemon.displayName}.`);
       switchInUnit(next, queuedAction.side, targetIndex, false);
+      clearFaintedActiveSlots(actingSide);
       updateWinner(next);
       if (next.winner) {
         break;
@@ -4438,8 +4530,8 @@ export function resolveTurnWithChoices(
     next.lastResolvedMoveId = actor.lastMoveId ?? move.id;
     next.lastResolvedMoveSideId = queuedAction.side;
 
-    integrateReplacements(next, 'player');
-    integrateReplacements(next, 'opponent');
+    clearFaintedActiveSlots(next.player);
+    clearFaintedActiveSlots(next.opponent);
     updateWinner(next);
     if (next.winner) {
       break;
@@ -4487,8 +4579,8 @@ export function resolveTurnWithChoices(
       next.environment.wonderRoom = false;
     }
   }
-  integrateReplacements(next, 'player');
-  integrateReplacements(next, 'opponent');
+  clearFaintedActiveSlots(next.player);
+  clearFaintedActiveSlots(next.opponent);
   updateWinner(next);
   next.turn += 1;
 

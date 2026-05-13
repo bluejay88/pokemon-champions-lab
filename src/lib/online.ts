@@ -1,6 +1,9 @@
 import {
+  applyReplacementChoices,
   createSimulatorBattle,
   advancePreviewToBattle,
+  battleHasPendingReplacements,
+  buildAutoReplacementChoices,
   randomChoicesForSide,
   resolveTurnWithChoices,
   type SimulatorBattleState,
@@ -416,6 +419,29 @@ function maybeResolvePendingTurn(room: OnlineBattleRoomState) {
     return room;
   }
 
+  if (battleHasPendingReplacements(room.battle)) {
+    const nextBattle = applyReplacementChoices(
+      room.battle,
+      room.pendingHostChoices ?? buildAutoReplacementChoices(room.battle, 'player'),
+      room.pendingGuestChoices ?? buildAutoReplacementChoices(room.battle, 'opponent'),
+    );
+    room.battle = nextBattle;
+    room.pendingHostChoices = null;
+    room.pendingGuestChoices = null;
+    room.deadlineAt = nextBattle.winner ? null : new Date(Date.now() + room.timerSeconds * 1000).toISOString();
+    room.lastActionSummary = nextBattle.winner
+      ? `${nextBattle.winner === 'player' ? room.hostTrainerName : room.guestTrainerName ?? 'Opponent'} closed the battle.`
+      : `Replacement send-outs are complete for Turn ${nextBattle.turn}. Lock the next move phase.`;
+
+    if (nextBattle.winner) {
+      room.stage = 'finished';
+      room.winnerSeat = nextBattle.winner === 'player' ? 'host' : 'guest';
+      room.resultReason = room.resultReason ?? 'normal';
+    }
+
+    return room;
+  }
+
   const nextBattle = resolveTurnWithChoices(
     room.battle,
     room.pendingHostChoices ?? randomChoicesForSide(room.battle, 'player'),
@@ -539,7 +565,9 @@ export function submitTurnChoicesState(room: OnlineBattleRoomState, playerId: st
     && nextRoom.pendingGuestChoices
     && nextRoom.deadlineAt
   ) {
-    nextRoom.lastActionSummary = 'Both players are locked in. The move clock keeps running until the timer expires, then the turn resolves together.';
+    nextRoom.lastActionSummary = battleHasPendingReplacements(nextRoom.battle!)
+      ? 'Both players are locked in. The replacement clock keeps running until it expires, then the new Pokemon enter together at the top of the turn.'
+      : 'Both players are locked in. The move clock keeps running until the timer expires, then the turn resolves together.';
   }
   return nextRoom;
 }
