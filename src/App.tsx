@@ -107,6 +107,36 @@ type BattleTag = {
   tone: 'neutral' | 'positive' | 'negative' | 'warning';
   title: string;
 };
+type BattlefieldBackdrop = {
+  id: string;
+  label: string;
+  flavor: string;
+  image: string;
+  pixelated?: boolean;
+};
+type BattlefieldPlaybackEvent = {
+  id: string;
+  tone: 'impact' | 'guard' | 'switch' | 'ko' | 'status' | 'field';
+  message: string;
+  actorName?: string | null;
+  targetName?: string | null;
+  moveName?: string | null;
+};
+type BattlefieldSlotModel = {
+  key: string;
+  pokemon: PokemonEntry | null;
+  title: string;
+  subtitle: string;
+  statusBadge?: StatusBadge | null;
+  hidden?: boolean;
+  hpPercent?: number | null;
+  hpLabel?: string | null;
+  fainted?: boolean;
+};
+type BattlefieldConditionSection = {
+  label: string;
+  tags: BattleTag[];
+};
 
 const appTabs: { id: BattleTab; label: string; short: string; description: string }[] = [
   { id: 'team-builder', label: 'Team Builder', short: 'Build', description: 'Craft, label, and save up to ten squads.' },
@@ -122,6 +152,45 @@ const appTabs: { id: BattleTab; label: string; short: string; description: strin
 const brandPokemonIcons = ['Bellibolt', 'Jolteon', 'Sableye', 'Gengar', 'Mega Alakazam', 'Mega Clefable', 'Garchomp'];
 const layoutModes: LayoutMode[] = ['Auto', 'Stretch', 'Focus'];
 const pokemonTypeOptions = ['Any', ...[...new Set(dataset.pokemon.flatMap((pokemon) => pokemon.types))].sort()];
+const battlefieldBackdrops: BattlefieldBackdrop[] = [
+  {
+    id: 'retro-grass',
+    label: 'Retro Grass',
+    flavor: 'A compact throwback lane that feels like an old-school challenge cup.',
+    image: '/battle-backgrounds/pokemon battle image 1.png',
+    pixelated: true,
+  },
+  {
+    id: 'cave-clash',
+    label: 'Cave Clash',
+    flavor: 'A rocky chamber built for bruisers, pivots, and weather wars.',
+    image: '/battle-backgrounds/pokemon battle image 2.png',
+  },
+  {
+    id: 'celestial-ring',
+    label: 'Celestial Ring',
+    flavor: 'A bright arena floor under a star-washed sky that suits fast offensive games.',
+    image: '/battle-backgrounds/pokemon battle image 3.png',
+  },
+  {
+    id: 'neon-stadium',
+    label: 'Neon Stadium',
+    flavor: 'A big-match stadium look for ranked sets, replays, and showcase battles.',
+    image: '/battle-backgrounds/pokemon battle image 4.png',
+  },
+  {
+    id: 'crystal-depths',
+    label: 'Crystal Depths',
+    flavor: 'A darker crystal cavern with room for bulky mirrors and trap pressure.',
+    image: '/battle-backgrounds/pokemon battle image 5.png',
+  },
+  {
+    id: 'azure-cavern',
+    label: 'Azure Cavern',
+    flavor: 'A blue stone floor with strong contrast for clean sprite readability.',
+    image: '/battle-backgrounds/pokemon battle image 6.png',
+  },
+];
 const simulatorStatusBadges: Record<Exclude<PokemonBuild['status'], 'healthy'>, StatusBadge> = {
   burn: {
     label: 'BRN',
@@ -1298,6 +1367,152 @@ function battleTrackLabel(trackId: string) {
   return battleMusicTracks.find((track) => track.id === trackId)?.label ?? 'Battle Music';
 }
 
+function hashBattlefieldSeed(source: string) {
+  let hash = 0;
+  for (let index = 0; index < source.length; index += 1) {
+    hash = (hash * 31 + source.charCodeAt(index)) | 0;
+  }
+  return Math.abs(hash);
+}
+
+function battlefieldBackdropForSeed(seed: string) {
+  return battlefieldBackdrops[hashBattlefieldSeed(seed) % battlefieldBackdrops.length] ?? battlefieldBackdrops[0];
+}
+
+function recentBattleLogEntries(currentLog: string[], previousLog: string[] | null, limit = 8) {
+  if (!currentLog.length) {
+    return [];
+  }
+
+  if (!previousLog?.length) {
+    return currentLog.slice(0, limit);
+  }
+
+  const previousHead = previousLog[0];
+  const prefixLength = previousHead ? currentLog.indexOf(previousHead) : -1;
+  if (prefixLength > 0) {
+    return currentLog.slice(0, Math.min(limit, prefixLength));
+  }
+
+  const fallbackDelta = Math.max(1, currentLog.length - previousLog.length);
+  return currentLog.slice(0, Math.min(limit, fallbackDelta));
+}
+
+function battleNamePool(battle: SimulatorBattleState) {
+  return [...battle.player.units, ...battle.opponent.units]
+    .map((unit) => unit?.pokemon.displayName)
+    .filter((name): name is string => Boolean(name))
+    .sort((left, right) => right.length - left.length);
+}
+
+function parseBattlefieldPlaybackEvent(entries: string[], battle: SimulatorBattleState): BattlefieldPlaybackEvent | null {
+  if (!entries.length) {
+    return null;
+  }
+
+  const knownNames = battleNamePool(battle);
+  const fallbackName = (entry: string) => knownNames.find((name) => entry.includes(name)) ?? null;
+
+  for (const entry of entries) {
+    const koMatch = entry.match(/^(.+?) was knocked out by (.+?) using (.+?)\.$/);
+    if (koMatch) {
+      return {
+        id: makeId('battlefield-event'),
+        tone: 'ko',
+        message: entry,
+        actorName: koMatch[2],
+        targetName: koMatch[1],
+        moveName: koMatch[3],
+      };
+    }
+
+    const hitMatch = entry.match(/^(.+?) used (.+?) on (.+?) for (\d+) damage\.$/);
+    if (hitMatch) {
+      return {
+        id: makeId('battlefield-event'),
+        tone: 'impact',
+        message: entry,
+        actorName: hitMatch[1],
+        targetName: hitMatch[3],
+        moveName: hitMatch[2],
+      };
+    }
+
+    const missMatch = entry.match(/^(.+?)'s (.+?) missed (.+?)\.$/);
+    if (missMatch) {
+      return {
+        id: makeId('battlefield-event'),
+        tone: 'impact',
+        message: entry,
+        actorName: missMatch[1],
+        targetName: missMatch[3],
+        moveName: missMatch[2],
+      };
+    }
+
+    const statusMatch = entry.match(/^(.+?) was afflicted by (.+?) \((.+?)\)\.$/);
+    if (statusMatch) {
+      return {
+        id: makeId('battlefield-event'),
+        tone: 'status',
+        message: entry,
+        actorName: fallbackName(entry),
+        targetName: statusMatch[1],
+        moveName: statusMatch[2],
+      };
+    }
+
+    const guardMatch = entry.match(/^(.+?) blocked (.+?) with (.+?)\.$/);
+    if (guardMatch) {
+      return {
+        id: makeId('battlefield-event'),
+        tone: 'guard',
+        message: entry,
+        actorName: guardMatch[1],
+        targetName: guardMatch[1],
+        moveName: guardMatch[2],
+      };
+    }
+
+    const switchMatch = entry.match(/^(.+?) switched out for (.+?)\.$/);
+    if (switchMatch) {
+      return {
+        id: makeId('battlefield-event'),
+        tone: 'switch',
+        message: entry,
+        actorName: switchMatch[1],
+        targetName: switchMatch[2],
+      };
+    }
+
+    const sentOutMatch = entry.match(/sent out (.+)\.$/i);
+    if (sentOutMatch) {
+      return {
+        id: makeId('battlefield-event'),
+        tone: 'switch',
+        message: entry,
+        targetName: sentOutMatch[1],
+      };
+    }
+
+    if (/Mega Evolved|set Reflect|set Light Screen|Aurora Veil|Tailwind|Trick Room|weather|terrain|Gravity|Magic Room|Wonder Room/i.test(entry)) {
+      return {
+        id: makeId('battlefield-event'),
+        tone: 'field',
+        message: entry,
+        actorName: fallbackName(entry),
+      };
+    }
+  }
+
+  return {
+    id: makeId('battlefield-event'),
+    tone: 'field',
+    message: entries[0],
+    actorName: fallbackName(entries[0]),
+  };
+}
+
 function normalizedPlaylistIds(trackIds: string[]) {
   const validIds = trackIds.filter((trackId) => battleMusicTracks.some((track) => track.id === trackId));
   return validIds.length ? [...new Set(validIds)] : [battleMusicTracks[0]?.id ?? 'gen5-final'];
@@ -1805,6 +2020,7 @@ function App() {
   const [simAnnouncerStyle, setSimAnnouncerStyle] = useState<AnnouncerStyle>('Arena');
   const [simAnnouncerRate, setSimAnnouncerRate] = useState(1);
   const [simAnnouncerFeed, setSimAnnouncerFeed] = useState<string[]>([]);
+  const [simBattlefieldEvent, setSimBattlefieldEvent] = useState<BattlefieldPlaybackEvent | null>(null);
   const [simTurnReviews, setSimTurnReviews] = useState<SimulatorTurnReview[]>([]);
   const [simCountdown, setSimCountdown] = useState(0);
   const [simPreviewMessage, setSimPreviewMessage] = useState<string | null>(null);
@@ -1822,6 +2038,7 @@ function App() {
   const [pvpCountdown, setPvpCountdown] = useState(0);
   const [pvpMessage, setPvpMessage] = useState<string | null>(null);
   const [pvpAnnouncerFeed, setPvpAnnouncerFeed] = useState<string[]>([]);
+  const [pvpBattlefieldEvent, setPvpBattlefieldEvent] = useState<BattlefieldPlaybackEvent | null>(null);
   const [pvpRoomHistory, setPvpRoomHistory] = useState<OnlineBattleRoomHistoryEntry[]>([]);
   const [pvpHistorySearch, setPvpHistorySearch] = useState('');
   const [profileMusicPreviewActive, setProfileMusicPreviewActive] = useState(false);
@@ -1904,6 +2121,93 @@ function App() {
       entry.trainerName.toLowerCase().includes(query),
     );
   }, [pvpHistorySearch, pvpRoomHistory]);
+  const simBackdrop = useMemo(
+    () => battlefieldBackdropForSeed(
+      simBattle
+        ? `sim-battle-${simBattle.turn}-${simBattle.player.name}-${simBattle.opponent.name}-${simBattle.format}`
+        : simPreview
+          ? `sim-preview-${simPreview.previewEndsAt}-${simPreview.opponentTeam.id}-${simPreview.format}`
+          : `sim-idle-${simFormat}`,
+    ),
+    [simBattle, simPreview, simFormat],
+  );
+  const pvpBackdrop = useMemo(
+    () => battlefieldBackdropForSeed(`pvp-${pvpRoom?.code ?? 'idle'}-${pvpRoom?.stage ?? 'idle'}-${pvpRoom?.battle?.turn ?? 0}`),
+    [pvpRoom?.code, pvpRoom?.stage, pvpRoom?.battle?.turn],
+  );
+  const simPreviewPlayerOrder = useMemo(
+    () => (simBringOrder.length ? simBringOrder : filledSlotIndices(team).slice(0, 4)),
+    [simBringOrder, team],
+  );
+  const simPreviewOpponentOrder = useMemo(
+    () => (simPreview ? filledSlotIndices(simPreview.opponentTeam).slice(0, 4) : []),
+    [simPreview],
+  );
+  const pvpPreviewPlayerOrder = useMemo(
+    () => (pvpBringOrder.length ? pvpBringOrder : filledSlotIndices(team).slice(0, 4)),
+    [pvpBringOrder, team],
+  );
+  const pvpPreviewOpponentOrder = useMemo(
+    () => (pvpRoom?.opponentTeam ? filledSlotIndices(pvpRoom.opponentTeam).slice(0, 4) : []),
+    [pvpRoom?.opponentTeam],
+  );
+  const simFieldSections = useMemo<BattlefieldConditionSection[]>(
+    () => simBattle ? [
+      {
+        label: 'Turn Flow',
+        tags: [
+          { key: 'sim-turn', label: `Turn ${simBattle.turn}`, tone: 'positive', title: 'The current live simulator turn.' },
+          { key: 'sim-clock', label: simTurnTimerEnabled && !simBattle.winner ? `${simTurnClock}s clock` : 'Clock Off', tone: simTurnTimerEnabled && simTurnClock <= 10 ? 'warning' : 'neutral', title: 'The live move clock for the current turn.' },
+        ],
+      },
+      { label: 'Global Field', tags: simulatorGlobalFieldTags(simBattle) },
+      { label: 'Your Side', tags: simulatorSideConditionTags(simBattle.player) },
+      { label: 'AI Side', tags: simulatorSideConditionTags(simBattle.opponent) },
+    ] : [],
+    [simBattle, simTurnClock, simTurnTimerEnabled],
+  );
+  const pvpFieldSections = useMemo<BattlefieldConditionSection[]>(
+    () => pvpRoom?.battle ? [
+      {
+        label: 'Turn Flow',
+        tags: [
+          { key: 'pvp-turn', label: `Turn ${pvpRoom.battle.turn}`, tone: 'positive', title: 'The current live PvP turn.' },
+          { key: 'pvp-clock', label: `${pvpCountdown}s clock`, tone: pvpCountdown <= 10 ? 'warning' : 'neutral', title: 'The mandatory room timer for the current turn.' },
+        ],
+      },
+      { label: 'Global Field', tags: simulatorGlobalFieldTags(pvpRoom.battle) },
+      { label: 'Your Side', tags: simulatorSideConditionTags(pvpRoom.battle.player) },
+      { label: 'Opponent Side', tags: simulatorSideConditionTags(pvpRoom.battle.opponent) },
+    ] : [],
+    [pvpRoom?.battle, pvpCountdown],
+  );
+  const simPreviewFieldSections = useMemo<BattlefieldConditionSection[]>(
+    () => simPreview ? [
+      {
+        label: 'Preview Clock',
+        tags: [
+          { key: 'format', label: simPreview.format, tone: 'positive', title: 'The projected battle format for this preview.' },
+          { key: 'countdown', label: `${simCountdown}s left`, tone: simCountdown <= 10 ? 'warning' : 'neutral', title: 'Time left before the preview expires.' },
+          { key: 'selected', label: `${simBringOrder.length}/4 locked`, tone: simBringOrder.length === 4 ? 'positive' : 'warning', title: 'Your current bring-order lock status.' },
+        ],
+      },
+    ] : [],
+    [simPreview, simCountdown, simBringOrder.length],
+  );
+  const pvpPreviewFieldSections = useMemo<BattlefieldConditionSection[]>(
+    () => pvpRoom?.stage === 'preview' ? [
+      {
+        label: 'Room Preview',
+        tags: [
+          { key: 'room-code', label: `Room ${pvpRoom.code}`, tone: 'neutral', title: 'The current live room code.' },
+          { key: 'preview-format', label: pvpRoom.format, tone: 'positive', title: 'The live PvP format for this room.' },
+          { key: 'preview-clock', label: `${pvpCountdown}s left`, tone: pvpCountdown <= 10 ? 'warning' : 'neutral', title: 'Mandatory preview clock before battle.' },
+          { key: 'bring-lock', label: `${pvpBringOrder.length}/4 locked`, tone: pvpBringOrder.length === 4 ? 'positive' : 'warning', title: 'Your current bring-order lock status.' },
+        ],
+      },
+    ] : [],
+    [pvpRoom, pvpCountdown, pvpBringOrder.length],
+  );
 
   const selectedResult = attackerMoveResults.find(({ move }) => move.id === selectedDamageMoveId)?.result ?? null;
 
@@ -1999,6 +2303,7 @@ function App() {
     if (!simBattle) {
       previousBattleRef.current = null;
       recordedBattleKeyRef.current = null;
+      setSimBattlefieldEvent(null);
       setSimTurnClock(30);
       return;
     }
@@ -2010,6 +2315,11 @@ function App() {
     }
 
     const previousBattle = previousBattleRef.current;
+    const recentEntries = recentBattleLogEntries(simBattle.log, previousBattle?.log ?? null);
+    const nextBattlefieldEvent = parseBattlefieldPlaybackEvent(recentEntries, simBattle);
+    if (nextBattlefieldEvent) {
+      setSimBattlefieldEvent(nextBattlefieldEvent);
+    }
     const commentaryLines = announcerLinesFromBattleUpdate(previousBattle, simBattle, simAnnouncerStyle);
     if (commentaryLines.length) {
       pushAnnouncerLines(commentaryLines, Boolean(simBattle.winner));
@@ -2050,11 +2360,17 @@ function App() {
     if (!pvpRoom || !onlineAccount) {
       previousPvpBattleRef.current = null;
       recordedPvpBattleKeyRef.current = null;
+      setPvpBattlefieldEvent(null);
       return;
     }
 
     if (pvpRoom.battle) {
       const pvpAnnouncerEnabled = pvpRoom.seat === 'host' ? pvpRoom.hostAnnouncerEnabled : pvpRoom.guestAnnouncerEnabled;
+      const recentEntries = recentBattleLogEntries(pvpRoom.battle.log, previousPvpBattleRef.current?.log ?? null);
+      const nextBattlefieldEvent = parseBattlefieldPlaybackEvent(recentEntries, pvpRoom.battle);
+      if (nextBattlefieldEvent) {
+        setPvpBattlefieldEvent(nextBattlefieldEvent);
+      }
       const pvpLines = announcerLinesFromBattleUpdate(previousPvpBattleRef.current, pvpRoom.battle, 'Arena');
       if (pvpAnnouncerEnabled && pvpLines.length) {
         setPvpAnnouncerFeed((current) => [...pvpLines.slice().reverse(), ...current].slice(0, 16));
@@ -2098,6 +2414,24 @@ function App() {
       previousPvpBattleRef.current = pvpRoom.battle;
     }
   }, [pvpRoom, onlineAccount]);
+
+  useEffect(() => {
+    if (!simBattlefieldEvent) {
+      return;
+    }
+
+    const handle = window.setTimeout(() => setSimBattlefieldEvent(null), 2600);
+    return () => window.clearTimeout(handle);
+  }, [simBattlefieldEvent?.id]);
+
+  useEffect(() => {
+    if (!pvpBattlefieldEvent) {
+      return;
+    }
+
+    const handle = window.setTimeout(() => setPvpBattlefieldEvent(null), 2600);
+    return () => window.clearTimeout(handle);
+  }, [pvpBattlefieldEvent?.id]);
 
   useEffect(() => {
     if (!pvpRoom || !onlineAccount || !pvpRoom.code) {
@@ -3707,6 +4041,19 @@ function App() {
                     <button className="action-button primary" onClick={beginSimBattle}>Start Battle</button>
                     <button className="action-button" onClick={() => setSimPreview(null)}>Cancel Preview</button>
                   </div>
+
+                  <BattlefieldArena
+                    title="Preview Battle Camera"
+                    subtitle="This live stage reserves space for the opening board, the scrolling battle log, and the action feed once the match starts."
+                    backdrop={simBackdrop}
+                    topLabel="Opponent Preview"
+                    bottomLabel="Your Locked Order"
+                    topSlots={previewBattlefieldSlots(simPreview.opponentTeam, simPreview.format, simPreviewOpponentOrder, 'Species shown, full set still hidden.')}
+                    bottomSlots={previewBattlefieldSlots(team, simPreview.format, simPreviewPlayerOrder, 'Projected lead lane from your current bring order.')}
+                    topBench={previewBattlefieldBench(simPreview.opponentTeam, simPreview.format, simPreviewOpponentOrder, 'Preview species still hidden in battle order.')}
+                    bottomBench={previewBattlefieldBench(team, simPreview.format, simPreviewPlayerOrder, 'Backline order from your current lock.')}
+                    conditionSections={simPreviewFieldSections}
+                  />
                 </>
               ) : simBattle ? (
                 <>
@@ -3723,6 +4070,19 @@ function App() {
                         <InfoStat label="AI Tailwind" value={simBattle.opponent.tailwindTurns ? `${simBattle.opponent.tailwindTurns}` : 'Off'} />
                         <InfoStat label="Move Clock" value={simTurnTimerEnabled && !simBattle.winner ? `${simTurnClock}s` : 'Off'} />
                       </div>
+                      <BattlefieldArena
+                        title="Live Battle Stage"
+                        subtitle="The battlefield camera now tracks the active board with health bars, status badges, hidden backlines, and a dedicated conditions rail."
+                        backdrop={simBackdrop}
+                        topLabel={simBattle.opponent.name}
+                        bottomLabel={simBattle.player.name}
+                        topSlots={battlefieldActiveSlotsFromSide(simBattle.opponent, simBattle.format)}
+                        bottomSlots={battlefieldActiveSlotsFromSide(simBattle.player, simBattle.format, true)}
+                        topBench={battlefieldBenchSlotsFromSide(simBattle.opponent)}
+                        bottomBench={battlefieldBenchSlotsFromSide(simBattle.player, true)}
+                        event={simBattlefieldEvent}
+                        conditionSections={simFieldSections}
+                      />
                       <div className="subpanel sim-field-panel">
                         <SectionHeader title="Board State" subtitle="Live field, screen, and hazard conditions pulled from the simulator state." compact />
                         <div className="sim-field-stack">
@@ -3767,8 +4127,9 @@ function App() {
                         </div>
                       ) : null}
                       <div className="notes-list scroll-stack sim-log">
-                        {simBattle.log.slice(0, 16).map((entry, index) => (
-                          <div key={`${entry}-${index}`} className="note-row">{entry}</div>
+                        <div className="sim-log-turn-banner">{simBattle.winner ? `Final Turn ${simBattle.turn}` : `Turn ${simBattle.turn} Battle Log`}</div>
+                        {[...simBattle.log].reverse().map((entry, index) => (
+                          <div key={`${entry}-${index}`} className="note-row sim-log-entry">{entry}</div>
                         ))}
                       </div>
                     </div>
@@ -4060,6 +4421,18 @@ function App() {
                     <button className="action-button primary" onClick={() => { void submitPvpBringOrderSelection(); }}>Submit Bring Order</button>
                     <button className="action-button" onClick={() => setPvpBringOrder([])}>Clear Picks</button>
                   </div>
+                  <BattlefieldArena
+                    title="PvP Preview Camera"
+                    subtitle="This lower battle window stays reserved for the live stage, the reveal flow, and the text log once the room opens the battle."
+                    backdrop={pvpBackdrop}
+                    topLabel="Opponent Preview"
+                    bottomLabel="Your Locked Order"
+                    topSlots={previewBattlefieldSlots(pvpRoom.opponentTeam ?? createTeam('Empty'), pvpRoom.format, pvpPreviewOpponentOrder, 'Preview species only, battle order unrevealed.')}
+                    bottomSlots={previewBattlefieldSlots(team, pvpRoom.format, pvpPreviewPlayerOrder, 'Projected lead lane from your current bring order.')}
+                    topBench={previewBattlefieldBench(pvpRoom.opponentTeam ?? createTeam('Empty'), pvpRoom.format, pvpPreviewOpponentOrder, 'Preview species only until live reveal.')}
+                    bottomBench={previewBattlefieldBench(team, pvpRoom.format, pvpPreviewPlayerOrder, 'Backline order from your current lock.')}
+                    conditionSections={pvpPreviewFieldSections}
+                  />
                 </>
               ) : pvpRoom.battle ? (
                 <>
@@ -4073,6 +4446,19 @@ function App() {
                   <div className="battle-layout">
                     <BattleSideView side={pvpRoom.battle.opponent} format={pvpRoom.battle.format} />
                     <div className="battle-center">
+                      <BattlefieldArena
+                        title="Live PvP Stage"
+                        subtitle="Both battlers share this broadcast view with hidden opponent backline slots, live status readouts, and the real room conditions rail."
+                        backdrop={pvpBackdrop}
+                        topLabel={pvpRoom.battle.opponent.name}
+                        bottomLabel={pvpRoom.battle.player.name}
+                        topSlots={battlefieldActiveSlotsFromSide(pvpRoom.battle.opponent, pvpRoom.battle.format)}
+                        bottomSlots={battlefieldActiveSlotsFromSide(pvpRoom.battle.player, pvpRoom.battle.format, true)}
+                        topBench={battlefieldBenchSlotsFromSide(pvpRoom.battle.opponent)}
+                        bottomBench={battlefieldBenchSlotsFromSide(pvpRoom.battle.player, true)}
+                        event={pvpBattlefieldEvent}
+                        conditionSections={pvpFieldSections}
+                      />
                       <div className="subpanel sim-field-panel">
                         <SectionHeader title="Active Effects" subtitle="Weather, terrain, rooms, screens, hazards, and live turn counters." compact />
                         <div className="sim-field-stack">
@@ -4106,8 +4492,9 @@ function App() {
                         </div>
                       </div>
                       <div className="notes-list scroll-stack sim-log">
-                        {pvpRoom.battle.log.slice(0, 16).map((entry, index) => (
-                          <div key={`${entry}-${index}`} className="note-row">{entry}</div>
+                        <div className="sim-log-turn-banner">{pvpRoom.battle.winner ? `Final Turn ${pvpRoom.battle.turn}` : `Turn ${pvpRoom.battle.turn} Battle Log`}</div>
+                        {[...pvpRoom.battle.log].reverse().map((entry, index) => (
+                          <div key={`${entry}-${index}`} className="note-row sim-log-entry">{entry}</div>
                         ))}
                       </div>
                       {pvpAnnouncerFeed.length ? (
@@ -4725,6 +5112,290 @@ function BattleSideView({ side, format, friendly = false }: { side: SimulatorBat
             </div>
           ) : null;
         })}
+      </div>
+    </div>
+  );
+}
+
+function battlefieldActiveSlotsFromSide(side: SimSide, format: BattleFormat, friendly = false): BattlefieldSlotModel[] {
+  const expected = format === 'Doubles' ? 2 : 1;
+  const activeSlots: BattlefieldSlotModel[] = side.active
+    .map((unitIndex) => side.units[unitIndex] ?? null)
+    .filter((unit): unit is SimUnit => Boolean(unit))
+    .map((unit, index) => {
+      const concealed = !friendly && !unit.revealed;
+      return {
+        key: `${side.name}-active-${unit.slotIndex}-${index}`,
+        pokemon: concealed ? null : unit.pokemon,
+        title: concealed ? 'Hidden active slot' : battleUnitDisplayName(unit),
+        subtitle: concealed ? 'Reveals after a live send-out.' : (friendly ? describeBuildRole(unit.build, format) : 'Opponent active'),
+        statusBadge: concealed ? null : simulatorStatusBadge(unit),
+        hidden: concealed,
+        hpPercent: concealed ? null : Math.max(0, (unit.currentHp / unit.maxHp) * 100),
+        hpLabel: concealed ? null : `${unit.currentHp} / ${unit.maxHp}`,
+        fainted: unit.fainted,
+      } satisfies BattlefieldSlotModel;
+    });
+
+  while (activeSlots.length < expected) {
+    activeSlots.push({
+      key: `${side.name}-active-empty-${activeSlots.length}`,
+      pokemon: null,
+      title: expected === 2 ? `Open ${side.name} lane` : 'Open field lane',
+      subtitle: 'Waiting for the next send-out.',
+      statusBadge: null,
+      hidden: false,
+      hpPercent: null,
+      hpLabel: null,
+      fainted: false,
+    });
+  }
+
+  return activeSlots.slice(0, expected);
+}
+
+function battlefieldBenchSlotsFromSide(side: SimSide, friendly = false): BattlefieldSlotModel[] {
+  const benchSlots: BattlefieldSlotModel[] = [];
+  side.bench.forEach((unitIndex, order) => {
+    const unit = side.units[unitIndex];
+    if (!unit) {
+      return;
+    }
+    const concealed = !friendly && !unit.revealed;
+    benchSlots.push({
+      key: `${side.name}-bench-${unit.slotIndex}-${order}`,
+      pokemon: concealed ? null : unit.pokemon,
+      title: concealed ? 'Hidden backline' : battleUnitDisplayName(unit),
+      subtitle: concealed ? 'Reveal on switch-in.' : (unit.fainted ? 'Knocked out' : 'Backline ready'),
+      statusBadge: concealed ? null : simulatorStatusBadge(unit),
+      hidden: concealed,
+      hpPercent: concealed ? null : Math.max(0, (unit.currentHp / unit.maxHp) * 100),
+      hpLabel: concealed ? null : `${unit.currentHp} / ${unit.maxHp}`,
+      fainted: unit.fainted,
+    });
+  });
+  return benchSlots;
+}
+
+function previewBattlefieldSlots(team: Team, format: BattleFormat, slotOrder: number[], subtitle: string): BattlefieldSlotModel[] {
+  const expected = format === 'Doubles' ? 2 : 1;
+  const ordered: BattlefieldSlotModel[] = slotOrder
+    .map((slotIndex) => team.slots[slotIndex] ?? null)
+    .filter((build): build is PokemonBuild => Boolean(build))
+    .map((build, index) => {
+      const pokemon = selectedPokemon(build) ?? resolvePokemonForm(build);
+      return {
+        key: `${team.id}-preview-${build.id}-${index}`,
+        pokemon,
+        title: build.nickname.trim() || pokemon?.displayName || `Slot ${index + 1}`,
+        subtitle,
+      } satisfies BattlefieldSlotModel;
+    });
+
+  while (ordered.length < expected) {
+    ordered.push({
+      key: `${team.id}-preview-empty-${ordered.length}`,
+      pokemon: null,
+      title: expected === 2 ? `Lead ${ordered.length + 1}` : 'Lead slot',
+      subtitle: 'Lock your bring order to project the opening board.',
+      statusBadge: null,
+      hidden: false,
+      hpPercent: null,
+      hpLabel: null,
+      fainted: false,
+    });
+  }
+
+  return ordered.slice(0, expected);
+}
+
+function previewBattlefieldBench(team: Team, format: BattleFormat, slotOrder: number[], subtitle: string): BattlefieldSlotModel[] {
+  const activeCount = format === 'Doubles' ? 2 : 1;
+  return slotOrder
+    .slice(activeCount)
+    .map((slotIndex, order) => {
+      const build = team.slots[slotIndex];
+      const pokemon = build ? selectedPokemon(build) ?? resolvePokemonForm(build) : null;
+      return {
+        key: `${team.id}-preview-bench-${build?.id ?? order}`,
+        pokemon,
+        title: build?.nickname.trim() || pokemon?.displayName || `Bench ${order + 1}`,
+        subtitle,
+      } satisfies BattlefieldSlotModel;
+    });
+}
+
+function battlefieldSlotMatches(slot: BattlefieldSlotModel, unitName?: string | null) {
+  if (!unitName) {
+    return false;
+  }
+  return slot.title === unitName || slot.pokemon?.displayName === unitName;
+}
+
+function BattlefieldArena({
+  title,
+  subtitle,
+  backdrop,
+  topLabel,
+  bottomLabel,
+  topSlots,
+  bottomSlots,
+  topBench = [],
+  bottomBench = [],
+  event = null,
+  conditionSections = [],
+}: {
+  title: string;
+  subtitle: string;
+  backdrop: BattlefieldBackdrop;
+  topLabel: string;
+  bottomLabel: string;
+  topSlots: BattlefieldSlotModel[];
+  bottomSlots: BattlefieldSlotModel[];
+  topBench?: BattlefieldSlotModel[];
+  bottomBench?: BattlefieldSlotModel[];
+  event?: BattlefieldPlaybackEvent | null;
+  conditionSections?: BattlefieldConditionSection[];
+}) {
+  return (
+    <div className="subpanel battlefield-panel">
+      <SectionHeader title={title} subtitle={subtitle} compact />
+      <div className="battlefield-layout">
+        <div className="battlefield-scroll-panel">
+          <div className="battlefield-stage-shell">
+            <div className={backdrop.pixelated ? 'battlefield-stage battlefield-stage-pixelated' : 'battlefield-stage'} style={{ backgroundImage: `url("${backdrop.image}")` }}>
+              <div className="battlefield-stage-overlay" />
+              <div className="battlefield-backdrop-meta">
+                <strong>{backdrop.label}</strong>
+                <span>{backdrop.flavor}</span>
+              </div>
+              {event ? (
+                <div className={`battlefield-event battlefield-event-${event.tone}`} key={event.id}>
+                  {event.moveName ? <span>{event.moveName}</span> : null}
+                  <strong>{event.message}</strong>
+                </div>
+              ) : null}
+
+              <div className="battlefield-side battlefield-side-top">
+                <div className="battlefield-side-label">{topLabel}</div>
+                <div className={`battlefield-active-lanes lanes-${topSlots.length}`}>
+                  {topSlots.map((slot) => {
+                    const actor = battlefieldSlotMatches(slot, event?.actorName);
+                    const target = battlefieldSlotMatches(slot, event?.targetName);
+                    const className = [
+                      'battlefield-card',
+                      actor ? 'is-actor' : '',
+                      target ? 'is-target' : '',
+                      slot.fainted ? 'is-fainted' : '',
+                    ].filter(Boolean).join(' ');
+                    return (
+                      <div key={slot.key} className={className}>
+                        {slot.hidden ? <HiddenBenchFrame size="standard" /> : <PokemonSpriteFrame pokemon={slot.pokemon} size="standard" statusBadge={slot.statusBadge ?? null} />}
+                        <div className="battlefield-card-copy">
+                          <strong>{slot.title}</strong>
+                          <small>{slot.subtitle}</small>
+                          {typeof slot.hpPercent === 'number' ? (
+                            <>
+                              <div className="hp-bar battlefield-hp">
+                                <div className="hp-fill" style={{ width: `${slot.hpPercent}%` }} />
+                              </div>
+                              <span className="battlefield-hp-label">{slot.hpLabel}</span>
+                            </>
+                          ) : null}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+                {topBench.length ? (
+                  <div className="battlefield-bench-strip">
+                    {topBench.map((slot) => (
+                      <div key={slot.key} className={slot.fainted ? 'battlefield-bench-card is-fainted' : 'battlefield-bench-card'}>
+                        {slot.hidden ? <HiddenBenchFrame size="tiny" /> : <PokemonSpriteFrame pokemon={slot.pokemon} size="tiny" statusBadge={slot.statusBadge ?? null} />}
+                        <div>
+                          <strong>{slot.title}</strong>
+                          <small>{slot.subtitle}</small>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+
+              <div className="battlefield-side battlefield-side-bottom">
+                <div className="battlefield-side-label">{bottomLabel}</div>
+                <div className={`battlefield-active-lanes lanes-${bottomSlots.length}`}>
+                  {bottomSlots.map((slot) => {
+                    const actor = battlefieldSlotMatches(slot, event?.actorName);
+                    const target = battlefieldSlotMatches(slot, event?.targetName);
+                    const className = [
+                      'battlefield-card',
+                      actor ? 'is-actor' : '',
+                      target ? 'is-target' : '',
+                      slot.fainted ? 'is-fainted' : '',
+                    ].filter(Boolean).join(' ');
+                    return (
+                      <div key={slot.key} className={className}>
+                        {slot.hidden ? <HiddenBenchFrame size="standard" /> : <PokemonSpriteFrame pokemon={slot.pokemon} size="standard" statusBadge={slot.statusBadge ?? null} />}
+                        <div className="battlefield-card-copy">
+                          <strong>{slot.title}</strong>
+                          <small>{slot.subtitle}</small>
+                          {typeof slot.hpPercent === 'number' ? (
+                            <>
+                              <div className="hp-bar battlefield-hp">
+                                <div className="hp-fill" style={{ width: `${slot.hpPercent}%` }} />
+                              </div>
+                              <span className="battlefield-hp-label">{slot.hpLabel}</span>
+                            </>
+                          ) : null}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+                {bottomBench.length ? (
+                  <div className="battlefield-bench-strip">
+                    {bottomBench.map((slot) => (
+                      <div key={slot.key} className={slot.fainted ? 'battlefield-bench-card is-fainted' : 'battlefield-bench-card'}>
+                        {slot.hidden ? <HiddenBenchFrame size="tiny" /> : <PokemonSpriteFrame pokemon={slot.pokemon} size="tiny" statusBadge={slot.statusBadge ?? null} />}
+                        <div>
+                          <strong>{slot.title}</strong>
+                          <small>{slot.subtitle}</small>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <aside className="battlefield-side-rail">
+          <div className="battlefield-rail-header">
+            <strong>Field Conditions</strong>
+            <span>Live timers, rooms, weather, screens, and side pressure.</span>
+          </div>
+          <div className="battlefield-condition-stack">
+            {conditionSections.length ? conditionSections.map((section) => (
+              <div key={section.label} className="battlefield-condition-group">
+                <strong>{section.label}</strong>
+                <div className="battle-tag-row">
+                  {section.tags.length ? section.tags.map((tag) => (
+                    <span key={`${section.label}-${tag.key}`} className={`battle-tag battle-tag-${tag.tone}`} title={tag.title}>
+                      {tag.label}
+                    </span>
+                  )) : <span className="battle-tag battle-tag-neutral">Clear</span>}
+                </div>
+              </div>
+            )) : (
+              <div className="battlefield-empty-rail">
+                <strong>Stage Notes</strong>
+                <span>The stage is armed and ready. Lock the opening order to see a cleaner board projection before the first turn starts.</span>
+              </div>
+            )}
+          </div>
+        </aside>
       </div>
     </div>
   );

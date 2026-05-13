@@ -1,4 +1,4 @@
-import { calculateDamage, moveMakesContact } from './damage';
+import { calculateDamage, calculateDamageWithOverrides, isSoundMove, moveHasSecondaryEffect, moveMakesContact } from './damage';
 import {
   buildStats,
   defaultEnvironment,
@@ -13,7 +13,7 @@ import {
   stageMultiplier,
   typeEffectiveness,
 } from './champions';
-import type { BattleFormat, EnvironmentState, ItemEntry, PokemonBuild, PokemonEntry, PokemonMove, Team } from '../types';
+import type { BattleFormat, DamageResult, EnvironmentState, ItemEntry, PokemonBuild, PokemonEntry, PokemonMove, StatBlock, Team } from '../types';
 
 export type SimulatorStage = 'preview' | 'battle' | 'finished';
 export type SideId = 'player' | 'opponent';
@@ -43,15 +43,21 @@ export interface SimUnit {
   basePokemon: PokemonEntry;
   megaPokemon: PokemonEntry | null;
   pokemon: PokemonEntry;
+  heldItemId: string | null;
+  lastConsumedItemId: string | null;
+  movePp: Record<string, number>;
   currentHp: number;
   maxHp: number;
   fainted: boolean;
   protected: boolean;
-  berrySpent: boolean;
   turnsActive: number;
+  actedThisTurn: boolean;
   flinched: boolean;
   helpingHand: boolean;
   beakBlastPrimed: boolean;
+  confusionTurns: number;
+  infatuatedBySideId: SideId | null;
+  infatuatedByUnitIndex: number | null;
   toxicCounter: number;
   sleepTurns: number;
   sleepSource: 'normal' | 'rest' | null;
@@ -62,6 +68,8 @@ export interface SimUnit {
   disableTurns: number;
   disabledMoveId: string | null;
   tormentActive: boolean;
+  throatChopTurns: number;
+  healingPreventedTurns: number;
   yawnTurns: number;
   perishSongTurns: number;
   destinyBondActive: boolean;
@@ -69,17 +77,37 @@ export interface SimUnit {
   protectStreak: number;
   protectSource: string | null;
   endure: boolean;
+  substituteHp: number;
   aquaRing: boolean;
   ingrain: boolean;
+  stockpileLevel: number;
   seededBySideId: SideId | null;
   saltCure: boolean;
   syrupTurns: number;
   bindingTurns: number;
   bindingDamageRate: number;
   trappedByMove: string | null;
+  escapeBlockedBySideId: SideId | null;
+  escapeBlockedByUnitIndex: number | null;
+  lockOnTurns: number;
+  lockOnTargetSideId: SideId | null;
+  lockOnTargetUnitIndex: number | null;
+  magnetRiseTurns: number;
+  critStageBonus: number;
+  abilityOverrideName: string | null;
+  abilitySuppressed: boolean;
+  typeOverride: string[] | null;
+  addedTypes: string[];
+  statOverrides: Partial<StatBlock>;
+  transformed: boolean;
+  transformedMoveIds: string[] | null;
+  electrifiedTurns: number;
+  imprisonActive: boolean;
   electricBoost: boolean;
   statsRaisedThisTurn: boolean;
   statsLoweredThisTurn: boolean;
+  pendingAfterYou: boolean;
+  quashedThisTurn: boolean;
   megaEvolved: boolean;
   revealed: boolean;
   damageDealt: number;
@@ -117,6 +145,7 @@ export interface SimSide {
   quickGuardActive: boolean;
   wideGuardActive: boolean;
   wishQueue: WishMarker[];
+  healingWishPending: boolean;
   megaUsed: boolean;
   megaUnitIndex: number | null;
 }
@@ -135,6 +164,9 @@ export interface SimulatorBattleState {
   gravityTurns: number;
   magicRoomTurns: number;
   wonderRoomTurns: number;
+  fairyLockTurns: number;
+  lastResolvedMoveId: string | null;
+  lastResolvedMoveSideId: SideId | null;
   log: string[];
   winner: SideId | null;
 }
@@ -172,6 +204,10 @@ const allAdjacentPokemonMoves = new Set([
 ]);
 const pivotMoves = new Set(['Volt Switch', 'U-turn', 'Flip Turn']);
 const allyBoostMoves = new Set(['Howl', 'Coaching']);
+const selfDestructMoves = new Set(['Explosion', 'Self-Destruct', 'Misty Explosion', 'Final Gambit']);
+const itemStealMoves = new Set(['Covet', 'Thief']);
+const sleepTalkBlockedMoves = new Set(['Assist', 'Bide', 'Chatter', 'Copycat', 'Focus Punch', 'Me First', 'Metronome', 'Mimic', 'Mirror Move', 'Nature Power', 'Sketch', 'Sleep Talk', 'Struggle', 'Uproar']);
+const aromaVeilProtectedMoves = new Set(['Attract', 'Disable', 'Encore', 'Psychic Noise', 'Taunt', 'Torment']);
 const directStatusMoves = new Map<string, PokemonBuild['status']>([
   ['Glare', 'paralysis'],
   ['Hypnosis', 'sleep'],
@@ -257,6 +293,7 @@ type StageKey =
   | 'evasionStage';
 
 type MoveScope = 'single' | 'all-opponents' | 'all-adjacent';
+type QueuedBattleAction = { side: SideId; choice: SimulatorChoice };
 
 const movePriorityOverrides = new Map<string, number>([
   ['Helping Hand', 5],
@@ -293,6 +330,14 @@ function activeCount(format: BattleFormat) {
 }
 
 function abilityNameForUnit(unit: SimUnit) {
+  if (unit.abilitySuppressed) {
+    return null;
+  }
+
+  if (unit.abilityOverrideName) {
+    return unit.abilityOverrideName;
+  }
+
   return resolveAbility(unit.build, unit.pokemon)?.name ?? null;
 }
 
@@ -300,8 +345,27 @@ function randomDuration(min: number, max: number) {
   return min + Math.floor(Math.random() * (max - min + 1));
 }
 
+function moveIdsForUnit(unit: SimUnit) {
+  return unit.transformedMoveIds ?? unit.build.moveIds;
+}
+
+function effectiveStatsForUnit(unit: SimUnit) {
+  return {
+    ...buildStats(unit.pokemon.baseStats, unit.build.evs, unit.build.natureId),
+    ...unit.statOverrides,
+  } satisfies StatBlock;
+}
+
+function itemCanBeRemoved(item: ItemEntry | null) {
+  if (!item) {
+    return false;
+  }
+
+  return item.category !== 'mega-stone';
+}
+
 function activeItemForUnit(state: SimulatorBattleState, unit: SimUnit): ItemEntry | null {
-  const item = getItemById(unit.build.itemId);
+  const item = getItemById(unit.heldItemId);
   if (!item) {
     return null;
   }
@@ -318,6 +382,27 @@ function findMove(unit: SimUnit, moveId: string) {
     return struggleMove;
   }
   return unit.pokemon.movePool.find((move) => move.id === moveId) ?? null;
+}
+
+function currentMovePp(unit: SimUnit, moveId: string) {
+  const move = findMove(unit, moveId);
+  if (!move) {
+    return 0;
+  }
+
+  return unit.movePp[moveId] ?? move.pp ?? 0;
+}
+
+function setMovePp(unit: SimUnit, moveId: string, value: number) {
+  unit.movePp[moveId] = Math.max(0, value);
+}
+
+function spendMovePp(unit: SimUnit, moveId: string, amount = 1) {
+  if (moveId === struggleMove.id) {
+    return;
+  }
+
+  setMovePp(unit, moveId, currentMovePp(unit, moveId) - amount);
 }
 
 function clearChargeState(unit: SimUnit) {
@@ -377,12 +462,13 @@ function currentBuild(unit: SimUnit) {
   return {
     ...unit.build,
     useMega: unit.megaEvolved,
+    itemId: unit.heldItemId,
     currentHpPercent: Math.max(1, Math.round((unit.currentHp / unit.maxHp) * 100)),
   };
 }
 
 function combatSpeed(unit: SimUnit, tailwindTurns: number, trickRoomTurns: number) {
-  const stats = buildStats(unit.pokemon.baseStats, unit.build.evs, unit.build.natureId);
+  const stats = effectiveStatsForUnit(unit);
   const stageAdjusted = stats.speed * stageMultiplier(unit.build.speedStage);
   const tailwindAdjusted = tailwindTurns > 0 ? stageAdjusted * 2 : stageAdjusted;
   return trickRoomTurns > 0 ? -tailwindAdjusted : tailwindAdjusted;
@@ -422,7 +508,11 @@ function unitGroundedInState(state: SimulatorBattleState, unit: SimUnit) {
     return true;
   }
 
-  return grounded(unit.pokemon, unit.build);
+  if (unit.magnetRiseTurns > 0) {
+    return false;
+  }
+
+  return !typeListForUnit(state, unit).includes('Flying') && abilityNameForUnit(unit) !== 'Levitate';
 }
 
 function protectionSuccessChance(streak: number) {
@@ -439,7 +529,16 @@ function healAmount(unit: SimUnit, fraction: number) {
 }
 
 function typeListForUnit(state: SimulatorBattleState, unit: SimUnit) {
-  return effectiveTypes(unit.pokemon, unit.build, state.environment.weather);
+  if (unit.typeOverride?.length) {
+    return [...unit.typeOverride];
+  }
+
+  const baseTypes = effectiveTypes(unit.pokemon, currentBuild(unit), state.environment.weather);
+  if (!unit.addedTypes.length) {
+    return baseTypes;
+  }
+
+  return [...new Set([...baseTypes, ...unit.addedTypes])];
 }
 
 function stageLabel(field: StageKey) {
@@ -483,15 +582,27 @@ function makeUnit(build: PokemonBuild, slotIndex: number): SimUnit | null {
     basePokemon,
     megaPokemon: megaPokemon?.isMega ? megaPokemon : null,
     pokemon: basePokemon,
+    heldItemId: build.itemId,
+    lastConsumedItemId: null,
+    movePp: Object.fromEntries(
+      normalizeMoveSelection(build, basePokemon)
+        .map((moveId) => {
+          const move = basePokemon.movePool.find((entry) => entry.id === moveId);
+          return [moveId, move?.pp ?? 0];
+        }),
+    ),
     currentHp: stats.hp,
     maxHp: stats.hp,
     fainted: false,
     protected: false,
-    berrySpent: false,
     turnsActive: 0,
+    actedThisTurn: false,
     flinched: false,
     helpingHand: false,
     beakBlastPrimed: false,
+    confusionTurns: 0,
+    infatuatedBySideId: null,
+    infatuatedByUnitIndex: null,
     toxicCounter: 1,
     sleepTurns: 0,
     freezeTurns: 0,
@@ -500,6 +611,8 @@ function makeUnit(build: PokemonBuild, slotIndex: number): SimUnit | null {
     encoreMoveId: null,
     disableTurns: 0,
     disabledMoveId: null,
+    throatChopTurns: 0,
+    healingPreventedTurns: 0,
     yawnTurns: 0,
     perishSongTurns: 0,
     destinyBondActive: false,
@@ -507,17 +620,37 @@ function makeUnit(build: PokemonBuild, slotIndex: number): SimUnit | null {
     protectStreak: 0,
     protectSource: null,
     endure: false,
+    substituteHp: 0,
     aquaRing: false,
     ingrain: false,
+    stockpileLevel: 0,
     seededBySideId: null,
     saltCure: false,
     syrupTurns: 0,
     bindingTurns: 0,
     bindingDamageRate: 0,
     trappedByMove: null,
+    escapeBlockedBySideId: null,
+    escapeBlockedByUnitIndex: null,
+    lockOnTurns: 0,
+    lockOnTargetSideId: null,
+    lockOnTargetUnitIndex: null,
+    magnetRiseTurns: 0,
+    critStageBonus: 0,
+    abilityOverrideName: null,
+    abilitySuppressed: false,
+    typeOverride: null,
+    addedTypes: [],
+    statOverrides: {},
+    transformed: false,
+    transformedMoveIds: null,
+    electrifiedTurns: 0,
+    imprisonActive: false,
     electricBoost: false,
     statsRaisedThisTurn: false,
     statsLoweredThisTurn: false,
+    pendingAfterYou: false,
+    quashedThisTurn: false,
     megaEvolved: false,
     sleepSource: null,
     tormentActive: false,
@@ -558,6 +691,7 @@ function makeSide(team: Team, selectedOrder: number[], name: string, format: Bat
     quickGuardActive: false,
     wideGuardActive: false,
     wishQueue: [],
+    healingWishPending: false,
     megaUsed: false,
     megaUnitIndex: null,
   };
@@ -593,8 +727,24 @@ function firstAvailableBench(side: SimSide) {
   return side.bench.find((unitIndex) => unitIndex >= 0 && !side.units[unitIndex]?.fainted) ?? null;
 }
 
-function canUnitSwitchOut(unit: SimUnit) {
-  return !unit.trappedByMove && unit.bindingTurns <= 0 && unit.rechargeTurns <= 0 && unit.chargingTurns <= 0;
+function canUnitSwitchOut(state: SimulatorBattleState, unit: SimUnit) {
+  if (unit.escapeBlockedBySideId && unit.escapeBlockedByUnitIndex !== null) {
+    const sourceSide = sideForId(state, unit.escapeBlockedBySideId);
+    const sourceUnit = sourceSide.units[unit.escapeBlockedByUnitIndex] ?? null;
+    const sourceStillActive = Boolean(
+      sourceUnit &&
+      !sourceUnit.fainted &&
+      sourceSide.active.includes(unit.escapeBlockedByUnitIndex),
+    );
+    if (!sourceStillActive) {
+      unit.escapeBlockedBySideId = null;
+      unit.escapeBlockedByUnitIndex = null;
+    }
+  }
+
+  const fairyLocked = state.fairyLockTurns > 0;
+  const directlyTrapped = unit.escapeBlockedBySideId !== null && unit.escapeBlockedByUnitIndex !== null;
+  return !fairyLocked && !directlyTrapped && !unit.trappedByMove && unit.bindingTurns <= 0 && unit.rechargeTurns <= 0 && unit.chargingTurns <= 0;
 }
 
 function unitAbilitiesMatch(unit: SimUnit, names: Set<string>) {
@@ -620,6 +770,45 @@ function lowerUnitHp(unit: SimUnit, amount: number) {
 
 function healUnit(unit: SimUnit, amount: number) {
   unit.currentHp = Math.min(unit.maxHp, unit.currentHp + amount);
+}
+
+function tryHealUnit(state: SimulatorBattleState, unit: SimUnit, amount: number, source: string) {
+  if (unit.healingPreventedTurns > 0) {
+    state.log.unshift(`${unit.pokemon.displayName} could not recover HP from ${source} because healing is blocked by Psychic Noise.`);
+    return false;
+  }
+
+  healUnit(unit, amount);
+  return true;
+}
+
+function triggerFlinch(state: SimulatorBattleState, target: SimUnit, move: PokemonMove, chance: number) {
+  if (
+    target.fainted ||
+    target.actedThisTurn ||
+    unitAbilitiesMatch(target, flinchShieldAbilities) ||
+    abilityNameForUnit(target) === 'Shield Dust'
+  ) {
+    return false;
+  }
+  if (!chanceRoll(chance)) {
+    return false;
+  }
+  target.flinched = true;
+  state.log.unshift(`${target.pokemon.displayName} flinched because of ${move.name}.`);
+  return true;
+}
+
+function secondaryEffectsSuppressedByAbility(actor: SimUnit, move: PokemonMove) {
+  return abilityNameForUnit(actor) === 'Sheer Force' && move.category !== 'Status' && moveHasSecondaryEffect(move);
+}
+
+function protectedByAromaVeil(state: SimulatorBattleState, target: SimUnit) {
+  const side = sideForId(state, unitSideId(state, target));
+  return side.active.some((unitIndex) => {
+    const ally = side.units[unitIndex];
+    return Boolean(ally && !ally.fainted && abilityNameForUnit(ally) === 'Aroma Veil');
+  });
 }
 
 function modifiedStageDelta(unit: SimUnit, delta: number) {
@@ -782,7 +971,7 @@ function canUnitMegaEvolve(side: SimSide, unit: SimUnit) {
     return false;
   }
 
-  return getItemById(unit.build.itemId)?.category === 'mega-stone';
+  return getItemById(unit.heldItemId)?.category === 'mega-stone';
 }
 
 function performMegaEvolution(state: SimulatorBattleState, sideId: SideId, actor: number) {
@@ -830,7 +1019,7 @@ function autoPivotToBench(state: SimulatorBattleState, sideId: SideId, actor: Si
 }
 
 function maybeConsumeStatusBerry(state: SimulatorBattleState, unit: SimUnit) {
-  if (unit.berrySpent || unit.build.status === 'healthy') {
+  if (!unit.heldItemId || unit.build.status === 'healthy') {
     return false;
   }
 
@@ -850,17 +1039,18 @@ function maybeConsumeStatusBerry(state: SimulatorBattleState, unit: SimUnit) {
   unit.sleepTurns = 0;
   unit.sleepSource = null;
   unit.freezeTurns = 0;
-  unit.berrySpent = true;
+  unit.lastConsumedItemId = unit.heldItemId;
+  unit.heldItemId = null;
   state.log.unshift(`${unit.pokemon.displayName} cured its ${clearedStatus} with ${item.name}.`);
   return true;
 }
 
 function maybeTriggerHealingBerry(state: SimulatorBattleState, unit: SimUnit) {
-  if (unit.berrySpent || unit.fainted || unit.currentHp > unit.maxHp / 2) {
+  if (!unit.heldItemId || unit.fainted || unit.currentHp > unit.maxHp / 2) {
     return false;
   }
 
-  const item = getItemById(unit.build.itemId);
+  const item = getItemById(unit.heldItemId);
   if (!item) {
     return false;
   }
@@ -871,8 +1061,11 @@ function maybeTriggerHealingBerry(state: SimulatorBattleState, unit: SimUnit) {
   }
 
   const heal = berryValue < 1 ? healAmount(unit, berryValue) : berryValue;
-  healUnit(unit, heal);
-  unit.berrySpent = true;
+  if (!tryHealUnit(state, unit, heal, item.name)) {
+    return false;
+  }
+  unit.lastConsumedItemId = unit.heldItemId;
+  unit.heldItemId = null;
   state.log.unshift(`${unit.pokemon.displayName} restored HP with ${item.name}.`);
   return true;
 }
@@ -986,6 +1179,16 @@ function accuracyCheck(state: SimulatorBattleState, actor: SimUnit, target: SimU
   const actorAbility = abilityNameForUnit(actor);
   const targetAbility = abilityNameForUnit(target);
   if (!move.accuracy || move.accuracy >= 101 || actorAbility === 'No Guard' || targetAbility === 'No Guard') {
+    return true;
+  }
+
+  const targetSideId = unitSideId(state, target);
+  const targetUnitIndex = sideForUnit(state, target).units.indexOf(target);
+  if (
+    actor.lockOnTurns > 0 &&
+    actor.lockOnTargetSideId === targetSideId &&
+    actor.lockOnTargetUnitIndex === targetUnitIndex
+  ) {
     return true;
   }
 
@@ -1120,6 +1323,7 @@ function switchOutUnit(side: SimSide, unitIndex: number) {
   if (!unit) {
     return;
   }
+  const wasTransformed = unit.transformed;
 
   if (side.redirectionUnitIndex === unitIndex) {
     side.redirectionUnitIndex = null;
@@ -1144,6 +1348,8 @@ function switchOutUnit(side: SimSide, unitIndex: number) {
   unit.encoreMoveId = null;
   unit.disableTurns = 0;
   unit.disabledMoveId = null;
+  unit.throatChopTurns = 0;
+  unit.healingPreventedTurns = 0;
   unit.tormentActive = false;
   unit.yawnTurns = 0;
   unit.perishSongTurns = 0;
@@ -1151,6 +1357,35 @@ function switchOutUnit(side: SimSide, unitIndex: number) {
   unit.rechargeTurns = 0;
   unit.rechargeMoveName = null;
   clearChargeState(unit);
+  unit.confusionTurns = 0;
+  unit.infatuatedBySideId = null;
+  unit.infatuatedByUnitIndex = null;
+  unit.lockOnTurns = 0;
+  unit.lockOnTargetSideId = null;
+  unit.lockOnTargetUnitIndex = null;
+  unit.magnetRiseTurns = 0;
+  unit.typeOverride = null;
+  unit.addedTypes = [];
+  unit.statOverrides = {};
+  unit.substituteHp = 0;
+  unit.escapeBlockedBySideId = null;
+  unit.escapeBlockedByUnitIndex = null;
+  unit.electrifiedTurns = 0;
+  unit.imprisonActive = false;
+  unit.transformed = false;
+  unit.transformedMoveIds = null;
+  unit.stockpileLevel = 0;
+  unit.critStageBonus = 0;
+  unit.abilitySuppressed = false;
+  unit.pokemon = unit.megaEvolved ? (unit.megaPokemon ?? unit.basePokemon) : unit.basePokemon;
+  if (wasTransformed) {
+    unit.movePp = Object.fromEntries(
+      moveIdsForUnit(unit).map((moveId) => {
+        const move = findMove(unit, moveId);
+        return [moveId, move?.pp ?? 0];
+      }),
+    );
+  }
 }
 
 function applyEntryHazards(state: SimulatorBattleState, side: SimSide, unit: SimUnit) {
@@ -1260,6 +1495,17 @@ function switchInUnit(state: SimulatorBattleState, sideId: SideId, unitIndex: nu
     return;
   }
 
+  if (actingSide.healingWishPending) {
+    unit.currentHp = unit.maxHp;
+    unit.build.status = 'healthy';
+    unit.toxicCounter = 1;
+    unit.sleepTurns = 0;
+    unit.sleepSource = null;
+    unit.freezeTurns = 0;
+    actingSide.healingWishPending = false;
+    state.log.unshift(`${unit.pokemon.displayName} was restored by Healing Wish on entry.`);
+  }
+
   applySwitchInAbility(state, sideId, unit);
 }
 
@@ -1305,14 +1551,27 @@ function simultaneousSwitchInOrder(state: SimulatorBattleState) {
   return queued;
 }
 
-export function legalMovesForUnit(unit: SimUnit) {
+function moveBlockedByImprison(state: SimulatorBattleState | undefined, sideId: SideId | undefined, unit: SimUnit, moveId: string) {
+  if (!state || !sideId) {
+    return false;
+  }
+
+  const opposing = opposingSide(state, sideId);
+  return opposing.active.some((unitIndex) => {
+    const target = opposing.units[unitIndex];
+    return Boolean(target && !target.fainted && target.imprisonActive && moveIdsForUnit(target).includes(moveId) && target !== unit);
+  });
+}
+
+export function legalMovesForUnit(unit: SimUnit, state?: SimulatorBattleState, sideId?: SideId) {
   if (unit.rechargeTurns > 0 || unit.chargingTurns > 0) {
     return [];
   }
 
-  const fullMoveList = unit.build.moveIds
+  const fullMoveList = moveIdsForUnit(unit)
     .map((moveId) => findMove(unit, moveId))
-    .filter((move): move is PokemonMove => move !== null);
+    .filter((move): move is PokemonMove => move !== null)
+    .filter((move) => (unit.movePp[move.id] ?? move.pp ?? 0) > 0 || move.id === struggleMove.id);
   let allMoves =
     unit.disableTurns > 0 && unit.disabledMoveId
       ? fullMoveList.filter((move) => move.id !== unit.disabledMoveId)
@@ -1327,7 +1586,8 @@ export function legalMovesForUnit(unit: SimUnit) {
     if (encoredMove) {
       if (
         (unit.disableTurns > 0 && unit.disabledMoveId === encoredMove.id) ||
-        (unit.tormentActive && unit.lastMoveId === encoredMove.id)
+        (unit.tormentActive && unit.lastMoveId === encoredMove.id) ||
+        (unit.throatChopTurns > 0 && isSoundMove(encoredMove))
       ) {
         return [struggleMove];
       }
@@ -1339,13 +1599,16 @@ export function legalMovesForUnit(unit: SimUnit) {
 
   if (unit.tauntTurns > 0) {
     const nonStatusMoves = allMoves.filter((move) => move.category !== 'Status');
-    return nonStatusMoves.length ? nonStatusMoves : [struggleMove];
+    allMoves = nonStatusMoves.length ? nonStatusMoves : [struggleMove];
   }
+
+  allMoves = allMoves.filter((move) => !moveBlockedByImprison(state, sideId, unit, move.id));
+  allMoves = allMoves.filter((move) => !(unit.throatChopTurns > 0 && isSoundMove(move)));
 
   return allMoves.length ? allMoves : [struggleMove];
 }
 
-function normalizeChoiceForUnit(side: SimSide, choice: SimulatorChoice): SimulatorChoice {
+function normalizeChoiceForUnit(side: SimSide, choice: SimulatorChoice, state?: SimulatorBattleState, sideId?: SideId): SimulatorChoice {
   if (choice.type === 'switch') {
     return choice;
   }
@@ -1355,7 +1618,7 @@ function normalizeChoiceForUnit(side: SimSide, choice: SimulatorChoice): Simulat
     return choice;
   }
 
-  const legalMoves = legalMovesForUnit(unit);
+  const legalMoves = legalMovesForUnit(unit, state, sideId);
   const chosenMove = legalMoves.find((move) => move.id === choice.moveId) ?? legalMoves[0] ?? null;
   if (!chosenMove) {
     return choice;
@@ -1367,9 +1630,16 @@ function normalizeChoiceForUnit(side: SimSide, choice: SimulatorChoice): Simulat
   };
 }
 
-function movePriority(move: PokemonMove, unit: SimUnit) {
+function movePriority(move: PokemonMove, unit: SimUnit, state?: SimulatorBattleState) {
   let priority = stagePriority(move);
-  if (abilityNameForUnit(unit) === 'Prankster' && move.category === 'Status') {
+  const ability = abilityNameForUnit(unit);
+  if (ability === 'Prankster' && move.category === 'Status') {
+    priority += 1;
+  }
+  if (ability === 'Triage' && (healingMoves.has(move.name) || drainingMoves.has(move.name) || move.name === 'Life Dew' || move.name === 'Heal Pulse' || move.name === 'Strength Sap')) {
+    priority += 3;
+  }
+  if (state && move.name === 'Grassy Glide' && state.environment.terrain === 'grassy' && unitGroundedInState(state, unit)) {
     priority += 1;
   }
   if (!movePriorityOverrides.has(move.name) && priorityMoves.has(move.name)) priority += 1;
@@ -1482,6 +1752,33 @@ function maybeInflictStatus(
   return target.build.status === status;
 }
 
+function maybeInflictConfusion(state: SimulatorBattleState, target: SimUnit, sourceMove: string) {
+  if (target.confusionTurns > 0) {
+    return false;
+  }
+
+  target.confusionTurns = randomDuration(2, 5);
+  state.log.unshift(`${target.pokemon.displayName} became confused by ${sourceMove}.`);
+  return true;
+}
+
+function applyEscapeBlock(state: SimulatorBattleState, source: SimUnit, target: SimUnit, sourceMove: string) {
+  target.escapeBlockedBySideId = unitSideId(state, source);
+  target.escapeBlockedByUnitIndex = sideForUnit(state, source).units.indexOf(source);
+  state.log.unshift(`${target.pokemon.displayName} can no longer switch because of ${sourceMove}.`);
+}
+
+function removeHeldItem(state: SimulatorBattleState, target: SimUnit, sourceMove: string) {
+  const item = getItemById(target.heldItemId);
+  if (!item || !itemCanBeRemoved(item)) {
+    return false;
+  }
+
+  target.heldItemId = null;
+  state.log.unshift(`${target.pokemon.displayName} lost its ${item.name} because of ${sourceMove}.`);
+  return true;
+}
+
 function resetStageModifiers(state: SimulatorBattleState) {
   for (const side of [state.player, state.opponent]) {
     for (const unit of side.units) {
@@ -1510,7 +1807,7 @@ function applyStatusMove(
 ) {
   const actingSideId: SideId = state.player === actingSide ? 'player' : 'opponent';
   const actorActiveSlot = actingSide.active.findIndex((entry) => entry === actingSide.units.indexOf(actor));
-  const priority = movePriority(move, actor);
+  const priority = movePriority(move, actor, state);
   const singleTargetRef: TargetRef | null = target
     ? {
         sideId: (actingSideId === 'player' ? 'opponent' : 'player') as SideId,
@@ -1542,6 +1839,14 @@ function applyStatusMove(
       state.log.unshift(`${targetRef.unit.pokemon.displayName} ignored Taunt because of ${targetAbility}.`);
       return false;
     }
+    if (aromaVeilProtectedMoves.has(move.name) && protectedByAromaVeil(state, targetRef.unit)) {
+      state.log.unshift(`${targetRef.unit.pokemon.displayName} ignored ${move.name} because Aroma Veil protects its side from move-locking effects.`);
+      return false;
+    }
+    if (isSoundMove(move) && targetAbility === 'Soundproof') {
+      state.log.unshift(`${targetRef.unit.pokemon.displayName} ignored ${move.name} because Soundproof blocks sound-based moves.`);
+      return false;
+    }
 
     const sideProtection = blockedBySideProtection(move, priority, targetRef);
     if (sideProtection) {
@@ -1551,6 +1856,11 @@ function applyStatusMove(
 
     if (targetRef.unit.protected && !moveBypassesProtect(actor, move)) {
       state.log.unshift(`${targetRef.unit.pokemon.displayName} blocked ${move.name} with ${targetRef.unit.protectSource ?? 'Protect'}.`);
+      return false;
+    }
+
+    if (targetRef.unit.substituteHp > 0) {
+      state.log.unshift(`${targetRef.unit.pokemon.displayName}'s substitute blocked ${move.name}.`);
       return false;
     }
 
@@ -1564,6 +1874,14 @@ function applyStatusMove(
 
     return true;
   });
+  const allyTargets = actingSide.active
+    .map((unitIndex, activeSlot) => ({ unitIndex, activeSlot, unit: actingSide.units[unitIndex] }))
+    .filter((entry): entry is { unitIndex: number; activeSlot: number; unit: SimUnit } => Boolean(entry.unit && !entry.unit.fainted && entry.unit !== actor))
+    .map((entry) => ({ sideId: actingSideId, side: actingSide, ally: true, ...entry })) satisfies TargetRef[];
+  const allOtherTargets = [
+    ...allyTargets,
+    ...accurateOpponentTargets,
+  ];
 
   if (protectionMoves.has(move.name)) {
     if (!protectionSucceeded(state, actor, move)) {
@@ -1633,14 +1951,19 @@ function applyStatusMove(
           ? healAmount(actor, 0.5)
           : healAmount(actor, 0.25);
     }
-    healUnit(actor, amount);
-    state.log.unshift(`${actor.pokemon.displayName} recovered health with ${move.name}.`);
+    if (tryHealUnit(state, actor, amount, move.name)) {
+      state.log.unshift(`${actor.pokemon.displayName} recovered health with ${move.name}.`);
+    }
     return;
   }
 
   if (move.name === 'Rest') {
     if (actor.currentHp >= actor.maxHp) {
       state.log.unshift(`${actor.pokemon.displayName}'s Rest failed because it is already at full HP.`);
+      return;
+    }
+    if (actor.healingPreventedTurns > 0) {
+      state.log.unshift(`${actor.pokemon.displayName}'s Rest failed because healing is blocked by Psychic Noise.`);
       return;
     }
     actor.currentHp = actor.maxHp;
@@ -1657,7 +1980,7 @@ function applyStatusMove(
     for (const activeIndex of actingSide.active) {
       const unit = actingSide.units[activeIndex];
       if (unit && !unit.fainted) {
-        healUnit(unit, healAmount(unit, 0.25));
+        tryHealUnit(state, unit, healAmount(unit, 0.25), 'Life Dew');
       }
     }
     state.log.unshift(`${actor.pokemon.displayName} restored its side with Life Dew.`);
@@ -1672,15 +1995,16 @@ function applyStatusMove(
       state.log.unshift(`${actor.pokemon.displayName}'s Heal Pulse failed because no ally was available.`);
       return;
     }
-    healUnit(ally, healAmount(ally, 0.5));
-    state.log.unshift(`${actor.pokemon.displayName} restored ${ally.pokemon.displayName} with Heal Pulse.`);
+    if (tryHealUnit(state, ally, healAmount(ally, 0.5), 'Heal Pulse')) {
+      state.log.unshift(`${actor.pokemon.displayName} restored ${ally.pokemon.displayName} with Heal Pulse.`);
+    }
     return;
   }
 
   if (move.name === 'Heal Bell') {
     for (const activeIndex of actingSide.active) {
       const unit = actingSide.units[activeIndex];
-      if (!unit) {
+      if (!unit || abilityNameForUnit(unit) === 'Soundproof') {
         continue;
       }
       unit.build.status = 'healthy';
@@ -1941,11 +2265,17 @@ function applyStatusMove(
   }
 
   if (move.name === 'Parting Shot' || move.name === 'Tearful Look' || move.name === 'Noble Roar') {
+    let changed = false;
     accurateOpponentTargets.forEach((targetRef) => {
-      applyStageChangesFromSource(state, actor, targetRef.unit, { attackStage: -1, specialAttackStage: -1 }, move.name);
+      changed = applyStageChangesFromSource(state, actor, targetRef.unit, { attackStage: -1, specialAttackStage: -1 }, move.name) || changed;
     });
-    state.log.unshift(`${actor.pokemon.displayName} softened the opposing side with ${move.name}.`);
-    return;
+    if (accurateOpponentTargets.length) {
+      state.log.unshift(`${actor.pokemon.displayName} softened the opposing side with ${move.name}.`);
+      if (move.name === 'Parting Shot' && changed) {
+        autoPivotToBench(state, actingSideId, actor, move.name, false);
+      }
+      return;
+    }
   }
 
   if (move.name === 'Baby-Doll Eyes') {
@@ -2122,6 +2452,17 @@ function applyStatusMove(
     return;
   }
 
+  if (move.name === 'Stockpile') {
+    if (actor.stockpileLevel >= 3) {
+      state.log.unshift(`${actor.pokemon.displayName}'s Stockpile failed because it is already stocked to the limit.`);
+      return;
+    }
+    actor.stockpileLevel += 1;
+    applyBoosts(actor, { defenseStage: 1, specialDefenseStage: 1 });
+    state.log.unshift(`${actor.pokemon.displayName} stockpiled and boosted its defenses.`);
+    return;
+  }
+
   if (move.name === 'Growth') {
     const growthBoost = state.environment.weather === 'sun' ? 2 : 1;
     applyBoosts(actor, { attackStage: growthBoost, specialAttackStage: growthBoost });
@@ -2132,11 +2473,599 @@ function applyStatusMove(
   if (move.name === 'Strength Sap') {
     const chosenTarget = accurateOpponentTargets[0]?.unit ?? null;
     if (chosenTarget) {
-      const stats = buildStats(chosenTarget.pokemon.baseStats, chosenTarget.build.evs, chosenTarget.build.natureId);
+      const stats = effectiveStatsForUnit(chosenTarget);
       const currentAttack = Math.max(1, Math.round(stats.attack * stageMultiplier(chosenTarget.build.attackStage)));
-      healUnit(actor, currentAttack);
+      tryHealUnit(state, actor, currentAttack, 'Strength Sap');
       applySingleStage(chosenTarget, 'attackStage', -1);
       state.log.unshift(`${actor.pokemon.displayName} drained strength from ${chosenTarget.pokemon.displayName}.`);
+      return;
+    }
+  }
+
+  if (move.name === 'Clangorous Soul') {
+    const hpCost = Math.max(1, Math.floor(actor.maxHp / 3));
+    if (actor.currentHp <= hpCost) {
+      state.log.unshift(`${actor.pokemon.displayName}'s Clangorous Soul failed because it lacked the HP to pay for it.`);
+      return;
+    }
+    lowerUnitHp(actor, hpCost);
+    applyBoosts(actor, {
+      attackStage: 1,
+      defenseStage: 1,
+      specialAttackStage: 1,
+      specialDefenseStage: 1,
+      speedStage: 1,
+    });
+    state.log.unshift(`${actor.pokemon.displayName} traded HP to power up with Clangorous Soul.`);
+    return;
+  }
+
+  if (move.name === 'After You') {
+    const chosenTarget = allyTargets[0]?.unit ?? null;
+    if (!chosenTarget) {
+      state.log.unshift(`${actor.pokemon.displayName}'s After You failed because no ally was available.`);
+      return;
+    }
+    chosenTarget.pendingAfterYou = true;
+    state.log.unshift(`${actor.pokemon.displayName} pushed ${chosenTarget.pokemon.displayName} to move next with After You.`);
+    return;
+  }
+
+  if (move.name === 'Sleep Talk') {
+    if (actor.build.status !== 'sleep') {
+      state.log.unshift(`${actor.pokemon.displayName}'s Sleep Talk failed because it is not asleep.`);
+      return;
+    }
+    const callableMoves = moveIdsForUnit(actor)
+      .filter((moveId) => moveId !== move.id)
+      .map((moveId) => findMove(actor, moveId))
+      .filter((candidate): candidate is PokemonMove => Boolean(candidate))
+      .filter((candidate) => !sleepTalkBlockedMoves.has(candidate.name) && !chargeMoves.has(candidate.name));
+    if (!callableMoves.length) {
+      state.log.unshift(`${actor.pokemon.displayName}'s Sleep Talk failed because it had no callable moves.`);
+      return;
+    }
+    const chosenMove = callableMoves[Math.floor(Math.random() * callableMoves.length)];
+    state.log.unshift(`${actor.pokemon.displayName}'s Sleep Talk called ${chosenMove.name}.`);
+    if (chosenMove.category === 'Status') {
+      applyStatusMove(state, actingSide, defendingSide, actor, chosenMove, target);
+    } else {
+      executeDamageMove(state, actor, target, chosenMove, actingSide, defendingSide);
+    }
+    return;
+  }
+
+  if (move.name === 'Attract') {
+    let applied = false;
+    accurateOpponentTargets.forEach((targetRef) => {
+      const targetAbility = abilityNameForUnit(targetRef.unit);
+      if (targetAbility === 'Oblivious' || targetRef.unit.basePokemon.baseSpecies === actor.basePokemon.baseSpecies) {
+        return;
+      }
+      targetRef.unit.infatuatedBySideId = actingSideId;
+      targetRef.unit.infatuatedByUnitIndex = actingSide.units.indexOf(actor);
+      applied = true;
+    });
+    if (applied) {
+      state.log.unshift(`${actor.pokemon.displayName} infatuated its target with Attract.`);
+      return;
+    }
+  }
+
+  if (move.name === 'Block' || move.name === 'Mean Look') {
+    accurateOpponentTargets.forEach((targetRef) => applyEscapeBlock(state, actor, targetRef.unit, move.name));
+    if (accurateOpponentTargets.length) {
+      return;
+    }
+  }
+
+  if (move.name === 'Confuse Ray' || move.name === 'Sweet Kiss') {
+    accurateOpponentTargets.forEach((targetRef) => maybeInflictConfusion(state, targetRef.unit, move.name));
+    return;
+  }
+
+  if (move.name === 'Copycat') {
+    if (!state.lastResolvedMoveId || state.lastResolvedMoveId === move.id) {
+      state.log.unshift(`${actor.pokemon.displayName}'s Copycat failed because no copyable move had been used yet.`);
+      return;
+    }
+    const copiedMove = dataset.moves.find((entry) => entry.id === state.lastResolvedMoveId) ?? null;
+    if (!copiedMove) {
+      state.log.unshift(`${actor.pokemon.displayName}'s Copycat failed.`);
+      return;
+    }
+    actor.lastMoveId = copiedMove.id;
+    state.log.unshift(`${actor.pokemon.displayName} copied ${copiedMove.name}.`);
+    if (copiedMove.category === 'Status') {
+      applyStatusMove(state, actingSide, defendingSide, actor, copiedMove, target);
+    } else {
+      executeDamageMove(state, actor, target, copiedMove, actingSide, defendingSide);
+    }
+    return;
+  }
+
+  if (move.name === 'Corrosive Gas') {
+    const removedAny = allOtherTargets.some((targetRef) => removeHeldItem(state, targetRef.unit, move.name));
+    if (removedAny) {
+      state.log.unshift(`${actor.pokemon.displayName} dissolved held items with Corrosive Gas.`);
+      return;
+    }
+  }
+
+  if (move.name === 'Dragon Cheer') {
+    for (const activeIndex of actingSide.active) {
+      const unit = actingSide.units[activeIndex];
+      if (!unit || unit.fainted) {
+        continue;
+      }
+      const boost = typeListForUnit(state, unit).includes('Dragon') ? 2 : 1;
+      unit.critStageBonus = Math.min(3, unit.critStageBonus + boost);
+    }
+    state.log.unshift(`${actor.pokemon.displayName} raised its side's critical-hit ratio with Dragon Cheer.`);
+    return;
+  }
+
+  if (move.name === 'Electrify') {
+    accurateOpponentTargets.forEach((targetRef) => {
+      targetRef.unit.electrifiedTurns = 1;
+    });
+    if (accurateOpponentTargets.length) {
+      state.log.unshift(`${actor.pokemon.displayName} electrified its target for this turn.`);
+      return;
+    }
+  }
+
+  if (move.name === 'Entrainment') {
+    const sourceAbility = abilityNameForUnit(actor);
+    if (!sourceAbility) {
+      state.log.unshift(`${actor.pokemon.displayName}'s Entrainment failed because it has no active Ability to share.`);
+      return;
+    }
+    accurateOpponentTargets.forEach((targetRef) => {
+      targetRef.unit.abilitySuppressed = false;
+      targetRef.unit.abilityOverrideName = sourceAbility;
+    });
+    if (accurateOpponentTargets.length) {
+      state.log.unshift(`${actor.pokemon.displayName} shared ${sourceAbility} with its target through Entrainment.`);
+      return;
+    }
+  }
+
+  if (move.name === 'Fairy Lock') {
+    state.fairyLockTurns = Math.max(state.fairyLockTurns, 2);
+    state.log.unshift(`${actor.pokemon.displayName} sealed the field with Fairy Lock.`);
+    return;
+  }
+
+  if (move.name === 'Focus Energy') {
+    actor.critStageBonus = Math.min(3, actor.critStageBonus + 2);
+    state.log.unshift(`${actor.pokemon.displayName} focused for critical hits.`);
+    return;
+  }
+
+  if (move.name === "Forest's Curse") {
+    accurateOpponentTargets.forEach((targetRef) => {
+      targetRef.unit.addedTypes = [...new Set([...targetRef.unit.addedTypes, 'Grass'])];
+    });
+    if (accurateOpponentTargets.length) {
+      state.log.unshift(`${actor.pokemon.displayName} added Grass typing with Forest's Curse.`);
+      return;
+    }
+  }
+
+  if (move.name === 'Gastro Acid') {
+    accurateOpponentTargets.forEach((targetRef) => {
+      targetRef.unit.abilitySuppressed = true;
+    });
+    if (accurateOpponentTargets.length) {
+      state.log.unshift(`${actor.pokemon.displayName} suppressed the target's Ability with Gastro Acid.`);
+      return;
+    }
+  }
+
+  if (move.name === 'Guard Split') {
+    const chosenTarget = accurateOpponentTargets[0]?.unit ?? null;
+    if (chosenTarget) {
+      const actorStats = effectiveStatsForUnit(actor);
+      const targetStats = effectiveStatsForUnit(chosenTarget);
+      const sharedDefense = Math.floor((actorStats.defense + targetStats.defense) / 2);
+      const sharedSpecialDefense = Math.floor((actorStats.specialDefense + targetStats.specialDefense) / 2);
+      actor.statOverrides = { ...actor.statOverrides, defense: sharedDefense, specialDefense: sharedSpecialDefense };
+      chosenTarget.statOverrides = { ...chosenTarget.statOverrides, defense: sharedDefense, specialDefense: sharedSpecialDefense };
+      actor.build.defenseStage = 0;
+      actor.build.specialDefenseStage = 0;
+      chosenTarget.build.defenseStage = 0;
+      chosenTarget.build.specialDefenseStage = 0;
+      state.log.unshift(`${actor.pokemon.displayName} shared defensive stats with Guard Split.`);
+      return;
+    }
+  }
+
+  if (move.name === 'Guard Swap') {
+    const chosenTarget = accurateOpponentTargets[0]?.unit ?? null;
+    if (chosenTarget) {
+      [actor.build.defenseStage, chosenTarget.build.defenseStage] = [chosenTarget.build.defenseStage, actor.build.defenseStage];
+      [actor.build.specialDefenseStage, chosenTarget.build.specialDefenseStage] = [chosenTarget.build.specialDefenseStage, actor.build.specialDefenseStage];
+      state.log.unshift(`${actor.pokemon.displayName} swapped defensive stat stages with Guard Swap.`);
+      return;
+    }
+  }
+
+  if (move.name === 'Healing Wish') {
+    actingSide.healingWishPending = true;
+    lowerUnitHp(actor, actor.currentHp);
+    state.log.unshift(`${actor.pokemon.displayName} fainted and left a Healing Wish behind.`);
+    return;
+  }
+
+  if (move.name === 'Memento') {
+    let changed = false;
+    accurateOpponentTargets.forEach((targetRef) => {
+      changed = applyStageChangesFromSource(state, actor, targetRef.unit, { attackStage: -2, specialAttackStage: -2 }, move.name) || changed;
+    });
+    if (changed) {
+      lowerUnitHp(actor, actor.currentHp);
+      state.log.unshift(`${actor.pokemon.displayName} gave itself up with Memento.`);
+      return;
+    }
+  }
+
+  if (move.name === 'Imprison') {
+    actor.imprisonActive = true;
+    state.log.unshift(`${actor.pokemon.displayName} sealed matching moves with Imprison.`);
+    return;
+  }
+
+  if (move.name === 'Instruct') {
+    const chosenTarget = allyTargets[0]?.unit ?? null;
+    if (!chosenTarget || !chosenTarget.lastMoveId || chosenTarget.lastMoveId === 'instruct') {
+      state.log.unshift(`${actor.pokemon.displayName}'s Instruct failed.`);
+      return;
+    }
+    const repeatedMove = findMove(chosenTarget, chosenTarget.lastMoveId) ?? dataset.moves.find((entry) => entry.id === chosenTarget.lastMoveId) ?? null;
+    if (!repeatedMove || repeatedMove.name === 'Instruct' || repeatedMove.name === 'Copycat') {
+      state.log.unshift(`${actor.pokemon.displayName}'s Instruct failed.`);
+      return;
+    }
+    state.log.unshift(`${actor.pokemon.displayName} ordered ${chosenTarget.pokemon.displayName} to repeat ${repeatedMove.name}.`);
+    if (repeatedMove.category === 'Status') {
+      applyStatusMove(state, sideForUnit(state, chosenTarget), opposingSide(state, unitSideId(state, chosenTarget)), chosenTarget, repeatedMove, resolveMoveTarget(state, opposingSide(state, unitSideId(state, chosenTarget)), 0, repeatedMove));
+    } else {
+      executeDamageMove(state, chosenTarget, resolveMoveTarget(state, opposingSide(state, unitSideId(state, chosenTarget)), 0, repeatedMove), repeatedMove, sideForUnit(state, chosenTarget), opposingSide(state, unitSideId(state, chosenTarget)));
+    }
+    return;
+  }
+
+  if (move.name === 'Lock-On') {
+    const chosenTarget = accurateOpponentTargets[0]?.unit ?? null;
+    if (chosenTarget) {
+      actor.lockOnTurns = 2;
+      actor.lockOnTargetSideId = unitSideId(state, chosenTarget);
+      actor.lockOnTargetUnitIndex = sideForUnit(state, chosenTarget).units.indexOf(chosenTarget);
+      state.log.unshift(`${actor.pokemon.displayName} locked on to ${chosenTarget.pokemon.displayName}.`);
+      return;
+    }
+  }
+
+  if (move.name === 'Magic Powder') {
+    accurateOpponentTargets.forEach((targetRef) => {
+      targetRef.unit.typeOverride = ['Psychic'];
+      targetRef.unit.addedTypes = [];
+    });
+    if (accurateOpponentTargets.length) {
+      state.log.unshift(`${actor.pokemon.displayName} changed the target to Psychic-type with Magic Powder.`);
+      return;
+    }
+  }
+
+  if (move.name === 'Magnet Rise') {
+    actor.magnetRiseTurns = 5;
+    state.log.unshift(`${actor.pokemon.displayName} rose into the air with Magnet Rise.`);
+    return;
+  }
+
+  if (move.name === 'Magnetic Flux') {
+    let boosted = false;
+    for (const activeIndex of actingSide.active) {
+      const unit = actingSide.units[activeIndex];
+      const ability = unit ? abilityNameForUnit(unit) : null;
+      if (!unit || unit.fainted || (ability !== 'Plus' && ability !== 'Minus')) {
+        continue;
+      }
+      boosted = applyStageChangesFromSource(state, actor, unit, { defenseStage: 1, specialDefenseStage: 1 }, move.name, { treatAsOpposing: false }) || boosted;
+    }
+    if (boosted) {
+      state.log.unshift(`${actor.pokemon.displayName} energized Plus and Minus allies with Magnetic Flux.`);
+      return;
+    }
+  }
+
+  if (move.name === 'Power Split') {
+    const chosenTarget = accurateOpponentTargets[0]?.unit ?? null;
+    if (chosenTarget) {
+      const actorStats = effectiveStatsForUnit(actor);
+      const targetStats = effectiveStatsForUnit(chosenTarget);
+      const sharedAttack = Math.floor((actorStats.attack + targetStats.attack) / 2);
+      const sharedSpecialAttack = Math.floor((actorStats.specialAttack + targetStats.specialAttack) / 2);
+      actor.statOverrides = { ...actor.statOverrides, attack: sharedAttack, specialAttack: sharedSpecialAttack };
+      chosenTarget.statOverrides = { ...chosenTarget.statOverrides, attack: sharedAttack, specialAttack: sharedSpecialAttack };
+      actor.build.attackStage = 0;
+      actor.build.specialAttackStage = 0;
+      chosenTarget.build.attackStage = 0;
+      chosenTarget.build.specialAttackStage = 0;
+      state.log.unshift(`${actor.pokemon.displayName} shared offensive stats with Power Split.`);
+      return;
+    }
+  }
+
+  if (move.name === 'Power Swap') {
+    const chosenTarget = accurateOpponentTargets[0]?.unit ?? null;
+    if (chosenTarget) {
+      [actor.build.attackStage, chosenTarget.build.attackStage] = [chosenTarget.build.attackStage, actor.build.attackStage];
+      [actor.build.specialAttackStage, chosenTarget.build.specialAttackStage] = [chosenTarget.build.specialAttackStage, actor.build.specialAttackStage];
+      state.log.unshift(`${actor.pokemon.displayName} swapped offensive stat stages with Power Swap.`);
+      return;
+    }
+  }
+
+  if (move.name === 'Power Trick') {
+    const actorStats = effectiveStatsForUnit(actor);
+    actor.statOverrides = {
+      ...actor.statOverrides,
+      attack: actorStats.defense,
+      defense: actorStats.attack,
+    };
+    state.log.unshift(`${actor.pokemon.displayName} swapped its Attack and Defense with Power Trick.`);
+    return;
+  }
+
+  if (move.name === 'Psych Up') {
+    const chosenTarget = accurateOpponentTargets[0]?.unit ?? null;
+    if (chosenTarget) {
+      copyBoostState(chosenTarget, actor);
+      state.log.unshift(`${actor.pokemon.displayName} copied stat changes with Psych Up.`);
+      return;
+    }
+  }
+
+  if (move.name === 'Quash') {
+    accurateOpponentTargets.forEach((targetRef) => {
+      targetRef.unit.quashedThisTurn = true;
+    });
+    if (accurateOpponentTargets.length) {
+      state.log.unshift(`${actor.pokemon.displayName} pushed its target to the end of the turn with Quash.`);
+      return;
+    }
+  }
+
+  if (move.name === 'Recycle') {
+    if (!actor.heldItemId && actor.lastConsumedItemId) {
+      actor.heldItemId = actor.lastConsumedItemId;
+      actor.lastConsumedItemId = null;
+      state.log.unshift(`${actor.pokemon.displayName} restored its item with Recycle.`);
+      return;
+    }
+    state.log.unshift(`${actor.pokemon.displayName}'s Recycle failed.`);
+    return;
+  }
+
+  if (move.name === 'Reflect Type') {
+    const chosenTarget = accurateOpponentTargets[0]?.unit ?? null;
+    if (chosenTarget) {
+      actor.typeOverride = typeListForUnit(state, chosenTarget);
+      actor.addedTypes = [];
+      state.log.unshift(`${actor.pokemon.displayName} copied ${chosenTarget.pokemon.displayName}'s typing with Reflect Type.`);
+      return;
+    }
+  }
+
+  if (move.name === 'Role Play') {
+    const chosenTarget = accurateOpponentTargets[0]?.unit ?? null;
+    const copiedAbility = chosenTarget ? abilityNameForUnit(chosenTarget) : null;
+    if (copiedAbility) {
+      actor.abilitySuppressed = false;
+      actor.abilityOverrideName = copiedAbility;
+      state.log.unshift(`${actor.pokemon.displayName} copied ${copiedAbility} with Role Play.`);
+      return;
+    }
+  }
+
+  if (move.name === 'Shed Tail') {
+    const hpCost = Math.max(1, Math.floor(actor.maxHp / 2));
+    const replacement = firstAvailableBench(actingSide);
+    const currentIndex = actingSide.units.indexOf(actor);
+    const activeSlot = actingSide.active.findIndex((entry) => entry === currentIndex);
+    if (actor.currentHp <= hpCost || replacement === null || activeSlot < 0) {
+      state.log.unshift(`${actor.pokemon.displayName}'s Shed Tail failed.`);
+      return;
+    }
+    lowerUnitHp(actor, hpCost);
+    const substituteHp = Math.max(1, Math.floor(actor.maxHp / 4));
+    switchOutUnit(actingSide, currentIndex);
+    actingSide.active[activeSlot] = replacement;
+    actingSide.bench = [...actingSide.bench.filter((entry) => entry !== replacement), currentIndex];
+    actingSide.units[replacement].turnsActive = 0;
+    actingSide.units[replacement].substituteHp = substituteHp;
+    state.log.unshift(`${actor.pokemon.displayName} passed a substitute with Shed Tail to ${actingSide.units[replacement].pokemon.displayName}.`);
+    switchInUnit(state, actingSideId, replacement, false);
+    return;
+  }
+
+  if (move.name === 'Simple Beam') {
+    accurateOpponentTargets.forEach((targetRef) => {
+      targetRef.unit.abilitySuppressed = false;
+      targetRef.unit.abilityOverrideName = 'Simple';
+    });
+    if (accurateOpponentTargets.length) {
+      state.log.unshift(`${actor.pokemon.displayName} changed the target's Ability to Simple.`);
+      return;
+    }
+  }
+
+  if (move.name === 'Skill Swap') {
+    const chosenTarget = accurateOpponentTargets[0]?.unit ?? null;
+    if (chosenTarget) {
+      const actorAbility = abilityNameForUnit(actor);
+      const targetAbility = abilityNameForUnit(chosenTarget);
+      actor.abilitySuppressed = false;
+      chosenTarget.abilitySuppressed = false;
+      actor.abilityOverrideName = targetAbility;
+      chosenTarget.abilityOverrideName = actorAbility;
+      state.log.unshift(`${actor.pokemon.displayName} swapped Abilities with ${chosenTarget.pokemon.displayName}.`);
+      return;
+    }
+  }
+
+  if (move.name === 'Soak') {
+    accurateOpponentTargets.forEach((targetRef) => {
+      targetRef.unit.typeOverride = ['Water'];
+      targetRef.unit.addedTypes = [];
+    });
+    if (accurateOpponentTargets.length) {
+      state.log.unshift(`${actor.pokemon.displayName} soaked the target into Water typing.`);
+      return;
+    }
+  }
+
+  if (move.name === 'Speed Swap') {
+    const chosenTarget = accurateOpponentTargets[0]?.unit ?? null;
+    if (chosenTarget) {
+      const actorSpeed = effectiveStatsForUnit(actor).speed;
+      const targetSpeed = effectiveStatsForUnit(chosenTarget).speed;
+      actor.statOverrides = { ...actor.statOverrides, speed: targetSpeed };
+      chosenTarget.statOverrides = { ...chosenTarget.statOverrides, speed: actorSpeed };
+      actor.build.speedStage = 0;
+      chosenTarget.build.speedStage = 0;
+      state.log.unshift(`${actor.pokemon.displayName} swapped Speed with ${chosenTarget.pokemon.displayName}.`);
+      return;
+    }
+  }
+
+  if (move.name === 'Spite') {
+    const chosenTarget = accurateOpponentTargets[0]?.unit ?? null;
+    if (chosenTarget?.lastMoveId) {
+      spendMovePp(chosenTarget, chosenTarget.lastMoveId, 4);
+      state.log.unshift(`${actor.pokemon.displayName} drained PP from ${chosenTarget.pokemon.displayName}'s last move with Spite.`);
+      return;
+    }
+  }
+
+  if (move.name === 'Substitute') {
+    const hpCost = Math.max(1, Math.floor(actor.maxHp / 4));
+    if (actor.currentHp <= hpCost || actor.substituteHp > 0) {
+      state.log.unshift(`${actor.pokemon.displayName}'s Substitute failed.`);
+      return;
+    }
+    lowerUnitHp(actor, hpCost);
+    actor.substituteHp = hpCost;
+    state.log.unshift(`${actor.pokemon.displayName} made a Substitute.`);
+    return;
+  }
+
+  if (move.name === 'Swallow') {
+    if (actor.stockpileLevel <= 0) {
+      state.log.unshift(`${actor.pokemon.displayName}'s Swallow failed without Stockpile.`);
+      return;
+    }
+    const healFraction = actor.stockpileLevel >= 3 ? 1 : actor.stockpileLevel === 2 ? 0.5 : 0.25;
+    tryHealUnit(state, actor, healAmount(actor, healFraction), 'Swallow');
+    actor.stockpileLevel = 0;
+    state.log.unshift(`${actor.pokemon.displayName} restored HP with Swallow.`);
+    return;
+  }
+
+  if (move.name === 'Switcheroo' || move.name === 'Trick') {
+    const chosenTarget = accurateOpponentTargets[0]?.unit ?? null;
+    if (chosenTarget) {
+      const actorItem = getItemById(actor.heldItemId);
+      const targetItem = getItemById(chosenTarget.heldItemId);
+      if ((actorItem && !itemCanBeRemoved(actorItem)) || (targetItem && !itemCanBeRemoved(targetItem))) {
+        state.log.unshift(`${actor.pokemon.displayName}'s ${move.name} failed because one item could not be exchanged.`);
+        return;
+      }
+      [actor.heldItemId, chosenTarget.heldItemId] = [chosenTarget.heldItemId, actor.heldItemId];
+      state.log.unshift(`${actor.pokemon.displayName} swapped held items with ${chosenTarget.pokemon.displayName} using ${move.name}.`);
+      return;
+    }
+  }
+
+  if (move.name === 'Teatime') {
+    let ateAnyBerry = false;
+    for (const side of [state.player, state.opponent]) {
+      for (const activeIndex of side.active) {
+        const unit = side.units[activeIndex];
+        const item = unit ? activeItemForUnit(state, unit) : null;
+        if (!unit || !item || item.category !== 'berry') {
+          continue;
+        }
+        ateAnyBerry = true;
+        if (healingBerries.has(item.name)) {
+          const berryValue = healingBerries.get(item.name) ?? 0.25;
+          tryHealUnit(state, unit, berryValue < 1 ? healAmount(unit, berryValue) : berryValue, `${item.name} via Teatime`);
+        } else if (unit.build.status !== 'healthy') {
+          maybeConsumeStatusBerry(state, unit);
+          continue;
+        }
+        unit.lastConsumedItemId = unit.heldItemId;
+        unit.heldItemId = null;
+        state.log.unshift(`${unit.pokemon.displayName} ate its ${item.name} because of Teatime.`);
+      }
+    }
+    if (ateAnyBerry) {
+      return;
+    }
+  }
+
+  if (move.name === 'Teeter Dance') {
+    allOtherTargets.forEach((targetRef) => {
+      maybeInflictConfusion(state, targetRef.unit, move.name);
+    });
+    state.log.unshift(`${actor.pokemon.displayName} confused the field with Teeter Dance.`);
+    return;
+  }
+
+  if (move.name === 'Transform') {
+    const chosenTarget = accurateOpponentTargets[0]?.unit ?? null;
+    if (chosenTarget) {
+      actor.transformed = true;
+      actor.pokemon = chosenTarget.pokemon;
+      actor.abilitySuppressed = chosenTarget.abilitySuppressed;
+      actor.abilityOverrideName = abilityNameForUnit(chosenTarget);
+      actor.typeOverride = typeListForUnit(state, chosenTarget);
+      actor.addedTypes = [];
+      const targetStats = effectiveStatsForUnit(chosenTarget);
+      actor.statOverrides = {
+        attack: targetStats.attack,
+        defense: targetStats.defense,
+        specialAttack: targetStats.specialAttack,
+        specialDefense: targetStats.specialDefense,
+        speed: targetStats.speed,
+      };
+      actor.transformedMoveIds = moveIdsForUnit(chosenTarget).slice(0, 4);
+      actor.movePp = Object.fromEntries(actor.transformedMoveIds.map((moveId) => [moveId, 5]));
+      copyBoostState(chosenTarget, actor);
+      state.log.unshift(`${actor.pokemon.displayName} transformed into ${chosenTarget.pokemon.displayName}.`);
+      return;
+    }
+  }
+
+  if (move.name === 'Trick-or-Treat') {
+    accurateOpponentTargets.forEach((targetRef) => {
+      targetRef.unit.addedTypes = [...new Set([...targetRef.unit.addedTypes, 'Ghost'])];
+    });
+    if (accurateOpponentTargets.length) {
+      state.log.unshift(`${actor.pokemon.displayName} added Ghost typing with Trick-or-Treat.`);
+      return;
+    }
+  }
+
+  if (move.name === 'Worry Seed') {
+    accurateOpponentTargets.forEach((targetRef) => {
+      targetRef.unit.abilitySuppressed = false;
+      targetRef.unit.abilityOverrideName = 'Insomnia';
+    });
+    if (accurateOpponentTargets.length) {
+      state.log.unshift(`${actor.pokemon.displayName} changed the target's Ability to Insomnia.`);
       return;
     }
   }
@@ -2160,7 +3089,40 @@ function chanceRoll(percent: number) {
   return Math.random() <= percent / 100;
 }
 
+function confusionSelfHitDamage(unit: SimUnit) {
+  const stats = effectiveStatsForUnit(unit);
+  const attack = Math.max(1, Math.round(stats.attack * stageMultiplier(unit.build.attackStage)));
+  const defense = Math.max(1, Math.round(stats.defense * stageMultiplier(unit.build.defenseStage)));
+  const base = Math.floor(((((2 * 50) / 5 + 2) * 40 * attack) / defense) / 50) + 2;
+  return Math.max(1, Math.floor(base * 0.92));
+}
+
+function criticalStageForMove(unit: SimUnit, move: PokemonMove) {
+  const highCritMoves = new Set(['Air Cutter', 'Blaze Kick', 'Cross Poison', 'Drill Run', 'Leaf Blade', 'Night Slash', 'Psycho Cut', 'Razor Leaf', 'Shadow Claw', 'Slash', 'Stone Edge']);
+  return unit.critStageBonus + (highCritMoves.has(move.name) ? 1 : 0);
+}
+
+function criticalHitRoll(unit: SimUnit, move: PokemonMove) {
+  const stage = criticalStageForMove(unit, move);
+  if (stage >= 3) {
+    return true;
+  }
+  if (stage === 2) {
+    return Math.random() < 0.5;
+  }
+  if (stage === 1) {
+    return Math.random() < 0.125;
+  }
+  return Math.random() < 1 / 24;
+}
+
 function applyTargetStatEffect(state: SimulatorBattleState, actor: SimUnit, target: SimUnit, move: PokemonMove) {
+  if (abilityNameForUnit(target) === 'Shield Dust' && unitSideId(state, actor) !== unitSideId(state, target)) {
+    return;
+  }
+  if (secondaryEffectsSuppressedByAbility(actor, move) && unitSideId(state, actor) !== unitSideId(state, target)) {
+    return;
+  }
   switch (move.name) {
     case 'Clear Smog':
       resetUnitStageModifiers(target);
@@ -2251,6 +3213,12 @@ function applyTargetStatEffect(state: SimulatorBattleState, actor: SimUnit, targ
 }
 
 function applyTargetStatusEffect(state: SimulatorBattleState, actor: SimUnit, target: SimUnit, move: PokemonMove) {
+  if (abilityNameForUnit(target) === 'Shield Dust' && unitSideId(state, actor) !== unitSideId(state, target)) {
+    return;
+  }
+  if (secondaryEffectsSuppressedByAbility(actor, move) && unitSideId(state, actor) !== unitSideId(state, target)) {
+    return;
+  }
   switch (move.name) {
     case 'Inferno':
       maybeInflictStatus(state, actor, target, 'burn', move.name);
@@ -2262,6 +3230,20 @@ function applyTargetStatusEffect(state: SimulatorBattleState, actor: SimUnit, ta
     case 'Spirit Shackle':
       target.trappedByMove = move.name;
       state.log.unshift(`${target.pokemon.displayName} can no longer switch because of Spirit Shackle.`);
+      return;
+    case 'Psychic Noise':
+      if (protectedByAromaVeil(state, target)) {
+        state.log.unshift(`${target.pokemon.displayName} ignored Psychic Noise's recovery lock because Aroma Veil protects its side.`);
+        return;
+      }
+      if (target.healingPreventedTurns <= 0) {
+        target.healingPreventedTurns = 2;
+        state.log.unshift(`${target.pokemon.displayName} cannot recover HP for two turns because of Psychic Noise.`);
+      }
+      return;
+    case 'Throat Chop':
+      target.throatChopTurns = Math.max(target.throatChopTurns, 2);
+      state.log.unshift(`${target.pokemon.displayName} cannot use sound-based moves for two turns because of Throat Chop.`);
       return;
     case 'Syrup Bomb':
       target.syrupTurns = Math.max(target.syrupTurns, 3);
@@ -2436,6 +3418,9 @@ function executeDamageMove(
   defendingSide: SimSide,
 ) {
   const isStruggle = move.id === struggleMove.id;
+  const activeMove = actor.electrifiedTurns > 0 && move.category !== 'Status'
+    ? { ...move, type: 'Electric' as const }
+    : move;
   if (move.name === 'Fake Out' && actor.turnsActive > 0) {
     state.log.unshift(`${actor.pokemon.displayName}'s Fake Out failed because it is no longer freshly sent out.`);
     return;
@@ -2443,6 +3428,16 @@ function executeDamageMove(
 
   if (move.name === 'First Impression' && actor.turnsActive > 0) {
     state.log.unshift(`${actor.pokemon.displayName}'s First Impression failed because it is no longer freshly sent out.`);
+    return;
+  }
+
+  if (move.name === 'Snore' && actor.build.status !== 'sleep') {
+    state.log.unshift(`${actor.pokemon.displayName}'s Snore failed because it is not asleep.`);
+    return;
+  }
+
+  if (actor.throatChopTurns > 0 && isSoundMove(move)) {
+    state.log.unshift(`${actor.pokemon.displayName} could not use ${move.name} because Throat Chop is still active.`);
     return;
   }
 
@@ -2463,11 +3458,28 @@ function executeDamageMove(
     targetRefs = resolveTargetRefs(state, actingSideId, actingSide, defendingSide, actor, 0, move);
   }
 
+  if (move.name === 'Expanding Force' && state.environment.terrain === 'psychic' && unitGroundedInState(state, actor)) {
+    targetRefs = defendingSide.active
+      .map((unitIndex, activeSlot) => ({ sideId: (actingSideId === 'player' ? 'opponent' : 'player') as SideId, side: defendingSide, unit: defendingSide.units[unitIndex], activeSlot, unitIndex, ally: false }))
+      .filter((entry): entry is TargetRef => Boolean(entry.unit && !entry.unit.fainted));
+  }
+
+  if (move.name === 'Dragon Darts') {
+    const liveOpponents = defendingSide.active
+      .map((unitIndex, activeSlot) => ({ sideId: (actingSideId === 'player' ? 'opponent' : 'player') as SideId, side: defendingSide, unit: defendingSide.units[unitIndex], activeSlot, unitIndex, ally: false }))
+      .filter((entry): entry is TargetRef => Boolean(entry.unit && !entry.unit.fainted));
+    if (liveOpponents.length > 1) {
+      targetRefs = liveOpponents.slice(0, 2);
+    } else if (targetRefs.length === 1) {
+      targetRefs = [targetRefs[0], { ...targetRefs[0] }];
+    }
+  }
+
   if (!targetRefs.length) {
     return;
   }
 
-  const priority = movePriority(move, actor);
+  const priority = movePriority(move, actor, state);
   const spreadTargetsHit = moveScope(move) !== 'single' && targetRefs.length > 1 ? 2 : 1;
   let totalDamage = 0;
   let landedHit = false;
@@ -2501,17 +3513,37 @@ function executeDamageMove(
       maybeInflictStatus(state, targetRef.unit, actor, 'burn', 'Beak Blast');
     }
 
-    const result = calculateDamage(currentBuild(actor), currentBuild(targetRef.unit), move, {
-      ...screenAwareEnvironment(state, targetRef.side),
-      helpingHand: actor.helpingHand,
-      spreadTargetsHit,
-    });
-    if (!result) {
-      state.log.unshift(`${actor.pokemon.displayName} used ${move.name}, but no direct damage line applied.`);
-      continue;
+    let damage = 0;
+    let result: DamageResult | null = null;
+    if (move.name === 'Final Gambit') {
+      damage = actor.currentHp;
+    } else {
+      const criticalHit = criticalHitRoll(actor, activeMove);
+      result = calculateDamageWithOverrides(currentBuild(actor), currentBuild(targetRef.unit), activeMove, {
+        ...screenAwareEnvironment(state, targetRef.side),
+        helpingHand: actor.helpingHand,
+        spreadTargetsHit,
+        criticalHit,
+      }, {
+        attackerPokemon: actor.pokemon,
+        defenderPokemon: targetRef.unit.pokemon,
+        attackerStats: effectiveStatsForUnit(actor),
+        defenderStats: effectiveStatsForUnit(targetRef.unit),
+        attackerTypes: typeListForUnit(state, actor),
+        defenderTypes: typeListForUnit(state, targetRef.unit),
+        attackerAbility: abilityNameForUnit(actor),
+        defenderAbility: abilityNameForUnit(targetRef.unit),
+        attackerGrounded: unitGroundedInState(state, actor),
+        defenderGrounded: unitGroundedInState(state, targetRef.unit),
+        attackerSpeed: combatSpeed(actor, actingSide.tailwindTurns, state.trickRoomTurns),
+        defenderSpeed: combatSpeed(targetRef.unit, targetRef.side.tailwindTurns, state.trickRoomTurns),
+      });
+      if (!result) {
+        state.log.unshift(`${actor.pokemon.displayName} used ${move.name}, but no direct damage line applied.`);
+        continue;
+      }
+      damage = Math.round((result.minDamage + result.maxDamage) / 2);
     }
-
-    let damage = Math.round((result.minDamage + result.maxDamage) / 2);
     if (actor.helpingHand) {
       damage = Math.round(damage * 1.5);
     }
@@ -2523,6 +3555,19 @@ function executeDamageMove(
       state.log.unshift(`${actor.pokemon.displayName} pierced protection with Unseen Fist at reduced damage.`);
     }
 
+    if (targetRef.unit.substituteHp > 0) {
+      const dealtToSubstitute = Math.min(targetRef.unit.substituteHp, damage);
+      targetRef.unit.substituteHp = Math.max(0, targetRef.unit.substituteHp - dealtToSubstitute);
+      landedHit = true;
+      totalDamage += dealtToSubstitute;
+      actor.damageDealt += dealtToSubstitute;
+      state.log.unshift(`${actor.pokemon.displayName} hit ${targetRef.unit.pokemon.displayName}'s substitute for ${dealtToSubstitute} damage.`);
+      if (targetRef.unit.substituteHp <= 0) {
+        state.log.unshift(`${targetRef.unit.pokemon.displayName}'s substitute broke.`);
+      }
+      continue;
+    }
+
     const dealt = lowerUnitHp(targetRef.unit, damage);
     if (dealt <= 0) {
       continue;
@@ -2532,9 +3577,9 @@ function executeDamageMove(
     totalDamage += dealt;
     actor.damageDealt += dealt;
     state.log.unshift(`${actor.pokemon.displayName} used ${move.name} on ${targetRef.unit.pokemon.displayName} for ${dealt} damage.`);
-    if (result.effectiveness >= 2) {
+    if (result && result.effectiveness >= 2) {
       state.log.unshift(`It's super effective against ${targetRef.unit.pokemon.displayName}.`);
-    } else if (result.effectiveness > 0 && result.effectiveness < 1) {
+    } else if (result && result.effectiveness > 0 && result.effectiveness < 1) {
       state.log.unshift(`${targetRef.unit.pokemon.displayName} resisted the hit.`);
     }
     if (targetRef.unit.fainted) {
@@ -2548,11 +3593,37 @@ function executeDamageMove(
     maybeTriggerHealingBerry(state, targetRef.unit);
     applyProtectionContactRebound(state, targetRef.unit, actor, move);
 
-    if (move.name === 'Fake Out' && targetRef.unit.turnsActive === 0 && !targetRef.unit.fainted && !unitAbilitiesMatch(targetRef.unit, flinchShieldAbilities)) {
+    if (move.name === 'Knock Off') {
+      removeHeldItem(state, targetRef.unit, move.name);
+    }
+
+    if (itemStealMoves.has(move.name) && !actor.heldItemId) {
+      const stolenItem = getItemById(targetRef.unit.heldItemId);
+      if (stolenItem && itemCanBeRemoved(stolenItem)) {
+        actor.heldItemId = targetRef.unit.heldItemId;
+        targetRef.unit.heldItemId = null;
+        state.log.unshift(`${actor.pokemon.displayName} stole ${targetRef.unit.pokemon.displayName}'s ${stolenItem.name} with ${move.name}.`);
+      }
+    }
+
+    if (
+      move.name === 'Fake Out' &&
+      targetRef.unit.turnsActive === 0 &&
+      !targetRef.unit.fainted &&
+      !unitAbilitiesMatch(targetRef.unit, flinchShieldAbilities) &&
+      !secondaryEffectsSuppressedByAbility(actor, move)
+    ) {
       targetRef.unit.flinched = true;
       state.log.unshift(`${targetRef.unit.pokemon.displayName} flinched.`);
     } else if (move.name === 'Fake Out' && targetRef.unit.turnsActive === 0 && unitAbilitiesMatch(targetRef.unit, flinchShieldAbilities)) {
       state.log.unshift(`${targetRef.unit.pokemon.displayName} held steady through Fake Out with Inner Focus.`);
+    }
+
+    if (move.name !== 'Fake Out' && !secondaryEffectsSuppressedByAbility(actor, move)) {
+      const effectChance = move.effectChance ?? 0;
+      if (/flinch/i.test(move.description) && effectChance > 0) {
+        triggerFlinch(state, targetRef.unit, move, effectChance);
+      }
     }
 
     applyTargetStatEffect(state, actor, targetRef.unit, move);
@@ -2563,8 +3634,9 @@ function executeDamageMove(
   }
 
   if (drainingMoves.has(move.name) && totalDamage > 0 && !actor.fainted) {
-    healUnit(actor, Math.max(1, Math.round(totalDamage * 0.5)));
-    state.log.unshift(`${actor.pokemon.displayName} drained health back.`);
+    if (tryHealUnit(state, actor, Math.max(1, Math.round(totalDamage * 0.5)), move.name)) {
+      state.log.unshift(`${actor.pokemon.displayName} drained health back.`);
+    }
   }
 
   if (move.name === 'Beak Blast') {
@@ -2595,30 +3667,75 @@ function executeDamageMove(
     state.log.unshift(`${actor.pokemon.displayName} must recharge after ${move.name}.`);
   }
 
+  if (selfDestructMoves.has(move.name) && !actor.fainted) {
+    lowerUnitHp(actor, actor.currentHp);
+    state.log.unshift(`${actor.pokemon.displayName} fainted after using ${move.name}.`);
+  }
+
   applySelfAfterAttack(state, actor, move, landedHit);
   actor.helpingHand = false;
 }
 
-function processPreMoveStatus(state: SimulatorBattleState, actor: SimUnit) {
+function processPreMoveStatus(state: SimulatorBattleState, actor: SimUnit, selectedMoveName: string | null = null) {
   maybeConsumeStatusBerry(state, actor);
+  const sleepUsableMove = selectedMoveName === 'Sleep Talk' || selectedMoveName === 'Snore';
+
+  if (actor.infatuatedBySideId && actor.infatuatedByUnitIndex !== null) {
+    const sourceSide = sideForId(state, actor.infatuatedBySideId);
+    const sourceUnit = sourceSide.units[actor.infatuatedByUnitIndex] ?? null;
+    const sourceStillActive = Boolean(
+      sourceUnit &&
+      !sourceUnit.fainted &&
+      sourceSide.active.includes(actor.infatuatedByUnitIndex),
+    );
+    if (!sourceStillActive) {
+      actor.infatuatedBySideId = null;
+      actor.infatuatedByUnitIndex = null;
+    } else if (Math.random() < 0.5) {
+      state.log.unshift(`${actor.pokemon.displayName} is immobilized by infatuation.`);
+      return false;
+    }
+  }
+
+  if (actor.confusionTurns > 0) {
+    actor.confusionTurns = Math.max(0, actor.confusionTurns - 1);
+    if (Math.random() < 1 / 3) {
+      const damage = confusionSelfHitDamage(actor);
+      lowerUnitHp(actor, damage);
+      state.log.unshift(`${actor.pokemon.displayName} hurt itself in confusion for ${damage} damage.`);
+      maybeTriggerHealingBerry(state, actor);
+      return false;
+    }
+
+    if (actor.confusionTurns === 0) {
+      state.log.unshift(`${actor.pokemon.displayName} snapped out of confusion.`);
+    }
+  }
 
   if (actor.build.status === 'sleep') {
     actor.sleepTurns += 1;
+    let stillAsleep = false;
     if (actor.sleepSource === 'rest') {
-      if (actor.sleepTurns < 3) {
+      stillAsleep = actor.sleepTurns < 3;
+      if (stillAsleep && !sleepUsableMove) {
         state.log.unshift(`${actor.pokemon.displayName} is asleep.`);
         return false;
       }
     } else {
       if (actor.sleepTurns === 1) {
-        state.log.unshift(`${actor.pokemon.displayName} is asleep.`);
-        return false;
+        stillAsleep = true;
+      } else if (actor.sleepTurns === 2 && Math.random() > 1 / 3) {
+        stillAsleep = true;
       }
 
-      if (actor.sleepTurns === 2 && Math.random() > 1 / 3) {
+      if (stillAsleep && !sleepUsableMove) {
         state.log.unshift(`${actor.pokemon.displayName} is asleep.`);
         return false;
       }
+    }
+
+    if (stillAsleep) {
+      return true;
     }
 
     actor.build.status = 'healthy';
@@ -2644,6 +3761,14 @@ function processPreMoveStatus(state: SimulatorBattleState, actor: SimUnit) {
     return false;
   }
 
+  if (actor.lockOnTurns > 0) {
+    actor.lockOnTurns = Math.max(0, actor.lockOnTurns - 1);
+    if (actor.lockOnTurns === 0) {
+      actor.lockOnTargetSideId = null;
+      actor.lockOnTargetUnitIndex = null;
+    }
+  }
+
   return true;
 }
 
@@ -2657,8 +3782,11 @@ function endTurnSideEffects(state: SimulatorBattleState, side: SimSide) {
     unit.turnsActive += activeOnField ? 1 : 0;
     clearProtectionState(unit);
     unit.flinched = false;
-    unit.helpingHand = false;
+  unit.helpingHand = false;
+  unit.actedThisTurn = false;
     unit.beakBlastPrimed = false;
+    unit.pendingAfterYou = false;
+    unit.quashedThisTurn = false;
     const ability = abilityNameForUnit(unit);
     const types = typeListForUnit(state, unit);
 
@@ -2680,7 +3808,7 @@ function endTurnSideEffects(state: SimulatorBattleState, side: SimSide) {
     }
 
     if ((unit.build.status === 'poison' || unit.build.status === 'toxic') && ability === 'Poison Heal') {
-      healUnit(unit, healAmount(unit, 0.125));
+      tryHealUnit(state, unit, healAmount(unit, 0.125), 'Poison Heal');
     }
 
     if (unit.saltCure) {
@@ -2725,12 +3853,12 @@ function endTurnSideEffects(state: SimulatorBattleState, side: SimSide) {
 
     const item = activeItemForUnit(state, unit);
     if (item?.name === 'Leftovers') {
-      healUnit(unit, healAmount(unit, 0.0625));
+      tryHealUnit(state, unit, healAmount(unit, 0.0625), 'Leftovers');
     }
 
     if (item?.name === 'Black Sludge') {
       if (types.includes('Poison')) {
-        healUnit(unit, healAmount(unit, 0.0625));
+        tryHealUnit(state, unit, healAmount(unit, 0.0625), 'Black Sludge');
       } else {
         lowerUnitHp(unit, Math.max(1, Math.round(unit.maxHp * 0.125)));
       }
@@ -2753,15 +3881,15 @@ function endTurnSideEffects(state: SimulatorBattleState, side: SimSide) {
     }
 
     if (side.active.includes(side.units.indexOf(unit)) && state.environment.terrain === 'grassy' && unitGroundedInState(state, unit)) {
-      healUnit(unit, healAmount(unit, 0.0625));
+      tryHealUnit(state, unit, healAmount(unit, 0.0625), 'Grassy Terrain');
     }
 
     if (unit.aquaRing) {
-      healUnit(unit, healAmount(unit, 0.0625));
+      tryHealUnit(state, unit, healAmount(unit, 0.0625), 'Aqua Ring');
     }
 
     if (unit.ingrain) {
-      healUnit(unit, healAmount(unit, 0.0625));
+      tryHealUnit(state, unit, healAmount(unit, 0.0625), 'Ingrain');
     }
 
     if (unit.seededBySideId && !typeListForUnit(state, unit).includes('Grass')) {
@@ -2770,7 +3898,7 @@ function endTurnSideEffects(state: SimulatorBattleState, side: SimSide) {
       const healingSide = sideForId(state, unit.seededBySideId);
       const healingTarget = healingSide.active.map((unitIndex) => healingSide.units[unitIndex]).find((candidate) => candidate && !candidate.fainted) ?? null;
       if (healingTarget) {
-        healUnit(healingTarget, leeched);
+        tryHealUnit(state, healingTarget, leeched, 'Leech Seed');
       }
     }
 
@@ -2779,6 +3907,11 @@ function endTurnSideEffects(state: SimulatorBattleState, side: SimSide) {
     unit.tauntTurns = Math.max(0, unit.tauntTurns - 1);
     unit.encoreTurns = Math.max(0, unit.encoreTurns - 1);
     unit.disableTurns = Math.max(0, unit.disableTurns - 1);
+    unit.throatChopTurns = Math.max(0, unit.throatChopTurns - 1);
+    unit.healingPreventedTurns = Math.max(0, unit.healingPreventedTurns - 1);
+    unit.magnetRiseTurns = Math.max(0, unit.magnetRiseTurns - 1);
+    unit.electrifiedTurns = Math.max(0, unit.electrifiedTurns - 1);
+    unit.actedThisTurn = false;
     clearVolatileChoiceLocks(unit);
   }
 
@@ -2799,8 +3932,9 @@ function endTurnSideEffects(state: SimulatorBattleState, side: SimSide) {
       const receiverIndex = side.active[wish.activeSlot];
       const receiver = typeof receiverIndex === 'number' ? side.units[receiverIndex] ?? null : null;
       if (receiver && !receiver.fainted) {
-        healUnit(receiver, wish.healAmount);
-        state.log.unshift(`${receiver.pokemon.displayName} received a delayed Wish heal.`);
+        if (tryHealUnit(state, receiver, wish.healAmount, 'Wish')) {
+          state.log.unshift(`${receiver.pokemon.displayName} received a delayed Wish heal.`);
+        }
       }
       return false;
     });
@@ -2831,7 +3965,7 @@ function aiChoiceForUnit(state: SimulatorBattleState, sideId: SideId, actor: num
     return { type: 'move', actor, moveId: actingSide.units[actingSide.active[actor]]?.build.moveIds[0] ?? '', target: 0 };
   }
 
-  const legalMoves = legalMovesForUnit(unit);
+  const legalMoves = legalMovesForUnit(unit, state, sideId);
   const recoveryMove = legalMoves.find((move) => healingMoves.has(move.name));
   if (recoveryMove && unit.currentHp <= unit.maxHp * 0.35) {
     return maybeUpgradeChoiceToMega(state, sideId, actor, { type: 'move', actor, moveId: recoveryMove.id, target: actor });
@@ -2901,7 +4035,20 @@ function aiChoiceForUnit(state: SimulatorBattleState, sideId: SideId, actor: num
       if (!target || move.category === 'Status') {
         continue;
       }
-      const result = calculateDamage(currentBuild(unit), currentBuild(target), move, screenAwareEnvironment(state, defendingSide));
+      const result = calculateDamageWithOverrides(currentBuild(unit), currentBuild(target), move, screenAwareEnvironment(state, defendingSide), {
+        attackerPokemon: unit.pokemon,
+        defenderPokemon: target.pokemon,
+        attackerStats: effectiveStatsForUnit(unit),
+        defenderStats: effectiveStatsForUnit(target),
+        attackerTypes: typeListForUnit(state, unit),
+        defenderTypes: typeListForUnit(state, target),
+        attackerAbility: abilityNameForUnit(unit),
+        defenderAbility: abilityNameForUnit(target),
+        attackerGrounded: unitGroundedInState(state, unit),
+        defenderGrounded: unitGroundedInState(state, target),
+        attackerSpeed: combatSpeed(unit, actingSide.tailwindTurns, state.trickRoomTurns),
+        defenderSpeed: combatSpeed(target, defendingSide.tailwindTurns, state.trickRoomTurns),
+      });
       if (!result) {
         continue;
       }
@@ -2938,6 +4085,41 @@ function normalizeMegaChoicesForSide(state: SimulatorBattleState, sideId: SideId
   });
 }
 
+function reorderQueuedRemainder(state: SimulatorBattleState, queued: QueuedBattleAction[], startIndex: number) {
+  const remaining = queued.slice(startIndex);
+  remaining.sort((left, right) => {
+    const leftSide = sideForId(state, left.side);
+    const rightSide = sideForId(state, right.side);
+    const leftUnit = targetActiveUnit(leftSide, left.choice.actor);
+    const rightUnit = targetActiveUnit(rightSide, right.choice.actor);
+
+    const leftAfterYou = leftUnit?.pendingAfterYou ? 1 : 0;
+    const rightAfterYou = rightUnit?.pendingAfterYou ? 1 : 0;
+    if (leftAfterYou !== rightAfterYou) {
+      return rightAfterYou - leftAfterYou;
+    }
+
+    const leftQuashed = leftUnit?.quashedThisTurn ? 1 : 0;
+    const rightQuashed = rightUnit?.quashedThisTurn ? 1 : 0;
+    if (leftQuashed !== rightQuashed) {
+      return leftQuashed - rightQuashed;
+    }
+
+    const leftMove = left.choice.type !== 'switch' && leftUnit ? findMove(leftUnit, left.choice.moveId) : null;
+    const rightMove = right.choice.type !== 'switch' && rightUnit ? findMove(rightUnit, right.choice.moveId) : null;
+    const leftPriority = left.choice.type === 'switch' ? 6 : leftMove && leftUnit ? movePriority(leftMove, leftUnit, state) : 0;
+    const rightPriority = right.choice.type === 'switch' ? 6 : rightMove && rightUnit ? movePriority(rightMove, rightUnit, state) : 0;
+    if (leftPriority !== rightPriority) {
+      return rightPriority - leftPriority;
+    }
+
+    const leftSpeed = leftUnit ? combatSpeed(leftUnit, leftSide.tailwindTurns, state.trickRoomTurns) : 0;
+    const rightSpeed = rightUnit ? combatSpeed(rightUnit, rightSide.tailwindTurns, state.trickRoomTurns) : 0;
+    return compareActionSpeed(leftSpeed, rightSpeed);
+  });
+  queued.splice(startIndex, remaining.length, ...remaining);
+}
+
 export function createSimulatorBattle(
   format: BattleFormat,
   playerTeam: Team,
@@ -2960,6 +4142,9 @@ export function createSimulatorBattle(
     gravityTurns: 0,
     magicRoomTurns: 0,
     wonderRoomTurns: 0,
+    fairyLockTurns: 0,
+    lastResolvedMoveId: null,
+    lastResolvedMoveSideId: null,
     log: ['Team preview started. Choose your bring order and prepare the lead plan.'],
     winner: null,
   } satisfies SimulatorBattleState;
@@ -3002,11 +4187,11 @@ export function randomChoicesForSide(state: SimulatorBattleState, sideId: SideId
       continue;
     }
 
-    const legalMoves = legalMovesForUnit(unit);
+    const legalMoves = legalMovesForUnit(unit, state, sideId);
     const move = legalMoves[Math.floor(Math.random() * Math.max(1, legalMoves.length))]
       ?? legalMoves[0]
       ?? findMove(unit, unit.chargingMoveId ?? '')
-      ?? findMove(unit, unit.build.moveIds[0] ?? '')
+      ?? findMove(unit, moveIdsForUnit(unit)[0] ?? '')
       ?? null;
     if (!move) {
       continue;
@@ -3043,12 +4228,12 @@ export function resolveTurnWithChoices(
   const normalizedPlayerChoices = normalizeMegaChoicesForSide(
     next,
     'player',
-    playerChoices.map((choice) => normalizeChoiceForUnit(next.player, choice)),
+    playerChoices.map((choice) => normalizeChoiceForUnit(next.player, choice, next, 'player')),
   );
   const normalizedOpponentChoices = normalizeMegaChoicesForSide(
     next,
     'opponent',
-    opponentSideChoices.map((choice) => normalizeChoiceForUnit(next.opponent, choice)),
+    opponentSideChoices.map((choice) => normalizeChoiceForUnit(next.opponent, choice, next, 'opponent')),
   );
 
   for (const side of [next.player, next.opponent]) {
@@ -3090,7 +4275,7 @@ export function resolveTurnWithChoices(
     performMegaEvolution(next, queuedMega.side, queuedMega.choice.actor);
   }
 
-  const queued = [
+  const queued: QueuedBattleAction[] = [
     ...normalizedPlayerChoices.map((choice) => ({ side: 'player' as SideId, choice })),
     ...normalizedOpponentChoices.map((choice) => ({ side: 'opponent' as SideId, choice })),
   ];
@@ -3102,8 +4287,8 @@ export function resolveTurnWithChoices(
     const rightUnit = targetActiveUnit(rightSide, right.choice.actor);
     const leftMove = left.choice.type !== 'switch' && leftUnit ? findMove(leftUnit, left.choice.moveId) : null;
     const rightMove = right.choice.type !== 'switch' && rightUnit ? findMove(rightUnit, right.choice.moveId) : null;
-    const leftPriority = left.choice.type === 'switch' ? 6 : leftMove && leftUnit ? movePriority(leftMove, leftUnit) : 0;
-    const rightPriority = right.choice.type === 'switch' ? 6 : rightMove && rightUnit ? movePriority(rightMove, rightUnit) : 0;
+    const leftPriority = left.choice.type === 'switch' ? 6 : leftMove && leftUnit ? movePriority(leftMove, leftUnit, next) : 0;
+    const rightPriority = right.choice.type === 'switch' ? 6 : rightMove && rightUnit ? movePriority(rightMove, rightUnit, next) : 0;
 
     if (leftPriority !== rightPriority) {
       return rightPriority - leftPriority;
@@ -3114,7 +4299,8 @@ export function resolveTurnWithChoices(
     return compareActionSpeed(leftSpeed, rightSpeed);
   });
 
-  for (const queuedAction of queued) {
+  for (let queueIndex = 0; queueIndex < queued.length; queueIndex += 1) {
+    const queuedAction = queued[queueIndex];
     const actingSide = sideForId(next, queuedAction.side);
     const defendingSide = opposingSide(next, queuedAction.side);
     const actor = targetActiveUnit(actingSide, queuedAction.choice.actor);
@@ -3128,37 +4314,24 @@ export function resolveTurnWithChoices(
       if (actor.rechargeTurns === 0) {
         actor.rechargeMoveName = null;
       }
+      actor.actedThisTurn = true;
       next.log.unshift(`${actor.pokemon.displayName} is recharging after ${rechargeMoveName}.`);
-      continue;
-    }
-
-    if (actor.flinched) {
-      if (actor.chargingTurns > 0 && actor.chargingMoveName) {
-        next.log.unshift(`${actor.pokemon.displayName} lost its ${actor.chargingMoveName} charge.`);
-        clearChargeState(actor);
-      }
-      next.log.unshift(`${actor.pokemon.displayName} flinched and could not move.`);
-      actor.flinched = false;
-      continue;
-    }
-
-    if (!processPreMoveStatus(next, actor)) {
-      if (actor.chargingTurns > 0 && actor.chargingMoveName) {
-        next.log.unshift(`${actor.pokemon.displayName} lost its ${actor.chargingMoveName} charge.`);
-        clearChargeState(actor);
-      }
       continue;
     }
 
     if (queuedAction.choice.type === 'switch') {
       const currentIndex = actingSide.active[queuedAction.choice.actor];
       const targetIndex = queuedAction.choice.target;
-      if (!canUnitSwitchOut(actor)) {
+      if (!canUnitSwitchOut(next, actor)) {
         const switchBlockReason = actor.chargingTurns > 0 && actor.chargingMoveName
           ? `it is locked into ${actor.chargingMoveName}`
-          : actor.trappedByMove
-            ? `it is trapped by ${actor.trappedByMove}`
-            : 'it cannot leave the field right now';
+          : actor.escapeBlockedBySideId !== null
+            ? 'it is trapped'
+            : next.fairyLockTurns > 0
+              ? 'Fairy Lock is active'
+              : actor.trappedByMove
+                ? `it is trapped by ${actor.trappedByMove}`
+                : 'it cannot leave the field right now';
         next.log.unshift(`${actor.pokemon.displayName} could not switch because ${switchBlockReason}.`);
         continue;
       }
@@ -3170,6 +4343,7 @@ export function resolveTurnWithChoices(
       actingSide.active[queuedAction.choice.actor] = targetIndex;
       actingSide.bench = [...actingSide.bench.filter((entry) => entry !== targetIndex), currentIndex];
       actingSide.units[targetIndex].turnsActive = 0;
+      actor.actedThisTurn = true;
       next.log.unshift(`${actor.pokemon.displayName} switched out for ${actingSide.units[targetIndex].pokemon.displayName}.`);
       switchInUnit(next, queuedAction.side, targetIndex, false);
       updateWinner(next);
@@ -3179,9 +4353,30 @@ export function resolveTurnWithChoices(
       continue;
     }
 
+    if (actor.flinched) {
+      if (actor.chargingTurns > 0 && actor.chargingMoveName) {
+        next.log.unshift(`${actor.pokemon.displayName} lost its ${actor.chargingMoveName} charge.`);
+        clearChargeState(actor);
+      }
+      next.log.unshift(`${actor.pokemon.displayName} flinched and could not move.`);
+      actor.flinched = false;
+      actor.actedThisTurn = true;
+      continue;
+    }
+
+    const movePreview = findMove(actor, (queuedAction.choice as Extract<SimulatorChoice, { type: 'move' | 'mega' }>).moveId);
+    if (!processPreMoveStatus(next, actor, movePreview?.name ?? null)) {
+      if (actor.chargingTurns > 0 && actor.chargingMoveName) {
+        next.log.unshift(`${actor.pokemon.displayName} lost its ${actor.chargingMoveName} charge.`);
+        clearChargeState(actor);
+      }
+      actor.actedThisTurn = true;
+      continue;
+    }
+
     const actionChoice = queuedAction.choice as Extract<SimulatorChoice, { type: 'move' | 'mega' }>;
     const forcedChargeMove = actor.chargingTurns > 0 && actor.chargingMoveId ? findMove(actor, actor.chargingMoveId) : null;
-    const actionLegalMoves = forcedChargeMove ? [] : legalMovesForUnit(actor);
+    const actionLegalMoves = forcedChargeMove ? [] : legalMovesForUnit(actor, next, queuedAction.side);
     const move = forcedChargeMove
       ?? actionLegalMoves.find((entry) => entry.id === actionChoice.moveId)
       ?? actionLegalMoves[0]
@@ -3192,6 +4387,10 @@ export function resolveTurnWithChoices(
         clearChargeState(actor);
       }
       continue;
+    }
+
+    if (!forcedChargeMove) {
+      spendMovePp(actor, move.id);
     }
 
     if (move.name !== 'Destiny Bond') {
@@ -3209,6 +4408,7 @@ export function resolveTurnWithChoices(
         if (!protectionCounterMoves.has(move.name)) {
           actor.protectStreak = 0;
         }
+        actor.actedThisTurn = true;
         startChargingMove(next, actor, move, actionChoice.target);
         continue;
       }
@@ -3217,7 +4417,8 @@ export function resolveTurnWithChoices(
       if (bypassReason === 'sunlight') {
         next.log.unshift(`${actor.pokemon.displayName} fired ${move.name} immediately thanks to sunlight conditions.`);
       } else {
-        actor.build.itemId = null;
+        actor.lastConsumedItemId = actor.heldItemId;
+        actor.heldItemId = null;
         next.log.unshift(`${actor.pokemon.displayName} consumed ${bypassReason} and fired ${move.name} immediately.`);
       }
     }
@@ -3233,6 +4434,9 @@ export function resolveTurnWithChoices(
     } else {
       executeDamageMove(next, actor, target, move, actingSide, defendingSide);
     }
+    actor.actedThisTurn = true;
+    next.lastResolvedMoveId = actor.lastMoveId ?? move.id;
+    next.lastResolvedMoveSideId = queuedAction.side;
 
     integrateReplacements(next, 'player');
     integrateReplacements(next, 'opponent');
@@ -3240,6 +4444,8 @@ export function resolveTurnWithChoices(
     if (next.winner) {
       break;
     }
+
+    reorderQueuedRemainder(next, queued, queueIndex + 1);
   }
 
   endTurnSideEffects(next, next.player);
@@ -3259,6 +4465,7 @@ export function resolveTurnWithChoices(
     }
   }
   next.trickRoomTurns = Math.max(0, next.trickRoomTurns - 1);
+  next.fairyLockTurns = Math.max(0, next.fairyLockTurns - 1);
   if (next.gravityTurns > 0) {
     next.gravityTurns = Math.max(0, next.gravityTurns - 1);
     if (next.gravityTurns === 0) {

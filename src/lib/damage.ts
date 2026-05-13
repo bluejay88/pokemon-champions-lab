@@ -93,12 +93,14 @@ const soundMoves = new Set([
   'Overdrive',
   'Parting Shot',
   'Perish Song',
+  'Psychic Noise',
   'Relic Song',
   'Roar',
   'Round',
   'Screech',
   'Sing',
   'Snarl',
+  'Snore',
   'Sparkling Aria',
   'Supersonic',
   'Torch Song',
@@ -216,6 +218,23 @@ type MoveProfile = {
   useTargetAttack: boolean;
 };
 
+export interface DamageRuntimeOverrides {
+  attackerPokemon?: PokemonEntry;
+  defenderPokemon?: PokemonEntry;
+  attackerStats?: StatBlock;
+  defenderStats?: StatBlock;
+  attackerTypes?: string[];
+  defenderTypes?: string[];
+  attackerAbility?: string | null;
+  defenderAbility?: string | null;
+  attackerGrounded?: boolean;
+  defenderGrounded?: boolean;
+  attackerSpeed?: number;
+  defenderSpeed?: number;
+  attackerItemName?: string | null;
+  defenderItemName?: string | null;
+}
+
 function currentStats(build: PokemonBuild, pokemon: PokemonEntry) {
   return buildStats(pokemon.baseStats, build.evs, build.natureId);
 }
@@ -224,7 +243,7 @@ function currentHp(stats: StatBlock, build: PokemonBuild) {
   return Math.max(1, Math.round(stats.hp * Math.max(1, Math.min(100, build.currentHpPercent)) / 100));
 }
 
-function isSoundMove(move: PokemonMove) {
+export function isSoundMove(move: PokemonMove) {
   return soundMoves.has(move.name);
 }
 
@@ -237,7 +256,7 @@ export function moveMakesContact(move: PokemonMove) {
   return move.name === 'Struggle' || punchMoves.has(move.name) || biteMoves.has(move.name) || ['tackle', 'claw', 'fang', 'whip', 'kick', 'bash', 'headbutt', 'tail', 'slam', 'jab', 'jab'].some((keyword) => name.includes(keyword));
 }
 
-function moveHasSecondaryEffect(move: PokemonMove) {
+export function moveHasSecondaryEffect(move: PokemonMove) {
   return Boolean(move.effectChance) || /chance|lowers|boosts|flinch|burn|poison|paraly|freeze|confus/i.test(move.description);
 }
 
@@ -423,6 +442,18 @@ function resolvedMovePower(move: PokemonMove, context: PowerContext) {
         power = 100;
       }
       break;
+    case 'Expanding Force':
+      if (context.attackerGrounded && context.environment.terrain === 'psychic') {
+        power = Math.floor(power * 1.5);
+        context.notes.push('Expanding Force is boosted by Psychic Terrain.');
+      }
+      break;
+    case 'Misty Explosion':
+      if (context.attackerGrounded && context.environment.terrain === 'misty') {
+        power = Math.floor(power * 1.5);
+        context.notes.push('Misty Explosion is boosted by Misty Terrain.');
+      }
+      break;
     case 'Grav Apple':
       if (context.environment.gravity) {
         power = Math.floor(power * 1.5);
@@ -477,6 +508,10 @@ function resolvedMovePower(move: PokemonMove, context: PowerContext) {
     case 'Power Trip':
       power = 20 + positiveStageTotal(context.attackerBuild) * 20;
       context.notes.push(`${move.name} scales to ${power} power from the attacker's boost count.`);
+      break;
+    case 'Final Gambit':
+      power = currentHp(context.attackerStats, context.attackerBuild);
+      context.notes.push('Final Gambit deals damage equal to the attacker\'s current HP.');
       break;
     default:
       break;
@@ -1086,16 +1121,23 @@ export function calculateDamage(
   defenderBuild: PokemonBuild,
   move: PokemonMove,
   environment: EnvironmentState,
+  overrides?: DamageRuntimeOverrides,
 ) {
-  const attacker = resolvePokemonForm(attackerBuild);
-  const defender = resolvePokemonForm(defenderBuild);
+  const attacker = overrides?.attackerPokemon ?? resolvePokemonForm(attackerBuild);
+  const defender = overrides?.defenderPokemon ?? resolvePokemonForm(defenderBuild);
 
   if (!attacker || !defender || move.category === 'Status' || !move.power) {
     return null;
   }
 
-  const attackerAbility = resolveAbility(attackerBuild, attacker)?.name ?? null;
-  const rawDefenderAbility = resolveAbility(defenderBuild, defender)?.name ?? null;
+  const attackerAbility =
+    overrides && 'attackerAbility' in overrides
+      ? overrides.attackerAbility ?? null
+      : resolveAbility(attackerBuild, attacker)?.name ?? null;
+  const rawDefenderAbility =
+    overrides && 'defenderAbility' in overrides
+      ? overrides.defenderAbility ?? null
+      : resolveAbility(defenderBuild, defender)?.name ?? null;
   const defenderAbility = moldBreakerAbilities.has(attackerAbility ?? '') ? null : rawDefenderAbility;
   const isStruggle = move.name === 'Struggle';
   const moveEnvironment =
@@ -1106,18 +1148,24 @@ export function calculateDamage(
     move.name === 'Meteor Beam'
       ? { ...attackerBuild, specialAttackStage: Math.min(6, attackerBuild.specialAttackStage + 1) }
       : attackerBuild;
-  const attackerStats = currentStats(attackerBuild, attacker);
-  const defenderStats = currentStats(defenderBuild, defender);
-  const attackerGrounded = environment.gravity || grounded(attacker, attackerBuild);
-  const defenderGrounded = environment.gravity || grounded(defender, defenderBuild);
+  const attackerStats = overrides?.attackerStats ?? currentStats(attackerBuild, attacker);
+  const defenderStats = overrides?.defenderStats ?? currentStats(defenderBuild, defender);
+  const attackerGrounded = overrides?.attackerGrounded ?? (environment.gravity || grounded(attacker, attackerBuild));
+  const defenderGrounded = overrides?.defenderGrounded ?? (environment.gravity || grounded(defender, defenderBuild));
   const notes: string[] = [];
-  const attackerItemName = resolveHeldItem(attackerBuild)?.name ?? null;
-  const defenderItemName = resolveHeldItem(defenderBuild)?.name ?? null;
+  const attackerItemName =
+    overrides && 'attackerItemName' in overrides
+      ? overrides.attackerItemName ?? null
+      : resolveHeldItem(attackerBuild)?.name ?? null;
+  const defenderItemName =
+    overrides && 'defenderItemName' in overrides
+      ? overrides.defenderItemName ?? null
+      : resolveHeldItem(defenderBuild)?.name ?? null;
   const moveType = isStruggle ? 'Normal' : adjustedMoveType(move, attackerAbility, moveEnvironment, attackerGrounded, notes);
-  const attackerTypes = effectiveTypes(attacker, attackerBuild, environment.weather);
-  const defenderTypes = effectiveTypes(defender, defenderBuild, environment.weather);
-  const attackerSpeed = speedStat(attackerBuild, attacker, environment, attackerAbility);
-  const defenderSpeed = speedStat(defenderBuild, defender, environment, defenderAbility);
+  const attackerTypes = overrides?.attackerTypes ?? effectiveTypes(attacker, attackerBuild, environment.weather);
+  const defenderTypes = overrides?.defenderTypes ?? effectiveTypes(defender, defenderBuild, environment.weather);
+  const attackerSpeed = overrides?.attackerSpeed ?? speedStat(attackerBuild, attacker, environment, attackerAbility);
+  const defenderSpeed = overrides?.defenderSpeed ?? speedStat(defenderBuild, defender, environment, defenderAbility);
   const effectiveness = isStruggle ? 1 : typeEffectiveness(moveType, defenderTypes);
 
   if (!isStruggle && immunityFromAbility(defenderAbility, move, moveType, effectiveness)) {
@@ -1144,6 +1192,36 @@ export function calculateDamage(
         threeHit: 0,
       },
       notes: [`${defender.displayName}'s ${rawDefenderAbility ?? 'ability'} blanks ${moveType}-type damage.`],
+    } satisfies DamageResult;
+  }
+
+  if (move.name === 'Final Gambit') {
+    const defenderCurrentHp = currentHp(defenderStats, defenderBuild);
+    const fixedDamage = Math.max(0, Math.min(defenderCurrentHp, currentHp(attackerStats, attackerBuild)));
+    const fixedPercent = defenderStats.hp > 0 ? (fixedDamage / defenderStats.hp) * 100 : 0;
+    return {
+      move,
+      appliedType: moveType,
+      minDamage: fixedDamage,
+      maxDamage: fixedDamage,
+      averageDamage: fixedDamage,
+      minPercent: fixedPercent,
+      maxPercent: fixedPercent,
+      averagePercent: fixedPercent,
+      attackStat: 0,
+      defenseStat: 0,
+      stab: 1,
+      effectiveness,
+      hitSummary: `${fixedDamage} fixed damage`,
+      koSummary: fixedDamage >= defenderStats.hp ? 'Guaranteed OHKO' : 'No clean KO',
+      rollRange: [fixedDamage],
+      modifierSummary: ['Final Gambit deals damage equal to the attacker\'s current HP.'],
+      koChances: {
+        oneHit: fixedDamage >= defenderStats.hp ? 100 : 0,
+        twoHit: fixedDamage * 2 >= defenderStats.hp ? 100 : 0,
+        threeHit: fixedDamage * 3 >= defenderStats.hp ? 100 : 0,
+      },
+      notes: ['Final Gambit ignores the normal damage formula and uses the attacker\'s current HP as fixed damage.'],
     } satisfies DamageResult;
   }
 
@@ -1352,6 +1430,16 @@ export function calculateDamage(
     },
     notes,
   } satisfies DamageResult;
+}
+
+export function calculateDamageWithOverrides(
+  attackerBuild: PokemonBuild,
+  defenderBuild: PokemonBuild,
+  move: PokemonMove,
+  environment: EnvironmentState,
+  overrides: DamageRuntimeOverrides,
+) {
+  return calculateDamage(attackerBuild, defenderBuild, move, environment, overrides);
 }
 
 export function summaryForResult(result: DamageResult | null) {

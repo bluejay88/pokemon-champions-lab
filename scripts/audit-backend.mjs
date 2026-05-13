@@ -316,6 +316,7 @@ const iceSpinnerUser = findPokemonWithMoves(['Ice Spinner'], ['Sneasler', 'Weavi
 const leechSeedUser = findPokemonWithMoves(['Leech Seed'], ['Venusaur', 'Abomasnow', 'Ferrothorn']);
 const restUser = findPokemonWithMoves(['Rest'], ['Snorlax', 'Suicune', 'Milotic']);
 const disableUser = findPokemonWithMoves(['Disable', 'Protect'], ['Gengar', 'Sableye', 'Mismagius']);
+const aromaVeilTarget = dataset.pokemon.find((pokemon) => pokemon.displayName === 'Aromatisse' && pokemon.abilities.some((ability) => ability.name === 'Aroma Veil')) ?? null;
 const trickRoomUser = findPokemonWithMoves(['Trick Room', 'Shadow Ball'], ['Mimikyu', 'Bronzong', 'Flutter Mane']);
 const calmMindUser = findPokemonWithMoves(['Calm Mind'], ['Alakazam', 'Suicune', 'Clefable']);
 const nastyPlotUser = findPokemonWithMoves(['Nasty Plot'], ['Gengar', 'Hydreigon', 'Mismagius']);
@@ -339,6 +340,8 @@ const mirrorArmorTarget = dataset.pokemon.find((pokemon) => pokemon.displayName 
 const competitiveTarget = dataset.pokemon.find((pokemon) => pokemon.displayName === 'Milotic' && pokemon.abilities.some((ability) => ability.name === 'Competitive')) ?? null;
 const obliviousTarget = dataset.pokemon.find((pokemon) => pokemon.displayName === 'Mamoswine' && pokemon.abilities.some((ability) => ability.name === 'Oblivious')) ?? null;
 const contraryUser = dataset.pokemon.find((pokemon) => pokemon.displayName === 'Serperior' && pokemon.abilities.some((ability) => ability.name === 'Contrary') && pokemon.movePool.some((move) => move.name === 'Leaf Storm')) ?? null;
+const sheerForceSnarlUser = dataset.pokemon.find((pokemon) => pokemon.displayName === 'Feraligatr' && pokemon.abilities.some((ability) => ability.name === 'Sheer Force') && pokemon.movePool.some((move) => move.name === 'Snarl')) ?? null;
+const soundOnlyTarget = findPokemonWithMoves(['Perish Song', 'Round', 'Snarl', 'Snore'], ['Absol']);
 const charizardBase = dataset.pokemon.find((pokemon) => pokemon.displayName === 'Charizard' && !pokemon.isMega) ?? null;
 const abomasnowBase = dataset.pokemon.find((pokemon) => pokemon.displayName === 'Abomasnow' && !pokemon.isMega) ?? null;
 const meganiumBase = dataset.pokemon.find((pokemon) => pokemon.displayName === 'Meganium' && !pokemon.isMega) ?? null;
@@ -359,6 +362,7 @@ assert(
     leechSeedUser &&
     restUser &&
     disableUser &&
+    aromaVeilTarget &&
     trickRoomUser &&
     calmMindUser &&
     nastyPlotUser &&
@@ -382,6 +386,8 @@ assert(
     competitiveTarget &&
     obliviousTarget &&
     contraryUser &&
+    sheerForceSnarlUser &&
+    soundOnlyTarget &&
     charizardBase &&
     abomasnowBase &&
     meganiumBase,
@@ -405,6 +411,7 @@ const leechSeedChoiceId = moveIdFor(leechSeedUser, 'Leech Seed');
 const restChoiceId = moveIdFor(restUser, 'Rest');
 const restFollowUpChoiceId = restUser.movePool.find((move) => move.id !== restChoiceId)?.id ?? null;
 const disableChoiceId = moveIdFor(disableUser, 'Disable');
+const aromaVeilProtectChoiceId = moveIdFor(aromaVeilTarget, 'Protect') ?? moveIdFor(aromaVeilTarget, 'Wish') ?? aromaVeilTarget.movePool[0]?.id ?? null;
 const trickRoomChoiceId = moveIdFor(trickRoomUser, 'Trick Room');
 const calmMindChoiceId = moveIdFor(calmMindUser, 'Calm Mind');
 const nastyPlotChoiceId = moveIdFor(nastyPlotUser, 'Nasty Plot');
@@ -427,6 +434,7 @@ const mirrorArmorAttackId = mirrorArmorTarget.movePool.find((move) => move.categ
 const competitiveAttackId = competitiveTarget.movePool.find((move) => move.category !== 'Status')?.id ?? competitiveTarget.movePool[0]?.id ?? null;
 const obliviousAttackId = obliviousTarget.movePool.find((move) => move.category !== 'Status')?.id ?? obliviousTarget.movePool[0]?.id ?? null;
 const contraryLeafStormChoiceId = moveIdFor(contraryUser, 'Leaf Storm');
+const sheerForceSnarlChoiceId = moveIdFor(sheerForceSnarlUser, 'Snarl');
 const megaCharizardMoveId = moveIdFor(charizardBase, 'Flamethrower') ?? moveIdFor(charizardBase, 'Heat Wave') ?? charizardBase.movePool[0]?.id ?? null;
 const megaAbomasnowMoveId = moveIdFor(abomasnowBase, 'Blizzard') ?? moveIdFor(abomasnowBase, 'Ice Shard') ?? abomasnowBase.movePool[0]?.id ?? null;
 const charizarditeYId = itemIdByName('Charizardite Y');
@@ -450,6 +458,7 @@ assert(
     restChoiceId &&
     restFollowUpChoiceId &&
     disableChoiceId &&
+    aromaVeilProtectChoiceId &&
     trickRoomChoiceId &&
     calmMindChoiceId &&
     nastyPlotChoiceId &&
@@ -472,6 +481,7 @@ assert(
     competitiveAttackId &&
     obliviousAttackId &&
     contraryLeafStormChoiceId &&
+    sheerForceSnarlChoiceId &&
     megaCharizardMoveId &&
     megaAbomasnowMoveId &&
     charizarditeYId &&
@@ -744,6 +754,20 @@ const hpAfterDisableTurn = disableBattle.player.units[0].currentHp;
 disableBattle = withMockRandom([0.1, 0.1, 0.1], () => resolveTurn(disableBattle, [{ type: 'move', actor: 0, moveId: protectChoiceId, target: 0 }]));
 assert.equal(disableBattle.player.units[0].currentHp, hpAfterDisableTurn, 'A disabled attacker should not be able to reuse its disabled move immediately.');
 
+let aromaVeilBattle = buildBattle(
+  'Singles',
+  [buildSlot('aroma-veil-user', disableUser, ['Disable', 'Protect'], { evs: { ...blankStats(), hp: 32, speed: 20, defense: 14 } })],
+  [buildSlot('aroma-veil-target', aromaVeilTarget, ['Protect'], { abilityName: 'Aroma Veil', evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } })],
+);
+aromaVeilBattle = withMockRandom([0.1, 0.1, 0.1], () =>
+  resolveTurnWithChoices(
+    aromaVeilBattle,
+    [{ type: 'move', actor: 0, moveId: protectChoiceId, target: 0 }],
+    [{ type: 'move', actor: 0, moveId: aromaVeilProtectChoiceId, target: 0 }],
+  ));
+aromaVeilBattle = withMockRandom([0.1, 0.1, 0.1], () => resolveTurn(aromaVeilBattle, [{ type: 'move', actor: 0, moveId: disableChoiceId, target: 0 }]));
+assert.equal(aromaVeilBattle.opponent.units[0].disableTurns, 0, 'Aroma Veil should block Disable from landing on the protected side.');
+
 let tormentBattle = buildBattle(
   'Singles',
   [buildSlot('torment-user', tormentUser, ['Torment', 'Protect'], { evs: { ...blankStats(), hp: 32, speed: 20, defense: 14 } })],
@@ -943,6 +967,285 @@ let contraryBattle = buildBattle(
 contraryBattle = withMockRandom([0.1, 0.1, 0.1], () => resolveTurn(contraryBattle, [{ type: 'move', actor: 0, moveId: contraryLeafStormChoiceId, target: 0 }]));
 assert.equal(contraryBattle.player.units[0].build.specialAttackStage, 2, 'Contrary should reverse Leaf Storm into a Sp. Atk boost.');
 
+const confuseRayUser = findPokemonWithMoves(['Confuse Ray'], ['Froslass', 'Sableye', 'Gengar']);
+const blockUser = findPokemonWithMoves(['Block'], ['Snorlax', 'Umbreon']);
+const trickUser = findPokemonWithMoves(['Trick'], ['Alakazam', 'Rotom']);
+const substituteUser = findPokemonWithMoves(['Substitute'], ['Gengar', 'Mismagius', 'Jolteon']);
+const recycleUser = findPokemonWithMoves(['Recycle'], ['Snorlax', 'Alcremie']);
+const healingWishUser = findPokemonWithMoves(['Healing Wish']);
+const lockOnUser = findPokemonWithMoves(['Lock-On', 'Thunder'], ['Jolteon', 'Zapdos', 'Magnezone']);
+const fairyLockUser = findPokemonWithMoves(['Fairy Lock'], ['Klefki']);
+const sleepTalkUser = findPokemonWithMoves(['Sleep Talk', 'Snore'], ['Abomasnow', 'Absol', 'Aegislash']);
+const knockOffUser = findPokemonWithMoves(['Knock Off'], ['Absol', 'Arbok', 'Ariados']);
+const psychicNoiseUser = findPokemonWithMoves(['Psychic Noise', 'Recover'], ['Espeon', 'Farigiraf', 'Gardevoir']);
+const throatChopUser = findPokemonWithMoves(['Throat Chop'], ['Absol', 'Arbok', 'Ariados']);
+const expandingForceUser = findPokemonWithMoves(['Expanding Force'], ['Alakazam', 'Armarouge', 'Espathra']);
+const dragonDartsUser = findPokemonWithMoves(['Dragon Darts'], ['Dragapult']);
+const finalGambitUser = findPokemonWithMoves(['Final Gambit'], ['Lucario']);
+const explosionUser = findPokemonWithMoves(['Explosion'], ['Forretress', 'Garbodor', 'Glalie']);
+const partingShotUser = findPokemonWithMoves(['Parting Shot'], ['Incineroar', 'Morpeko', 'Pangoro']);
+assert(confuseRayUser && blockUser && trickUser && substituteUser && recycleUser && healingWishUser && lockOnUser && fairyLockUser && sleepTalkUser && knockOffUser && psychicNoiseUser && throatChopUser && snarlUser && expandingForceUser && dragonDartsUser && finalGambitUser && explosionUser && partingShotUser, 'Expected audit users for the expanded move-family checks.');
+
+const confuseRayChoiceId = moveIdFor(confuseRayUser, 'Confuse Ray');
+const blockChoiceId = moveIdFor(blockUser, 'Block');
+const trickChoiceId = moveIdFor(trickUser, 'Trick');
+const substituteChoiceId = moveIdFor(substituteUser, 'Substitute');
+const recycleChoiceId = moveIdFor(recycleUser, 'Recycle');
+const healingWishChoiceId = moveIdFor(healingWishUser, 'Healing Wish');
+const lockOnChoiceId = moveIdFor(lockOnUser, 'Lock-On');
+const lockOnThunderChoiceId = moveIdFor(lockOnUser, 'Thunder');
+const fairyLockChoiceId = moveIdFor(fairyLockUser, 'Fairy Lock');
+const sleepTalkChoiceId = moveIdFor(sleepTalkUser, 'Sleep Talk');
+const knockOffChoiceId = moveIdFor(knockOffUser, 'Knock Off');
+const psychicNoiseChoiceId = moveIdFor(psychicNoiseUser, 'Psychic Noise');
+const throatChopChoiceId = moveIdFor(throatChopUser, 'Throat Chop');
+const expandingForceChoiceId = moveIdFor(expandingForceUser, 'Expanding Force');
+const dragonDartsChoiceId = moveIdFor(dragonDartsUser, 'Dragon Darts');
+const finalGambitChoiceId = moveIdFor(finalGambitUser, 'Final Gambit');
+const explosionChoiceId = moveIdFor(explosionUser, 'Explosion');
+const partingShotChoiceId = moveIdFor(partingShotUser, 'Parting Shot');
+
+let confusionBattle = buildBattle(
+  'Singles',
+  [buildSlot('confuse-user', confuseRayUser, ['Confuse Ray'], { evs: { ...blankStats(), speed: 32, hp: 32, defense: 2 } })],
+  [buildSlot('confuse-target', protectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } })],
+);
+confusionBattle = withMockRandom([0.1, 0.1, 0.1], () => resolveTurn(confusionBattle, [{ type: 'move', actor: 0, moveId: confuseRayChoiceId, target: 0 }]));
+assert.ok(confusionBattle.opponent.units[0].confusionTurns > 0, 'Confuse Ray should apply a confusion timer.');
+
+let blockBattle = buildBattle(
+  'Singles',
+  [
+    buildSlot('block-user', blockUser, ['Block'], { evs: { ...blankStats(), hp: 32, defense: 18, specialDefense: 16 } }),
+    buildSlot('block-bench', protectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } }),
+  ],
+  [
+    buildSlot('block-target', specialTargetA, [specialTargetA.movePool.find((move) => move.id === specialTargetAAttackId)?.name ?? specialTargetA.movePool[0].name], { evs: { ...blankStats(), hp: 20, defense: 20, specialDefense: 26 } }),
+    buildSlot('block-foe-bench', groundedProtectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } }),
+  ],
+);
+blockBattle = withMockRandom([0.1, 0.1, 0.1], () =>
+  resolveTurnWithChoices(
+    blockBattle,
+    [{ type: 'move', actor: 0, moveId: blockChoiceId, target: 0 }],
+    [{ type: 'move', actor: 0, moveId: specialTargetAAttackId, target: 0 }],
+  ));
+const blockedActiveIndex = blockBattle.opponent.active[0];
+blockBattle = withMockRandom([0.1, 0.1, 0.1], () =>
+  resolveTurnWithChoices(
+    blockBattle,
+    [{ type: 'move', actor: 0, moveId: blockChoiceId, target: 0 }],
+    [{ type: 'switch', actor: 0, target: 1 }],
+  ));
+assert.equal(blockBattle.opponent.active[0], blockedActiveIndex, 'Block should stop the trapped target from switching out.');
+
+let trickBattle = buildBattle(
+  'Singles',
+  [buildSlot('trick-user', trickUser, ['Trick'], { itemId: itemIdByName('Choice Specs'), evs: { ...blankStats(), specialAttack: 32, speed: 32, hp: 2 } })],
+  [buildSlot('trick-target', groundedProtectUser, ['Protect'], { itemId: itemIdByName('Leftovers'), evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } })],
+);
+trickBattle = withMockRandom([0.1, 0.1, 0.1], () => resolveTurn(trickBattle, [{ type: 'move', actor: 0, moveId: trickChoiceId, target: 0 }]));
+assert.equal(trickBattle.player.units[0].heldItemId, itemIdByName('Leftovers'), 'Trick should swap the user into the target item.');
+assert.equal(trickBattle.opponent.units[0].heldItemId, itemIdByName('Choice Specs'), 'Trick should swap the target into the user item.');
+
+let substituteBattle = buildBattle(
+  'Singles',
+  [buildSlot('substitute-user', substituteUser, ['Substitute'], { evs: { ...blankStats(), hp: 32, speed: 32, defense: 2 } })],
+  [buildSlot('substitute-foe', specialTargetA, [specialTargetA.movePool.find((move) => move.id === specialTargetAAttackId)?.name ?? specialTargetA.movePool[0].name], { evs: { ...blankStats(), hp: 20, defense: 20, specialDefense: 26 } })],
+);
+substituteBattle = withMockRandom([0.1, 0.1, 0.1], () => resolveTurn(substituteBattle, [{ type: 'move', actor: 0, moveId: substituteChoiceId, target: 0 }]));
+assert.ok(substituteBattle.player.units[0].substituteHp > 0, 'Substitute should create a substitute doll.');
+
+let recycleBattle = buildBattle(
+  'Singles',
+  [buildSlot('recycle-user', recycleUser, ['Recycle'], { evs: { ...blankStats(), hp: 32, defense: 18, specialDefense: 16 } })],
+  [buildSlot('recycle-foe', protectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } })],
+);
+recycleBattle.player.units[0].heldItemId = null;
+recycleBattle.player.units[0].lastConsumedItemId = itemIdByName('Sitrus Berry');
+recycleBattle = withMockRandom([0.1, 0.1, 0.1], () => resolveTurn(recycleBattle, [{ type: 'move', actor: 0, moveId: recycleChoiceId, target: 0 }]));
+assert.equal(recycleBattle.player.units[0].heldItemId, itemIdByName('Sitrus Berry'), 'Recycle should restore the last consumed item.');
+
+let healingWishBattle = buildBattle(
+  'Singles',
+  [
+    buildSlot('healing-wish-user', healingWishUser, ['Healing Wish'], { evs: { ...blankStats(), hp: 32, specialAttack: 18, speed: 16 } }),
+    buildSlot('healing-wish-receiver', groundedProtectUser, ['Protect'], { status: 'burn', evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } }),
+  ],
+  [buildSlot('healing-wish-foe', protectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } })],
+);
+healingWishBattle.player.units[1].currentHp = 1;
+healingWishBattle = withMockRandom([0.1, 0.1, 0.1], () =>
+  resolveTurnWithChoices(
+    healingWishBattle,
+    [{ type: 'move', actor: 0, moveId: healingWishChoiceId, target: 0 }],
+    [{ type: 'move', actor: 0, moveId: protectUser.movePool.find((move) => move.name === 'Protect')?.id ?? 'protect', target: 0 }],
+  ));
+assert.ok(healingWishBattle.player.units[0].fainted, 'Healing Wish should faint the user.');
+assert.equal(healingWishBattle.player.units[1].currentHp, healingWishBattle.player.units[1].maxHp, 'Healing Wish should fully restore the replacement Pokemon.');
+assert.equal(healingWishBattle.player.units[1].build.status, 'healthy', 'Healing Wish should cure the replacement Pokemon status.');
+
+let lockOnBattle = buildBattle(
+  'Singles',
+  [buildSlot('lock-on-user', lockOnUser, ['Lock-On', 'Thunder'], { natureId: 'timid', evs: { ...blankStats(), specialAttack: 32, speed: 32, hp: 2 } })],
+  [buildSlot('lock-on-foe', protectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } })],
+);
+lockOnBattle.environment.weather = 'sun';
+const lockOnStartHp = lockOnBattle.opponent.units[0].currentHp;
+lockOnBattle = withMockRandom([0.95, 0.95, 0.95], () => resolveTurn(lockOnBattle, [{ type: 'move', actor: 0, moveId: lockOnChoiceId, target: 0 }]));
+lockOnBattle = withMockRandom([0.95, 0.95, 0.95], () => resolveTurn(lockOnBattle, [{ type: 'move', actor: 0, moveId: lockOnThunderChoiceId, target: 0 }]));
+assert.ok(lockOnBattle.opponent.units[0].currentHp < lockOnStartHp, 'Lock-On should make the next Thunder connect even in harsh sunlight.');
+
+let fairyLockBattle = buildBattle(
+  'Singles',
+  [buildSlot('fairy-lock-user', fairyLockUser, ['Fairy Lock'], { evs: { ...blankStats(), hp: 32, defense: 18, specialDefense: 16 } })],
+  [
+    buildSlot('fairy-lock-target', groundedProtectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } }),
+    buildSlot('fairy-lock-bench', specialTargetA, [specialTargetA.movePool.find((move) => move.id === specialTargetAAttackId)?.name ?? specialTargetA.movePool[0].name], { evs: { ...blankStats(), hp: 20, defense: 20, specialDefense: 26 } }),
+  ],
+);
+fairyLockBattle = withMockRandom([0.1, 0.1, 0.1], () =>
+  resolveTurnWithChoices(
+    fairyLockBattle,
+    [{ type: 'move', actor: 0, moveId: fairyLockChoiceId, target: 0 }],
+    [{ type: 'move', actor: 0, moveId: groundedProtectUser.movePool.find((move) => move.name === 'Protect')?.id ?? 'protect', target: 0 }],
+  ));
+const fairyLockedIndex = fairyLockBattle.opponent.active[0];
+fairyLockBattle = withMockRandom([0.1, 0.1, 0.1], () =>
+  resolveTurnWithChoices(
+    fairyLockBattle,
+    [{ type: 'move', actor: 0, moveId: fairyLockChoiceId, target: 0 }],
+    [{ type: 'switch', actor: 0, target: 1 }],
+  ));
+assert.equal(fairyLockBattle.opponent.active[0], fairyLockedIndex, 'Fairy Lock should stop switching on the next turn.');
+
+let sleepTalkBattle = buildBattle(
+  'Singles',
+  [buildSlot('sleep-talk-user', sleepTalkUser, ['Sleep Talk', 'Snore'], { status: 'sleep', evs: { ...blankStats(), specialAttack: 24, speed: 22, hp: 20 } })],
+  [buildSlot('sleep-talk-foe', specialTargetA, [specialTargetA.movePool.find((move) => move.id === specialTargetAAttackId)?.name ?? specialTargetA.movePool[0].name], { evs: { ...blankStats(), hp: 20, defense: 20, specialDefense: 26 } })],
+);
+const sleepTalkStartHp = sleepTalkBattle.opponent.units[0].currentHp;
+sleepTalkBattle = withMockRandom([0.1, 0.1, 0.1], () =>
+  resolveTurnWithChoices(
+    sleepTalkBattle,
+    [{ type: 'move', actor: 0, moveId: sleepTalkChoiceId, target: 0 }],
+    [{ type: 'move', actor: 0, moveId: specialTargetAAttackId, target: 0 }],
+  ));
+assert.ok(sleepTalkBattle.opponent.units[0].currentHp < sleepTalkStartHp, 'Sleep Talk should call Snore and damage the target while the user is asleep.');
+
+let knockOffBattle = buildBattle(
+  'Singles',
+  [buildSlot('knock-off-user', knockOffUser, ['Knock Off'], { evs: { ...blankStats(), attack: 32, speed: 20, hp: 14 } })],
+  [buildSlot('knock-off-target', groundedProtectUser, ['Protect'], { itemId: itemIdByName('Leftovers'), evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } })],
+);
+knockOffBattle = withMockRandom([0.1, 0.1, 0.1], () => resolveTurn(knockOffBattle, [{ type: 'move', actor: 0, moveId: knockOffChoiceId, target: 0 }]));
+assert.equal(knockOffBattle.opponent.units[0].heldItemId, null, 'Knock Off should remove the target item after a successful hit.');
+
+let psychicNoiseBattle = buildBattle(
+  'Singles',
+  [buildSlot('psychic-noise-user', psychicNoiseUser, ['Psychic Noise'], { evs: { ...blankStats(), specialAttack: 24, speed: 22, hp: 20 } })],
+  [buildSlot('psychic-noise-target', psychicNoiseUser, ['Recover'], { evs: { ...blankStats(), hp: 32, defense: 14, specialDefense: 20 } })],
+);
+psychicNoiseBattle.opponent.units[0].currentHp = Math.max(1, Math.floor(psychicNoiseBattle.opponent.units[0].maxHp / 2));
+psychicNoiseBattle = withMockRandom([0.1, 0.1, 0.1], () => resolveTurn(psychicNoiseBattle, [{ type: 'move', actor: 0, moveId: psychicNoiseChoiceId, target: 0 }]));
+const blockedHealHp = psychicNoiseBattle.opponent.units[0].currentHp;
+psychicNoiseBattle = withMockRandom([0.1, 0.1, 0.1], () =>
+  resolveTurnWithChoices(
+    psychicNoiseBattle,
+    [{ type: 'move', actor: 0, moveId: psychicNoiseChoiceId, target: 0 }],
+    [{ type: 'move', actor: 0, moveId: moveIdFor(psychicNoiseUser, 'Recover'), target: 0 }],
+  ));
+assert.equal(psychicNoiseBattle.opponent.units[0].currentHp <= blockedHealHp, true, 'Psychic Noise should stop Recover from restoring HP while the timer is active.');
+
+let throatChopBattle = buildBattle(
+  'Singles',
+  [buildSlot('throat-chop-user', throatChopUser, ['Throat Chop'], { evs: { ...blankStats(), attack: 32, speed: 20, hp: 14 } })],
+  [buildSlot('throat-chop-target', soundOnlyTarget, ['Perish Song', 'Round', 'Snarl', 'Snore'], { evs: { ...blankStats(), specialAttack: 24, speed: 18, hp: 24 } })],
+);
+throatChopBattle = withMockRandom([0.1, 0.1, 0.1], () => resolveTurn(throatChopBattle, [{ type: 'move', actor: 0, moveId: throatChopChoiceId, target: 0 }]));
+assert.ok(legalMovesForUnit(throatChopBattle.opponent.units[0], throatChopBattle, 'opponent').some((move) => move.id === 'struggle'), 'Throat Chop should force Struggle when the target only knows sound moves.');
+
+let sheerForceBattle = buildBattle(
+  'Singles',
+  [buildSlot('sheer-force-user', sheerForceSnarlUser, ['Snarl'], { abilityName: 'Sheer Force', evs: { ...blankStats(), specialAttack: 24, speed: 22, hp: 20 } })],
+  [buildSlot('sheer-force-target', specialTargetA, [specialTargetA.movePool.find((move) => move.id === specialTargetAAttackId)?.name ?? specialTargetA.movePool[0].name], { evs: { ...blankStats(), hp: 20, defense: 20, specialDefense: 26 } })],
+);
+sheerForceBattle = withMockRandom([0.1, 0.1, 0.1], () => resolveTurn(sheerForceBattle, [{ type: 'move', actor: 0, moveId: sheerForceSnarlChoiceId, target: 0 }]));
+assert.equal(sheerForceBattle.opponent.units[0].build.specialAttackStage, 0, 'Sheer Force should suppress Snarl\'s Special Attack drop while still allowing the hit.');
+
+let expandingForceBattle = buildBattle(
+  'Doubles',
+  [buildSlot('expanding-force-user', expandingForceUser, ['Expanding Force'], { evs: { ...blankStats(), specialAttack: 32, speed: 32, hp: 2 } })],
+  [
+    buildSlot('expanding-force-foe-a', specialTargetA, [specialTargetA.movePool.find((move) => move.id === specialTargetAAttackId)?.name ?? specialTargetA.movePool[0].name], { evs: { ...blankStats(), hp: 20, defense: 20, specialDefense: 26 } }),
+    buildSlot('expanding-force-foe-b', specialTargetB, [specialTargetB.movePool.find((move) => move.id === specialTargetBAttackId)?.name ?? specialTargetB.movePool[0].name], { evs: { ...blankStats(), hp: 20, specialDefense: 24, defense: 22 } }),
+  ],
+);
+expandingForceBattle.environment.terrain = 'psychic';
+expandingForceBattle.terrainTurns = 5;
+const expandingForceHpA = expandingForceBattle.opponent.units[0].currentHp;
+const expandingForceHpB = expandingForceBattle.opponent.units[1].currentHp;
+expandingForceBattle = withMockRandom([0.1, 0.1, 0.1, 0.1], () =>
+  resolveTurnWithChoices(
+    expandingForceBattle,
+    [{ type: 'move', actor: 0, moveId: expandingForceChoiceId, target: 0 }],
+    [
+      { type: 'move', actor: 0, moveId: specialTargetAAttackId, target: 0 },
+      { type: 'move', actor: 1, moveId: specialTargetBAttackId, target: 0 },
+    ],
+  ));
+assert.ok(expandingForceBattle.opponent.units[0].currentHp < expandingForceHpA && expandingForceBattle.opponent.units[1].currentHp < expandingForceHpB, 'Expanding Force should hit both opposing targets in Psychic Terrain.');
+
+let dragonDartsBattle = buildBattle(
+  'Doubles',
+  [buildSlot('dragon-darts-user', dragonDartsUser, ['Dragon Darts'], { evs: { ...blankStats(), attack: 32, speed: 32, hp: 2 } })],
+  [
+    buildSlot('dragon-darts-foe-a', specialTargetA, [specialTargetA.movePool.find((move) => move.id === specialTargetAAttackId)?.name ?? specialTargetA.movePool[0].name], { evs: { ...blankStats(), hp: 20, defense: 20, specialDefense: 26 } }),
+    buildSlot('dragon-darts-foe-b', specialTargetB, [specialTargetB.movePool.find((move) => move.id === specialTargetBAttackId)?.name ?? specialTargetB.movePool[0].name], { evs: { ...blankStats(), hp: 20, specialDefense: 24, defense: 22 } }),
+  ],
+);
+const dragonDartsHpA = dragonDartsBattle.opponent.units[0].currentHp;
+const dragonDartsHpB = dragonDartsBattle.opponent.units[1].currentHp;
+dragonDartsBattle = withMockRandom([0.1, 0.1, 0.1, 0.1], () =>
+  resolveTurnWithChoices(
+    dragonDartsBattle,
+    [{ type: 'move', actor: 0, moveId: dragonDartsChoiceId, target: 0 }],
+    [
+      { type: 'move', actor: 0, moveId: specialTargetAAttackId, target: 0 },
+      { type: 'move', actor: 1, moveId: specialTargetBAttackId, target: 0 },
+    ],
+  ));
+assert.ok(dragonDartsBattle.opponent.units[0].currentHp < dragonDartsHpA && dragonDartsBattle.opponent.units[1].currentHp < dragonDartsHpB, 'Dragon Darts should strike each opposing Pokemon once in Doubles.');
+
+let finalGambitBattle = buildBattle(
+  'Singles',
+  [buildSlot('final-gambit-user', finalGambitUser, ['Final Gambit'], { evs: { ...blankStats(), speed: 32, hp: 32, attack: 2 } })],
+  [buildSlot('final-gambit-foe', groundedProtectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } })],
+);
+const finalGambitStartHp = finalGambitBattle.opponent.units[0].currentHp;
+finalGambitBattle = withMockRandom([0.1, 0.1, 0.1], () => resolveTurn(finalGambitBattle, [{ type: 'move', actor: 0, moveId: finalGambitChoiceId, target: 0 }]));
+assert.ok(finalGambitBattle.player.units[0].fainted, 'Final Gambit should faint the user.');
+assert.ok(finalGambitBattle.opponent.units[0].currentHp < finalGambitStartHp, 'Final Gambit should damage the target based on the user HP.');
+
+let explosionBattle = buildBattle(
+  'Singles',
+  [buildSlot('explosion-user', explosionUser, ['Explosion'], { evs: { ...blankStats(), attack: 32, hp: 32, defense: 2 } })],
+  [buildSlot('explosion-foe', groundedProtectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } })],
+);
+explosionBattle = withMockRandom([0.1, 0.1, 0.1], () => resolveTurn(explosionBattle, [{ type: 'move', actor: 0, moveId: explosionChoiceId, target: 0 }]));
+assert.ok(explosionBattle.player.units[0].fainted, 'Explosion should faint the user after the attack resolves.');
+
+let partingShotBattle = buildBattle(
+  'Singles',
+  [
+    buildSlot('parting-shot-user', partingShotUser, ['Parting Shot'], { evs: { ...blankStats(), speed: 32, hp: 20, defense: 14 } }),
+    buildSlot('parting-shot-bench', protectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } }),
+  ],
+  [buildSlot('parting-shot-foe', groundedProtectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } })],
+);
+partingShotBattle = withMockRandom([0.1, 0.1, 0.1], () => resolveTurn(partingShotBattle, [{ type: 'move', actor: 0, moveId: partingShotChoiceId, target: 0 }]));
+assert.equal(partingShotBattle.player.active[0], 1, 'Parting Shot should pivot the user out after the stat drops land.');
+
 let struggleBattle = buildBattle(
   'Singles',
   [buildSlot('struggle-user', pranksterUser, ['Taunt'], { abilityName: 'Prankster', evs: { ...blankStats(), hp: 20, speed: 32, defense: 14 } })],
@@ -1093,7 +1396,7 @@ const summary = [
   `Verified item clause sanitization for manual teams and AI-generated teams.`,
   `Verified move-parity registry coverage at ${paritySummary.coveredPercent}% across ${paritySummary.total} Champions moves, with ${paritySummary.explicit} explicit hooks tagged in the report.`,
   `Verified damage engine produces live damage output under the Champions EV model, including Doubles spread reduction, Aurora Veil, Helping Hand, Magic Room, and Wonder Room checks.`,
-  `Verified simulator rules for chained Protect odds, ally-target support hooks, rain-locked Thunder accuracy, Snarl spread debuffs, Earthquake ally collateral, Sticky Web and Toxic Spikes switch-in hooks, forced-thaw freeze timing, Rest sleep timing, Disable and Torment move locks, weather field timers, opponent reveal state, Calm Mind and Nasty Plot boosts, Trick Room toggling, recharge turns, charge-turn attacks, mid-turn doubles retargeting, Struggle locks, Dark-type immunity to opposing Prankster status moves, and Mega weather ordering.`,
+  `Verified simulator rules for chained Protect odds, confusion/trap timers, Trick and Recycle item flow, Substitute and Healing Wish handling, Lock-On accuracy, ally-target support hooks, rain-locked Thunder accuracy, Snarl spread debuffs, Earthquake ally collateral, Sticky Web and Toxic Spikes switch-in hooks, forced-thaw freeze timing, Rest sleep timing, Disable and Torment move locks, weather field timers, opponent reveal state, Calm Mind and Nasty Plot boosts, Trick Room toggling, recharge turns, charge-turn attacks, mid-turn doubles retargeting, Struggle locks, Dark-type immunity to opposing Prankster status moves, and Mega weather ordering.`,
   `Verified shared PvP room logic, including bring-four lock-in, full roster integrity, deadline-based turn resolution, forfeit handling, and 50 automated room-code battle simulations (${onlineBattleHostWins} host wins / ${onlineBattleGuestWins} guest wins).`,
   warnings.length ? `Source-data warnings: ${warnings.length} HP floor rows on the scraped form pages disagree with fixed 31 IV policy, so the app keeps the fixed-IV result intentionally.` : 'Source-data warnings: none.',
 ];

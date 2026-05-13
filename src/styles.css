@@ -1570,6 +1570,324 @@ button {
   gap: 18px;
 }
 
+.battle-layout,
+.battle-center {
+  display: grid;
+  gap: 18px;
+  min-width: 0;
+}
+
+.battle-center {
+  align-content: start;
+}
+
+.battlefield-panel {
+  gap: 16px;
+  overflow: hidden;
+}
+
+.battlefield-layout {
+  grid-template-columns: minmax(0, 1.28fr) minmax(240px, 0.72fr);
+}
+
+.battlefield-scroll-panel {
+  min-width: 0;
+  max-height: 780px;
+  overflow: auto;
+  padding-right: 6px;
+}
+
+.battlefield-stage-shell {
+  min-width: 0;
+}
+
+.battlefield-stage {
+  position: relative;
+  display: grid;
+  gap: 22px;
+  min-height: 620px;
+  padding: 22px;
+  border-radius: 22px;
+  overflow: hidden;
+  background-size: cover;
+  background-position: center;
+  box-shadow: inset 0 0 0 1px rgba(162, 201, 255, 0.12);
+}
+
+.battlefield-stage-pixelated {
+  image-rendering: pixelated;
+  background-size: 100% 100%;
+}
+
+.battlefield-stage-overlay {
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(180deg, rgba(2, 10, 22, 0.28) 0%, rgba(2, 10, 22, 0.12) 28%, rgba(2, 10, 22, 0.2) 54%, rgba(2, 10, 22, 0.48) 100%),
+    radial-gradient(circle at center, rgba(112, 205, 255, 0.08) 0%, rgba(7, 18, 30, 0) 60%);
+  pointer-events: none;
+}
+
+.battlefield-backdrop-meta,
+.battlefield-event,
+.battlefield-side {
+  position: relative;
+  z-index: 1;
+}
+
+.battlefield-backdrop-meta {
+  display: grid;
+  gap: 4px;
+  max-width: 380px;
+  padding: 14px 16px;
+  border-radius: 18px;
+  border: 1px solid rgba(162, 201, 255, 0.16);
+  background: rgba(3, 11, 24, 0.72);
+  backdrop-filter: blur(10px);
+}
+
+.battlefield-backdrop-meta strong {
+  font-size: 0.92rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #eaf6ff;
+}
+
+.battlefield-backdrop-meta span {
+  color: rgba(226, 240, 255, 0.86);
+  font-size: 0.88rem;
+  line-height: 1.5;
+}
+
+.battlefield-event {
+  justify-self: center;
+  width: min(100%, 720px);
+  display: grid;
+  gap: 6px;
+  padding: 14px 18px;
+  border-radius: 20px;
+  border: 1px solid rgba(162, 201, 255, 0.18);
+  background: rgba(3, 11, 24, 0.76);
+  text-align: center;
+  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.24);
+}
+
+.battlefield-event span {
+  font-size: 0.74rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #94d8ff;
+}
+
+.battlefield-event strong {
+  font-size: 1rem;
+  line-height: 1.55;
+  color: #f5fbff;
+}
+
+.battlefield-event-impact {
+  border-color: rgba(94, 199, 255, 0.26);
+}
+
+.battlefield-event-guard {
+  border-color: rgba(255, 194, 122, 0.26);
+  background: rgba(27, 17, 7, 0.76);
+}
+
+.battlefield-event-ko {
+  border-color: rgba(255, 108, 120, 0.28);
+  background: rgba(28, 9, 14, 0.8);
+}
+
+.battlefield-event-status {
+  border-color: rgba(150, 141, 255, 0.28);
+  background: rgba(14, 11, 28, 0.8);
+}
+
+.battlefield-side {
+  display: grid;
+  gap: 14px;
+}
+
+.battlefield-side-top {
+  align-self: start;
+}
+
+.battlefield-side-bottom {
+  align-self: end;
+}
+
+.battlefield-side-label {
+  display: inline-flex;
+  align-items: center;
+  align-self: start;
+  min-height: 32px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(162, 201, 255, 0.18);
+  background: rgba(3, 11, 24, 0.76);
+  font-size: 0.8rem;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #e5f4ff;
+}
+
+.battlefield-active-lanes {
+  display: grid;
+  gap: 18px;
+}
+
+.battlefield-active-lanes.lanes-1 {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.battlefield-active-lanes.lanes-2 {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.battlefield-card {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 14px;
+  min-height: 132px;
+  padding: 16px 18px;
+  border-radius: 22px;
+  border: 1px solid rgba(162, 201, 255, 0.18);
+  background: rgba(3, 11, 24, 0.68);
+  backdrop-filter: blur(10px);
+  transition: transform 180ms ease, box-shadow 180ms ease, border-color 180ms ease;
+}
+
+.battlefield-card.is-actor {
+  animation: battlefield-lunge 640ms ease;
+  border-color: rgba(94, 199, 255, 0.48);
+  box-shadow: 0 0 0 1px rgba(94, 199, 255, 0.1), 0 14px 28px rgba(10, 65, 106, 0.22);
+}
+
+.battlefield-card.is-target {
+  animation: battlefield-shake 560ms ease;
+  border-color: rgba(255, 130, 132, 0.4);
+}
+
+.battlefield-card.is-fainted,
+.battlefield-bench-card.is-fainted {
+  opacity: 0.55;
+  filter: saturate(0.72);
+}
+
+.battlefield-card-copy {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.battlefield-card-copy strong {
+  font-size: 1.02rem;
+  color: #f7fbff;
+}
+
+.battlefield-card-copy small,
+.battlefield-bench-card small {
+  color: rgba(220, 236, 255, 0.82);
+  line-height: 1.45;
+}
+
+.battlefield-hp {
+  margin-top: 4px;
+}
+
+.battlefield-hp-label {
+  font-size: 0.84rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: #e9f5ff;
+}
+
+.battlefield-bench-strip {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(190px, 1fr);
+  gap: 12px;
+  overflow-x: auto;
+  padding: 6px 2px 2px;
+}
+
+.battlefield-bench-card {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border-radius: 18px;
+  border: 1px solid rgba(162, 201, 255, 0.14);
+  background: rgba(3, 11, 24, 0.62);
+}
+
+.battlefield-bench-card strong {
+  color: #eef8ff;
+  font-size: 0.92rem;
+}
+
+.battlefield-side-rail {
+  display: grid;
+  gap: 14px;
+  align-content: start;
+  min-height: 0;
+  padding: 18px;
+  border-radius: 22px;
+  border: 1px solid rgba(162, 201, 255, 0.14);
+  background: rgba(5, 16, 28, 0.62);
+}
+
+.battlefield-rail-header {
+  display: grid;
+  gap: 6px;
+}
+
+.battlefield-rail-header strong {
+  font-size: 0.94rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #eff8ff;
+}
+
+.battlefield-rail-header span,
+.battlefield-empty-rail span {
+  color: rgba(221, 237, 255, 0.8);
+  font-size: 0.88rem;
+  line-height: 1.55;
+}
+
+.battlefield-condition-stack {
+  display: grid;
+  gap: 12px;
+  min-height: 0;
+  max-height: 720px;
+  overflow-y: auto;
+  padding-right: 6px;
+}
+
+.battlefield-condition-group,
+.battlefield-empty-rail {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border-radius: 18px;
+  border: 1px solid rgba(162, 201, 255, 0.12);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.battlefield-condition-group strong,
+.battlefield-empty-rail strong {
+  font-size: 0.82rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #eaf6ff;
+}
+
 .sim-field-panel {
   gap: 14px;
 }
@@ -1591,7 +1909,31 @@ button {
 }
 
 .sim-log {
-  max-height: 380px;
+  max-height: 520px;
+  overflow-y: auto;
+  padding-right: 8px;
+}
+
+.sim-log-turn-banner {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  margin-bottom: 12px;
+  padding: 14px 18px;
+  border-radius: 18px;
+  border: 1px solid rgba(94, 199, 255, 0.22);
+  background: rgba(7, 20, 34, 0.96);
+  font-size: 0.96rem;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #f2fbff;
+}
+
+.sim-log-entry {
+  font-size: 1rem;
+  line-height: 1.72;
+  color: #edf8ff;
 }
 
 .sim-action-grid {
@@ -1633,6 +1975,20 @@ button {
 .announcer-line {
   border-color: rgba(255, 186, 109, 0.22);
   background: rgba(255, 186, 109, 0.08);
+}
+
+@keyframes battlefield-lunge {
+  0% { transform: translate3d(0, 0, 0) scale(1); }
+  35% { transform: translate3d(8px, -8px, 0) scale(1.03); }
+  100% { transform: translate3d(0, 0, 0) scale(1); }
+}
+
+@keyframes battlefield-shake {
+  0% { transform: translate3d(0, 0, 0); }
+  20% { transform: translate3d(-8px, 0, 0); }
+  40% { transform: translate3d(8px, 0, 0); }
+  60% { transform: translate3d(-6px, 0, 0); }
+  100% { transform: translate3d(0, 0, 0); }
 }
 
 .growth-chart-list,
@@ -1733,6 +2089,10 @@ button {
   .sim-battle-grid {
     grid-template-columns: 1.05fr minmax(320px, 0.82fr) 1.05fr;
   }
+
+  .battlefield-layout {
+    grid-template-columns: minmax(0, 1.38fr) minmax(270px, 0.62fr);
+  }
 }
 
 @media (max-width: 1500px) {
@@ -1767,6 +2127,14 @@ button {
   .inspector-summary-panel {
     margin-top: -24px;
   }
+
+  .battlefield-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .battlefield-side-rail {
+    order: -1;
+  }
 }
 
 @media (max-width: 1280px) {
@@ -1798,6 +2166,10 @@ button {
   .sim-preview-grid,
   .sim-battle-grid {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .battlefield-stage {
+    min-height: 540px;
   }
 
   .panel.tall,
@@ -1879,6 +2251,22 @@ button {
     grid-template-columns: 1fr;
   }
 
+  .battlefield-card,
+  .battlefield-bench-card {
+    grid-template-columns: minmax(0, 1fr);
+    justify-items: center;
+    text-align: center;
+  }
+
+  .battlefield-card-copy,
+  .battlefield-bench-card > div {
+    justify-items: center;
+  }
+
+  .battlefield-bench-strip {
+    grid-auto-columns: minmax(170px, 1fr);
+  }
+
   .brand-sprite-row {
     flex-wrap: wrap;
   }
@@ -1956,6 +2344,12 @@ button {
     border-radius: 18px;
   }
 
+  .battlefield-panel,
+  .battlefield-side-rail {
+    padding: 14px;
+    border-radius: 18px;
+  }
+
   .section-header h2 {
     font-size: 1.08rem;
   }
@@ -1984,6 +2378,19 @@ button {
     grid-template-columns: 1fr;
   }
 
+  .battlefield-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .battlefield-stage {
+    min-height: 480px;
+    padding: 18px;
+  }
+
+  .battlefield-active-lanes.lanes-2 {
+    grid-template-columns: 1fr;
+  }
+
   .battle-bench-row {
     display: grid;
     grid-template-columns: 1fr 1fr;
@@ -1994,8 +2401,22 @@ button {
     min-width: 0;
   }
 
+  .battlefield-bench-strip {
+    grid-auto-flow: row;
+    grid-template-columns: 1fr;
+    grid-auto-columns: auto;
+    overflow-x: hidden;
+    overflow-y: auto;
+    max-height: 220px;
+  }
+
   .note-row {
     padding: 14px 15px;
+  }
+
+  .sim-log-turn-banner,
+  .sim-log-entry {
+    font-size: 0.94rem;
   }
 }
 .youtube-audio-player {
