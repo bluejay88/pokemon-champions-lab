@@ -39,7 +39,6 @@ import {
   usesMegaSpriteFallback,
   weatherOptions,
 } from './lib/champions';
-import { calculateDamage, summaryForResult } from './lib/damage';
 import {
   battleMusicTracks,
   createOnlineRoom,
@@ -55,9 +54,6 @@ import {
   submitOnlineChoices,
 } from './lib/online';
 import { clearState, listStoredProfiles, loadState, saveState } from './lib/storage';
-import { buildMoveParitySummary, moveParityForMove } from './lib/moveParity';
-import { buildAbilityParitySummary } from './lib/abilityParity';
-import { advancePreviewToBattle, applyReplacementChoices, battleHasPendingReplacements, buildAutoReplacementChoices, createSimulatorBattle, legalMovesForUnit, pendingReplacementActors, resolveTurn } from './lib/simulator';
 import { getMoveUsageInsight, getPokemonUsageInsight, getPopularPresetPatch, getPopularPresetSummary } from './lib/usage';
 import type {
   BattleFormat,
@@ -79,6 +75,21 @@ import type {
 } from './types';
 import type { SimSide, SimUnit, SimulatorBattleState, SimulatorChoice } from './lib/simulator';
 import type { OnlineBattleRoomView } from './lib/online';
+type DamageRuntimeModule = typeof import('./lib/damage');
+type MoveParityRuntimeModule = typeof import('./lib/moveParity');
+type AbilityParityRuntimeModule = typeof import('./lib/abilityParity');
+type SimulatorRuntimeModule = typeof import('./lib/simulator');
+type DamageResult = ReturnType<DamageRuntimeModule['calculateDamage']>;
+type MoveParitySummary = ReturnType<MoveParityRuntimeModule['buildMoveParitySummary']>;
+type MoveParityEntry = ReturnType<MoveParityRuntimeModule['moveParityForMove']>;
+type AbilityParitySummary = ReturnType<AbilityParityRuntimeModule['buildAbilityParitySummary']>;
+
+type BattleCoreRuntime = {
+  damage: DamageRuntimeModule;
+  moveParity: MoveParityRuntimeModule;
+  abilityParity: AbilityParityRuntimeModule;
+  simulator: SimulatorRuntimeModule;
+};
 
 type SimulatorPreviewState = {
   format: BattleFormat;
@@ -137,6 +148,143 @@ type BattlefieldConditionSection = {
   label: string;
   tags: BattleTag[];
 };
+
+let battleCoreRuntimeCache: BattleCoreRuntime | null = null;
+let battleCoreRuntimePromise: Promise<BattleCoreRuntime> | null = null;
+
+const emptyMoveParitySummary: MoveParitySummary = {
+  total: dataset.moves.length,
+  explicit: 0,
+  rulesAware: 0,
+  damageCore: 0,
+  reviewNeeded: dataset.moves.length,
+  coveredPercent: 0,
+  topReviewMoves: [],
+};
+
+const emptyAbilityParitySummary: AbilityParitySummary = {
+  total: dataset.pokemon.length,
+  explicit: 0,
+  damageCore: 0,
+  reviewNeeded: dataset.pokemon.length,
+  coveredPercent: 0,
+  topReviewAbilities: [],
+};
+
+function hasBattleCoreRuntime() {
+  return battleCoreRuntimeCache !== null;
+}
+
+async function ensureBattleCoreRuntime() {
+  if (battleCoreRuntimeCache) {
+    return battleCoreRuntimeCache;
+  }
+
+  battleCoreRuntimePromise ??= Promise.all([
+    import('./lib/damage'),
+    import('./lib/moveParity'),
+    import('./lib/abilityParity'),
+    import('./lib/simulator'),
+  ]).then(([damage, moveParity, abilityParity, simulator]) => {
+    battleCoreRuntimeCache = { damage, moveParity, abilityParity, simulator };
+    return battleCoreRuntimeCache;
+  });
+
+  return battleCoreRuntimePromise;
+}
+
+function fallbackLegalMovesForUnit(unit: SimUnit) {
+  return normalizeMoveSelection(unit.build, unit.pokemon)
+    .map((moveId) => unit.pokemon.movePool.find((move) => move.id === moveId))
+    .filter((move): move is PokemonMove => Boolean(move));
+}
+
+function calculateDamage(attacker: PokemonBuild, defender: PokemonBuild, move: PokemonMove, environment: EnvironmentState): DamageResult {
+  return battleCoreRuntimeCache?.damage.calculateDamage(attacker, defender, move, environment) ?? null;
+}
+
+function summaryForResult(result: DamageResult) {
+  if (!battleCoreRuntimeCache) {
+    return 'Loading battle math...';
+  }
+
+  return battleCoreRuntimeCache.damage.summaryForResult(result);
+}
+
+function moveParityForMove(move: PokemonMove): MoveParityEntry {
+  return battleCoreRuntimeCache?.moveParity.moveParityForMove(move) ?? {
+    moveId: move.id,
+    moveName: move.name,
+    tier: 'Review Needed',
+    summary: 'Move parity details are still loading for this report.',
+    tags: ['loading'],
+  };
+}
+
+function buildMoveParitySummary(moves: PokemonMove[]): MoveParitySummary {
+  return battleCoreRuntimeCache?.moveParity.buildMoveParitySummary(moves) ?? emptyMoveParitySummary;
+}
+
+function buildAbilityParitySummary(pokemon: PokemonEntry[]): AbilityParitySummary {
+  return battleCoreRuntimeCache?.abilityParity.buildAbilityParitySummary(pokemon) ?? emptyAbilityParitySummary;
+}
+
+function pendingReplacementActors(side: SimSide) {
+  return battleCoreRuntimeCache?.simulator.pendingReplacementActors(side) ?? side.active.flatMap((unitIndex, activeSlot) => {
+    const unit = typeof unitIndex === 'number' && unitIndex >= 0 ? side.units[unitIndex] ?? null : null;
+    return !unit || unit.fainted ? [activeSlot] : [];
+  });
+}
+
+function battleHasPendingReplacements(state: SimulatorBattleState) {
+  return battleCoreRuntimeCache?.simulator.battleHasPendingReplacements(state) ?? (
+    pendingReplacementActors(state.player).length > 0 || pendingReplacementActors(state.opponent).length > 0
+  );
+}
+
+function legalMovesForUnit(unit: SimUnit, state?: SimulatorBattleState, sideId?: 'player' | 'opponent') {
+  return battleCoreRuntimeCache?.simulator.legalMovesForUnit(unit, state, sideId) ?? fallbackLegalMovesForUnit(unit);
+}
+
+function createSimulatorBattle(...args: Parameters<SimulatorRuntimeModule['createSimulatorBattle']>) {
+  if (!battleCoreRuntimeCache) {
+    throw new Error('Battle runtime is still loading.');
+  }
+
+  return battleCoreRuntimeCache.simulator.createSimulatorBattle(...args);
+}
+
+function advancePreviewToBattle(...args: Parameters<SimulatorRuntimeModule['advancePreviewToBattle']>) {
+  if (!battleCoreRuntimeCache) {
+    throw new Error('Battle runtime is still loading.');
+  }
+
+  return battleCoreRuntimeCache.simulator.advancePreviewToBattle(...args);
+}
+
+function applyReplacementChoices(...args: Parameters<SimulatorRuntimeModule['applyReplacementChoices']>) {
+  if (!battleCoreRuntimeCache) {
+    throw new Error('Battle runtime is still loading.');
+  }
+
+  return battleCoreRuntimeCache.simulator.applyReplacementChoices(...args);
+}
+
+function buildAutoReplacementChoices(...args: Parameters<SimulatorRuntimeModule['buildAutoReplacementChoices']>) {
+  if (!battleCoreRuntimeCache) {
+    return [] as SimulatorChoice[];
+  }
+
+  return battleCoreRuntimeCache.simulator.buildAutoReplacementChoices(...args);
+}
+
+function resolveTurn(...args: Parameters<SimulatorRuntimeModule['resolveTurn']>) {
+  if (!battleCoreRuntimeCache) {
+    throw new Error('Battle runtime is still loading.');
+  }
+
+  return battleCoreRuntimeCache.simulator.resolveTurn(...args);
+}
 
 const appTabs: { id: BattleTab; label: string; short: string; description: string }[] = [
   { id: 'team-builder', label: 'Team Builder', short: 'Build', description: 'Craft, label, and save up to ten squads.' },
@@ -2058,6 +2206,7 @@ function announcerLinesFromBattleUpdate(previous: SimulatorBattleState | null, c
 function App() {
   const initialState = useMemo(() => loadState(), []);
   const [state, setState] = useState(initialState);
+  const [battleCoreReady, setBattleCoreReady] = useState(() => hasBattleCoreRuntime());
   const [activeTab, setActiveTab] = useState<BattleTab>('team-builder');
   const [selectedSlotIndex, setSelectedSlotIndex] = useState(0);
   const [calcAttacker, setCalcAttacker] = useState<PokemonBuild>(() => copyBuild(initialState.teams[0]?.slots[0] ?? createDefaultState().teams[0].slots[0]));
@@ -2144,12 +2293,12 @@ function App() {
   const attackerMoves = attackerPokemon ? attackerBuild.moveIds.map((id) => attackerPokemon.movePool.find((move) => move.id === id)).filter(isMoveEntry) : [];
   const defenderMoves = defenderPokemon ? defenderBuild.moveIds.map((id) => defenderPokemon.movePool.find((move) => move.id === id)).filter(isMoveEntry) : [];
   const attackerMoveResults = useMemo(
-    () => attackerMoves.map((move) => ({ move, result: calculateDamage(attackerBuild, defenderBuild, move, environment) })),
-    [attackerBuild, attackerMoves, defenderBuild, environment],
+    () => battleCoreReady ? attackerMoves.map((move) => ({ move, result: calculateDamage(attackerBuild, defenderBuild, move, environment) })) : [],
+    [attackerBuild, attackerMoves, battleCoreReady, defenderBuild, environment],
   );
   const defenderMoveResults = useMemo(
-    () => defenderMoves.map((move) => ({ move, result: calculateDamage(defenderBuild, attackerBuild, move, environment) })),
-    [attackerBuild, defenderBuild, defenderMoves, environment],
+    () => battleCoreReady ? defenderMoves.map((move) => ({ move, result: calculateDamage(defenderBuild, attackerBuild, move, environment) })) : [],
+    [attackerBuild, battleCoreReady, defenderBuild, defenderMoves, environment],
   );
   const selectedGeneratedPlan = generatedPlans.find((plan) => plan.id === selectedGeneratedPlanId) ?? generatedPlans[0] ?? null;
   const aiLockedValidations = useMemo(() => validateLockedPokemonInputs(aiLockedNames, aiFormat), [aiLockedNames, aiFormat]);
@@ -2178,11 +2327,11 @@ function App() {
         : 'sim-idle';
   const profileReady = Boolean(state.profile.trainerName.trim());
   const storedProfiles = useMemo(() => listStoredProfiles(), [state.profile.trainerName, lastSavedAt]);
-  const overallMoveParity = useMemo(() => buildMoveParitySummary(dataset.moves), []);
-  const overallAbilityParity = useMemo(() => buildAbilityParitySummary(dataset.pokemon), []);
+  const overallMoveParity = useMemo(() => buildMoveParitySummary(dataset.moves), [battleCoreReady]);
+  const overallAbilityParity = useMemo(() => buildAbilityParitySummary(dataset.pokemon), [battleCoreReady]);
   const selectedMoveParityEntries = useMemo(
     () => selectedPokedexPokemon.movePool.map((move) => moveParityForMove(move)),
-    [selectedPokedexPokemon],
+    [battleCoreReady, selectedPokedexPokemon],
   );
   const filteredPvpHistory = useMemo(() => {
     const query = pvpHistorySearch.trim().toLowerCase();
@@ -2291,6 +2440,30 @@ function App() {
   );
 
   const selectedResult = attackerMoveResults.find(({ move }) => move.id === selectedDamageMoveId)?.result ?? null;
+
+  useEffect(() => {
+    const heavyTabs: BattleTab[] = ['damage-lab', 'pokedex', 'simulator', 'pvp-battles', 'profile'];
+    const shouldLoadBattleCore =
+      heavyTabs.includes(activeTab) ||
+      Boolean(simPreview || simBattle || pvpRoom?.battle);
+    if (!shouldLoadBattleCore || hasBattleCoreRuntime()) {
+      if (hasBattleCoreRuntime() && !battleCoreReady) {
+        setBattleCoreReady(true);
+      }
+      return;
+    }
+
+    let cancelled = false;
+    void ensureBattleCoreRuntime().then(() => {
+      if (!cancelled) {
+        setBattleCoreReady(true);
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeTab, battleCoreReady, pvpRoom?.battle, simBattle, simPreview]);
 
   useEffect(() => {
     const handle = window.setTimeout(() => {
@@ -2830,6 +3003,10 @@ function App() {
     if (!currentBattle || currentBattle.stage !== 'battle') {
       return;
     }
+    if (!hasBattleCoreRuntime()) {
+      setSimTurnNotice('Battle engine is still loading. Give the simulator a moment and try again.');
+      return;
+    }
 
     if (battleHasPendingReplacements(currentBattle)) {
       const { choices, notices } = buildReplacementChoices(currentBattle, simChoiceDraftsRef.current, timedOut);
@@ -3076,6 +3253,11 @@ function App() {
   }
 
   function startSimulatorPreview() {
+    if (!battleCoreReady) {
+      setSimPreviewMessage('Loading the battle engine and damage runtime. Try again in a moment.');
+      void ensureBattleCoreRuntime().then(() => setBattleCoreReady(true));
+      return;
+    }
     const selectable = filledSlotIndices(team);
     if (selectable.length < 4) {
       return;
@@ -3127,6 +3309,10 @@ function App() {
 
   function beginSimBattle() {
     if (!simPreview) {
+      return;
+    }
+    if (!battleCoreReady) {
+      setSimPreviewMessage('Battle engine still loading. Hold for a moment, then start the match again.');
       return;
     }
 
@@ -3329,6 +3515,10 @@ function App() {
   async function submitPvpTurn(timedOut = false) {
     if (!onlineAccount || !pvpRoom?.battle) {
       return;
+    }
+    if (!hasBattleCoreRuntime()) {
+      await ensureBattleCoreRuntime();
+      setBattleCoreReady(true);
     }
 
     try {
@@ -3691,6 +3881,7 @@ function App() {
               </button>
 
                 <div className="result-stack">
+                  {!battleCoreReady ? <div className="note-row compact-note">Loading the battle calculator runtime for live damage lines...</div> : null}
                   <div className="move-result-grid">
                   {attackerMoveResults.map(({ move, result }) => {
                     return (
@@ -3820,6 +4011,7 @@ function App() {
                   <InfoStat label="Review Needed" value={`${overallMoveParity.reviewNeeded}`} />
                 </div>
                 <div className="notes-list compact-scroll">
+                  {!battleCoreReady ? <div className="note-row">Loading the move parity report for the current Champions roster...</div> : null}
                   <div className="note-row">Parity report is live: explicit means the move has a bespoke simulator hook, rules-aware means it rides on a shared pattern path, damage core means the calculator covers the base hit math cleanly, and review needed marks the remaining edge-case list.</div>
                   {overallMoveParity.topReviewMoves.slice(0, 3).map((entry) => (
                     <div key={entry.moveId} className="note-row">Review queue: <strong>{entry.moveName}</strong> - {entry.summary}</div>
@@ -4151,8 +4343,9 @@ function App() {
                   </label>
                 </div>
               ) : null}
-              <button className="action-button primary" onClick={startSimulatorPreview}>Generate Viable Opponent</button>
+              <button className="action-button primary" onClick={startSimulatorPreview} disabled={!battleCoreReady}>Generate Viable Opponent</button>
               <div className="notes-list compact-scroll">
+                {!battleCoreReady ? <div className="note-row">Loading the battle runtime for simulator, damage math, and parity reports...</div> : null}
                 <div className="note-row">The simulator uses the live roster, your saved spreads, the current damage engine, and a battle sandbox with targeting, switching, preview order, and AI decisions.</div>
                 <div className="note-row">Opponent preview now behaves like ranked team preview: you see all six species, but their items, abilities, and moves stay hidden until battle actions reveal them.</div>
                 <div className="note-row">Mega-capable Pokemon can now choose a dedicated Mega Evolve action, trigger their Mega ability before moving, and only one Mega can be used per side in each battle.</div>
@@ -4209,7 +4402,7 @@ function App() {
                   </div>
 
                   <div className="team-actions">
-                    <button className="action-button primary" onClick={beginSimBattle}>Start Battle</button>
+                    <button className="action-button primary" onClick={beginSimBattle} disabled={!battleCoreReady}>Start Battle</button>
                     <button className="action-button" onClick={() => setSimPreview(null)}>Cancel Preview</button>
                   </div>
 
