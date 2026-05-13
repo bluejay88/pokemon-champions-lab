@@ -76,6 +76,14 @@ function buildBattle(format, playerSlots, opponentSlots) {
   return advancePreviewToBattle(createSimulatorBattle(format, playerTeam, playerOrder, opponentTeam, opponentOrder, null));
 }
 
+function materializeGeneratedPlan(name, format, plan) {
+  const team = createTeam(name, format);
+  plan.slots.forEach((slot, index) => {
+    team.slots[index] = slot;
+  });
+  return sanitizeTeamForChampions(team);
+}
+
 if (!skipCompile) {
   rmSync(auditDir, { recursive: true, force: true });
   mkdirSync(auditDir, { recursive: true });
@@ -155,7 +163,17 @@ const { calculateDamage } = damage;
 const { generateTeamPlans } = ai;
 const { buildMoveParitySummary, moveParityForMove } = moveParity;
 const { createRoomState, forfeitRoomState, joinRoomState, submitBringOrderState, submitTurnChoicesState, touchRoomState } = online;
-const { advancePreviewToBattle, applyReplacementChoices, buildAutoReplacementChoices, createSimulatorBattle, legalMovesForUnit, randomChoicesForSide, resolveTurn, resolveTurnWithChoices } = simulator;
+const {
+  advancePreviewToBattle,
+  applyReplacementChoices,
+  battleHasPendingReplacements,
+  buildAutoReplacementChoices,
+  createSimulatorBattle,
+  legalMovesForUnit,
+  randomChoicesForSide,
+  resolveTurn,
+  resolveTurnWithChoices,
+} = simulator;
 
 const statKeys = ['hp', 'attack', 'defense', 'specialAttack', 'specialDefense', 'speed'];
 const failures = [];
@@ -239,8 +257,8 @@ for (const plan of aiPlans) {
 }
 
 const paritySummary = buildMoveParitySummary(dataset.moves);
-assert.ok(paritySummary.coveredPercent >= 75, `Expected move parity coverage to stay above 75%, received ${paritySummary.coveredPercent}%.`);
-for (const moveName of ['Protect', 'Encore', 'Disable', 'Aurora Veil', 'Clear Smog', 'Yawn', 'Perish Song', 'Pain Split', 'Destiny Bond']) {
+assert.equal(paritySummary.coveredPercent, 100, `Expected move parity coverage to stay at 100%, received ${paritySummary.coveredPercent}%.`);
+for (const moveName of ['Protect', 'Encore', 'Disable', 'Aurora Veil', 'Clear Smog', 'Yawn', 'Perish Song', 'Pain Split', 'Destiny Bond', 'Parabolic Charge', 'Draining Kiss', 'Bitter Blade', 'Matcha Gotcha', 'Rest']) {
   const move = dataset.moves.find((entry) => entry.name === moveName);
   assert(move, `Expected ${moveName} to exist in the Champions move list.`);
   const parity = moveParityForMove(move);
@@ -330,6 +348,12 @@ const toxicSpikesUser = findPokemonWithMoves(['Toxic Spikes'], ['Ariados', 'Arbo
 const hyperBeamUser = findPokemonWithMoves(['Hyper Beam'], ['Meganium', 'Charizard', 'Sableye']);
 const solarBeamUser = findPokemonWithMoves(['Solar Beam'], ['Meganium', 'Glimmora', 'Charizard']);
 const meteorBeamUser = findPokemonWithMoves(['Meteor Beam'], ['Glimmora']);
+const parabolicChargeUser = findPokemonWithMoves(['Parabolic Charge'], ['Bellibolt', 'Heliolisk', 'Ampharos']);
+const drainingKissUser = findPokemonWithMoves(['Draining Kiss'], ['Aromatisse', 'Audino', 'Alcremie']);
+const bitterBladeUser = findPokemonWithMoves(['Bitter Blade'], ['Ceruledge']);
+const matchaGotchaUser = findPokemonWithMoves(['Matcha Gotcha'], ['Sinistcha']);
+const sparklingAriaUser = findPokemonWithMoves(['Sparkling Aria'], ['Primarina']);
+const painSplitUser = findPokemonWithMoves(['Pain Split'], ['Banette', 'Alcremie', 'Arbok']);
 const pranksterUser = dataset.pokemon.find((pokemon) => pokemon.displayName === 'Sableye' && pokemon.abilities.some((ability) => ability.name === 'Prankster') && ['Taunt', 'Fake Out'].every((moveName) => pokemon.movePool.some((move) => move.name === moveName))) ?? null;
 const darkTarget = dataset.pokemon.find((pokemon) => pokemon.displayName === 'Umbreon' && pokemon.types.includes('Dark')) ?? findPokemonWithMoves(['Protect'], ['Umbreon']);
 const struggleTarget = findPokemonWithMoves(['Protect'], ['Clefable', 'Amoonguss', 'Umbreon']);
@@ -376,6 +400,12 @@ assert(
     hyperBeamUser &&
     solarBeamUser &&
     meteorBeamUser &&
+    parabolicChargeUser &&
+    drainingKissUser &&
+    bitterBladeUser &&
+    matchaGotchaUser &&
+    sparklingAriaUser &&
+    painSplitUser &&
     pranksterUser &&
     darkTarget &&
     struggleTarget &&
@@ -425,6 +455,12 @@ const toxicSpikesChoiceId = moveIdFor(toxicSpikesUser, 'Toxic Spikes');
 const hyperBeamChoiceId = moveIdFor(hyperBeamUser, 'Hyper Beam');
 const solarBeamChoiceId = moveIdFor(solarBeamUser, 'Solar Beam');
 const meteorBeamChoiceId = moveIdFor(meteorBeamUser, 'Meteor Beam');
+const parabolicChargeChoiceId = moveIdFor(parabolicChargeUser, 'Parabolic Charge');
+const drainingKissChoiceId = moveIdFor(drainingKissUser, 'Draining Kiss');
+const bitterBladeChoiceId = moveIdFor(bitterBladeUser, 'Bitter Blade');
+const matchaGotchaChoiceId = moveIdFor(matchaGotchaUser, 'Matcha Gotcha');
+const sparklingAriaChoiceId = moveIdFor(sparklingAriaUser, 'Sparkling Aria');
+const painSplitChoiceId = moveIdFor(painSplitUser, 'Pain Split');
 const pranksterTauntChoiceId = moveIdFor(pranksterUser, 'Taunt');
 const pranksterFakeOutChoiceId = moveIdFor(pranksterUser, 'Fake Out');
 const intimidateAttackId = intimidateUser.movePool.find((move) => move.category !== 'Status')?.id ?? intimidateUser.movePool[0]?.id ?? null;
@@ -472,6 +508,12 @@ assert(
     hyperBeamChoiceId &&
     solarBeamChoiceId &&
     meteorBeamChoiceId &&
+    parabolicChargeChoiceId &&
+    drainingKissChoiceId &&
+    bitterBladeChoiceId &&
+    matchaGotchaChoiceId &&
+    sparklingAriaChoiceId &&
+    painSplitChoiceId &&
     pranksterTauntChoiceId &&
     pranksterFakeOutChoiceId &&
     intimidateAttackId &&
@@ -597,6 +639,168 @@ earthquakeBattle = withMockRandom([0.1, 0.1, 0.1, 0.1, 0.1, 0.1], () => resolveT
 assert.ok(earthquakeBattle.player.units[1].currentHp < earthquakeBattle.player.units[1].maxHp, 'All-adjacent moves should hit the user\'s ally when appropriate.');
 assert.ok(earthquakeBattle.opponent.units[0].currentHp < earthquakeBattle.opponent.units[0].maxHp, 'Earthquake should damage the first opposing target.');
 assert.ok(earthquakeBattle.opponent.units[1].currentHp < earthquakeBattle.opponent.units[1].maxHp, 'Earthquake should damage the second opposing target.');
+
+let parabolicChargeBattle = buildBattle(
+  'Doubles',
+  [
+    buildSlot('parabolic-user', parabolicChargeUser, ['Parabolic Charge'], { natureId: 'modest', evs: { ...blankStats(), specialAttack: 32, hp: 20, speed: 14 } }),
+    buildSlot('parabolic-ally', wishUser, ['Wish'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } }),
+  ],
+  [
+    buildSlot('parabolic-foe-a', sunnyDayUser, ['Sunny Day'], { evs: { ...blankStats(), hp: 20, specialDefense: 24, defense: 22 } }),
+    buildSlot('parabolic-foe-b', wishUser, ['Wish'], { natureId: 'brave', evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14, speed: 0 } }),
+  ],
+);
+parabolicChargeBattle.player.units[0].currentHp = Math.max(1, Math.floor(parabolicChargeBattle.player.units[0].maxHp * 0.35));
+const parabolicStartHp = parabolicChargeBattle.player.units[0].currentHp;
+const parabolicAllyHp = parabolicChargeBattle.player.units[1].currentHp;
+const parabolicFoeAHp = parabolicChargeBattle.opponent.units[0].currentHp;
+const parabolicFoeBHp = parabolicChargeBattle.opponent.units[1].currentHp;
+parabolicChargeBattle = withMockRandom([0.1, 0.1, 0.1, 0.1, 0.1, 0.1], () =>
+  resolveTurnWithChoices(
+    parabolicChargeBattle,
+    [
+      { type: 'move', actor: 0, moveId: parabolicChargeChoiceId, target: 0 },
+      { type: 'move', actor: 1, moveId: wishChoiceId, target: 0 },
+    ],
+    [
+      { type: 'move', actor: 0, moveId: sunnyDayChoiceId, target: 0 },
+      { type: 'move', actor: 1, moveId: wishChoiceId, target: 0 },
+    ],
+  ));
+const parabolicDamageTotal =
+  (parabolicAllyHp - parabolicChargeBattle.player.units[1].currentHp) +
+  (parabolicFoeAHp - parabolicChargeBattle.opponent.units[0].currentHp) +
+  (parabolicFoeBHp - parabolicChargeBattle.opponent.units[1].currentHp);
+const parabolicExpectedHeal = Math.min(
+  parabolicChargeBattle.player.units[0].maxHp - parabolicStartHp,
+  Math.max(1, Math.round(parabolicDamageTotal * 0.5)),
+);
+assert.ok(parabolicChargeBattle.player.units[1].currentHp < parabolicAllyHp, 'Parabolic Charge should strike adjacent allies.');
+assert.ok(parabolicChargeBattle.opponent.units[0].currentHp < parabolicFoeAHp, 'Parabolic Charge should damage the first opposing target.');
+assert.ok(parabolicChargeBattle.opponent.units[1].currentHp < parabolicFoeBHp, 'Parabolic Charge should damage the second opposing target.');
+assert.equal(parabolicChargeBattle.player.units[0].currentHp - parabolicStartHp, parabolicExpectedHeal, 'Parabolic Charge should heal for half the total damage dealt to all struck targets.');
+
+let drainingKissBattle = buildBattle(
+  'Singles',
+  [buildSlot('draining-kiss-user', drainingKissUser, ['Draining Kiss'], { natureId: 'modest', evs: { ...blankStats(), specialAttack: 32, hp: 20, speed: 14 } })],
+  [buildSlot('draining-kiss-foe', sunnyDayUser, ['Sunny Day'], { natureId: 'brave', evs: { ...blankStats(), hp: 32, specialDefense: 20, defense: 14, speed: 0 } })],
+);
+drainingKissBattle.player.units[0].currentHp = Math.max(1, Math.floor(drainingKissBattle.player.units[0].maxHp * 0.3));
+const drainingKissStartHp = drainingKissBattle.player.units[0].currentHp;
+const drainingKissTargetHp = drainingKissBattle.opponent.units[0].currentHp;
+drainingKissBattle = withMockRandom([0.1, 0.1, 0.1], () =>
+  resolveTurnWithChoices(
+    drainingKissBattle,
+    [{ type: 'move', actor: 0, moveId: drainingKissChoiceId, target: 0 }],
+    [{ type: 'move', actor: 0, moveId: sunnyDayChoiceId, target: 0 }],
+  ));
+const drainingKissDamage = drainingKissTargetHp - drainingKissBattle.opponent.units[0].currentHp;
+const drainingKissExpectedHeal = Math.min(
+  drainingKissBattle.player.units[0].maxHp - drainingKissStartHp,
+  Math.max(1, Math.round(drainingKissDamage * 0.75)),
+);
+assert.equal(drainingKissBattle.player.units[0].currentHp - drainingKissStartHp, drainingKissExpectedHeal, 'Draining Kiss should restore three-quarters of the damage it dealt.');
+
+let bitterBladeBattle = buildBattle(
+  'Singles',
+  [buildSlot('bitter-blade-user', bitterBladeUser, ['Bitter Blade'], { natureId: 'adamant', evs: { ...blankStats(), attack: 32, hp: 20, speed: 14 } })],
+  [buildSlot('bitter-blade-foe', sunnyDayUser, ['Sunny Day'], { natureId: 'brave', evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14, speed: 0 } })],
+);
+bitterBladeBattle.player.units[0].currentHp = Math.max(1, Math.floor(bitterBladeBattle.player.units[0].maxHp * 0.3));
+const bitterBladeStartHp = bitterBladeBattle.player.units[0].currentHp;
+const bitterBladeTargetHp = bitterBladeBattle.opponent.units[0].currentHp;
+bitterBladeBattle = withMockRandom([0.1, 0.1, 0.1], () =>
+  resolveTurnWithChoices(
+    bitterBladeBattle,
+    [{ type: 'move', actor: 0, moveId: bitterBladeChoiceId, target: 0 }],
+    [{ type: 'move', actor: 0, moveId: sunnyDayChoiceId, target: 0 }],
+  ));
+const bitterBladeDamage = bitterBladeTargetHp - bitterBladeBattle.opponent.units[0].currentHp;
+const bitterBladeExpectedHeal = Math.min(
+  bitterBladeBattle.player.units[0].maxHp - bitterBladeStartHp,
+  Math.max(1, Math.round(bitterBladeDamage * 0.5)),
+);
+assert.equal(bitterBladeBattle.player.units[0].currentHp - bitterBladeStartHp, bitterBladeExpectedHeal, 'Bitter Blade should restore half the damage it dealt.');
+
+let matchaGotchaBattle = buildBattle(
+  'Doubles',
+  [
+    buildSlot('matcha-user', matchaGotchaUser, ['Matcha Gotcha'], { natureId: 'modest', evs: { ...blankStats(), specialAttack: 32, hp: 20, speed: 14 } }),
+    buildSlot('matcha-ally', protectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } }),
+  ],
+  [
+    buildSlot('matcha-foe-a', sunnyDayUser, ['Sunny Day'], { evs: { ...blankStats(), hp: 20, specialDefense: 24, defense: 22 } }),
+    buildSlot('matcha-foe-b', wishUser, ['Wish'], { natureId: 'brave', evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14, speed: 0 } }),
+  ],
+);
+matchaGotchaBattle.player.units[0].currentHp = Math.max(1, Math.floor(matchaGotchaBattle.player.units[0].maxHp * 0.32));
+const matchaStartHp = matchaGotchaBattle.player.units[0].currentHp;
+const matchaFoeAHp = matchaGotchaBattle.opponent.units[0].currentHp;
+const matchaFoeBHp = matchaGotchaBattle.opponent.units[1].currentHp;
+matchaGotchaBattle = withMockRandom([0.1, 0.1, 0.1, 0.1, 0.1], () =>
+  resolveTurnWithChoices(
+    matchaGotchaBattle,
+    [
+      { type: 'move', actor: 0, moveId: matchaGotchaChoiceId, target: 0 },
+      { type: 'move', actor: 1, moveId: protectChoiceId, target: 0 },
+    ],
+    [
+      { type: 'move', actor: 0, moveId: sunnyDayChoiceId, target: 0 },
+      { type: 'move', actor: 1, moveId: wishChoiceId, target: 0 },
+    ],
+  ));
+const matchaDamageTotal =
+  (matchaFoeAHp - matchaGotchaBattle.opponent.units[0].currentHp) +
+  (matchaFoeBHp - matchaGotchaBattle.opponent.units[1].currentHp);
+const matchaExpectedHeal = Math.min(
+  matchaGotchaBattle.player.units[0].maxHp - matchaStartHp,
+  Math.max(1, Math.round(matchaDamageTotal * 0.5)),
+);
+assert.equal(matchaGotchaBattle.player.units[0].currentHp - matchaStartHp, matchaExpectedHeal, 'Matcha Gotcha should heal for half the total damage it dealt to both opponents.');
+
+let painSplitBattle = buildBattle(
+  'Singles',
+  [buildSlot('pain-split-user', painSplitUser, ['Pain Split'], { natureId: 'timid', evs: { ...blankStats(), hp: 20, specialDefense: 14, speed: 32 } })],
+  [buildSlot('pain-split-foe', wishUser, ['Wish'], { natureId: 'brave', evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14, speed: 0 } })],
+);
+painSplitBattle.player.units[0].currentHp = Math.max(1, Math.floor(painSplitBattle.player.units[0].maxHp * 0.24));
+painSplitBattle.opponent.units[0].currentHp = Math.max(2, Math.floor(painSplitBattle.opponent.units[0].maxHp * 0.82));
+const painSplitExpectedShared = Math.max(1, Math.floor((painSplitBattle.player.units[0].currentHp + painSplitBattle.opponent.units[0].currentHp) / 2));
+painSplitBattle = withMockRandom([0.1, 0.1], () =>
+  resolveTurnWithChoices(
+    painSplitBattle,
+    [{ type: 'move', actor: 0, moveId: painSplitChoiceId, target: 0 }],
+    [{ type: 'move', actor: 0, moveId: wishChoiceId, target: 0 }],
+  ));
+assert.equal(painSplitBattle.player.units[0].currentHp, Math.min(painSplitBattle.player.units[0].maxHp, painSplitExpectedShared), 'Pain Split should set the user HP to the shared halved total.');
+assert.equal(painSplitBattle.opponent.units[0].currentHp, Math.min(painSplitBattle.opponent.units[0].maxHp, painSplitExpectedShared), 'Pain Split should set the target HP to the shared halved total.');
+
+let sparklingAriaBattle = buildBattle(
+  'Doubles',
+  [
+    buildSlot('sparkling-user', sparklingAriaUser, ['Sparkling Aria'], { natureId: 'modest', evs: { ...blankStats(), specialAttack: 32, hp: 20, speed: 14 } }),
+    buildSlot('sparkling-ally', wishUser, ['Wish'], { status: 'burn', evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } }),
+  ],
+  [
+    buildSlot('sparkling-foe-a', sunnyDayUser, ['Sunny Day'], { status: 'burn', evs: { ...blankStats(), hp: 20, specialDefense: 24, defense: 22 } }),
+    buildSlot('sparkling-foe-b', protectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } }),
+  ],
+);
+sparklingAriaBattle = withMockRandom([0.1, 0.1, 0.1, 0.1], () =>
+  resolveTurnWithChoices(
+    sparklingAriaBattle,
+    [
+      { type: 'move', actor: 0, moveId: sparklingAriaChoiceId, target: 0 },
+      { type: 'move', actor: 1, moveId: wishChoiceId, target: 0 },
+    ],
+    [
+      { type: 'move', actor: 0, moveId: sunnyDayChoiceId, target: 0 },
+      { type: 'move', actor: 1, moveId: protectChoiceId, target: 0 },
+    ],
+  ));
+assert.equal(sparklingAriaBattle.player.units[1].build.status, 'healthy', 'Sparkling Aria should cure allied burns on struck adjacent Pokemon.');
+assert.equal(sparklingAriaBattle.opponent.units[0].build.status, 'healthy', 'Sparkling Aria should cure opposing burns on struck adjacent Pokemon.');
 
 let auroraVeilBattle = buildBattle(
   'Doubles',
@@ -1391,6 +1595,45 @@ for (let matchIndex = 0; matchIndex < 50; matchIndex += 1) {
   }
 }
 
+let simulatorBattlePlayerWins = 0;
+let simulatorBattleOpponentWins = 0;
+for (let matchIndex = 0; matchIndex < 50; matchIndex += 1) {
+  const format = matchIndex < 25 ? 'Singles' : 'Doubles';
+  const [playerPlan] = generateTeamPlans('stadium-balance', format, 55 + (matchIndex % 15), [], 1, true);
+  const [opponentPlan] = generateTeamPlans('stadium-balance', format, 45 + ((matchIndex + 7) % 15), [], 1, true);
+  assert.ok(playerPlan && opponentPlan, `Simulator audit match ${matchIndex + 1} should be able to generate both teams.`);
+
+  const playerTeam = materializeGeneratedPlan(`Simulator Audit ${matchIndex + 1}A`, format, playerPlan);
+  const opponentTeam = materializeGeneratedPlan(`Simulator Audit ${matchIndex + 1}B`, format, opponentPlan);
+  const order = [0, 1, 2, 3];
+  let battle = advancePreviewToBattle(createSimulatorBattle(format, playerTeam, order, opponentTeam, order, null));
+
+  let guard = 0;
+  while (!battle.winner && guard < 100) {
+    if (battleHasPendingReplacements(battle)) {
+      battle = applyReplacementChoices(
+        battle,
+        buildAutoReplacementChoices(battle, 'player'),
+        buildAutoReplacementChoices(battle, 'opponent'),
+      );
+      if (battle.winner) {
+        break;
+      }
+    }
+    const playerChoices = randomChoicesForSide(battle, 'player');
+    const opponentChoices = randomChoicesForSide(battle, 'opponent');
+    battle = resolveTurnWithChoices(battle, playerChoices, opponentChoices);
+    guard += 1;
+  }
+
+  assert.ok(battle.winner, `Simulator audit match ${matchIndex + 1} should finish within the guard limit.`);
+  if (battle.winner === 'player') {
+    simulatorBattlePlayerWins += 1;
+  } else {
+    simulatorBattleOpponentWins += 1;
+  }
+}
+
 if (failures.length) {
   throw new Error(`Stat range audit failed for ${failures.length} entries.\n${failures.slice(0, 24).join('\n')}`);
 }
@@ -1402,7 +1645,8 @@ const summary = [
   `Verified item clause sanitization for manual teams and AI-generated teams.`,
   `Verified move-parity registry coverage at ${paritySummary.coveredPercent}% across ${paritySummary.total} Champions moves, with ${paritySummary.explicit} explicit hooks tagged in the report.`,
   `Verified damage engine produces live damage output under the Champions EV model, including Doubles spread reduction, Aurora Veil, Helping Hand, Magic Room, and Wonder Room checks.`,
-  `Verified simulator rules for chained Protect odds, confusion/trap timers, Trick and Recycle item flow, Substitute and Healing Wish handling, Lock-On accuracy, ally-target support hooks, rain-locked Thunder accuracy, Snarl spread debuffs, Earthquake ally collateral, Sticky Web and Toxic Spikes switch-in hooks, forced-thaw freeze timing, Rest sleep timing, Disable and Torment move locks, weather field timers, opponent reveal state, Calm Mind and Nasty Plot boosts, Trick Room toggling, recharge turns, charge-turn attacks, mid-turn doubles retargeting, Struggle locks, Dark-type immunity to opposing Prankster status moves, and Mega weather ordering.`,
+  `Verified simulator rules for chained Protect odds, confusion/trap timers, Trick and Recycle item flow, Substitute and Healing Wish handling, Lock-On accuracy, ally-target support hooks, rain-locked Thunder accuracy, Snarl spread debuffs, Earthquake ally collateral, Parabolic Charge spread healing, Draining Kiss and Bitter Blade drain ratios, Matcha Gotcha spread recovery, Pain Split averaging, Sparkling Aria burn cures, Sticky Web and Toxic Spikes switch-in hooks, forced-thaw freeze timing, Rest sleep timing, Disable and Torment move locks, weather field timers, opponent reveal state, Calm Mind and Nasty Plot boosts, Trick Room toggling, recharge turns, charge-turn attacks, mid-turn doubles retargeting, Struggle locks, Dark-type immunity to opposing Prankster status moves, and Mega weather ordering.`,
+  `Verified 50 fully automated simulator battle sweeps across Singles and Doubles (${simulatorBattlePlayerWins} player-side wins / ${simulatorBattleOpponentWins} opponent-side wins).`,
   `Verified shared PvP room logic, including bring-four lock-in, full roster integrity, deadline-based turn resolution, forfeit handling, and 50 automated room-code battle simulations (${onlineBattleHostWins} host wins / ${onlineBattleGuestWins} guest wins).`,
   warnings.length ? `Source-data warnings: ${warnings.length} HP floor rows on the scraped form pages disagree with fixed 31 IV policy, so the app keeps the fixed-IV result intentionally.` : 'Source-data warnings: none.',
 ];

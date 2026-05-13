@@ -173,7 +173,16 @@ export interface SimulatorBattleState {
 
 const priorityMoves = new Set(['Fake Out', 'Bullet Punch', 'Sucker Punch', 'Extreme Speed', 'Aqua Jet', 'Ice Shard']);
 const healingMoves = new Set(['Morning Sun', 'Recover', 'Roost', 'Slack Off', 'Moonlight', 'Synthesis', 'Wish', 'Shore Up', 'Soft-Boiled']);
-const drainingMoves = new Set(['Drain Punch', 'Giga Drain', 'Horn Leech', 'Leech Life', 'Parabolic Charge', 'Draining Kiss']);
+const drainingMoves = new Set([
+  'Bitter Blade',
+  'Drain Punch',
+  'Draining Kiss',
+  'Giga Drain',
+  'Horn Leech',
+  'Leech Life',
+  'Matcha Gotcha',
+  'Parabolic Charge',
+]);
 const recoilMoves = new Set(['Brave Bird', 'Double-Edge', 'Flare Blitz', 'Head Smash', 'Volt Tackle', 'Wave Crash', 'Wood Hammer']);
 const rechargeMoves = new Set(['Blast Burn', 'Eternabeam', 'Frenzy Plant', 'Giga Impact', 'Hydro Cannon', 'Hyper Beam', 'Meteor Assault', 'Prismatic Laser', 'Roar of Time', 'Rock Wrecker']);
 const chargeMoves = new Set(['Meteor Beam', 'Razor Wind', 'Sky Attack', 'Skull Bash', 'Solar Beam', 'Solar Blade']);
@@ -185,21 +194,34 @@ const protectBypassMoves = new Set(['Feint', 'Phantom Force', 'Tearful Look']);
 const allAdjacentFoeMoves = new Set([
   'Blizzard',
   'Breaking Swipe',
+  'Burning Jealousy',
+  'Cotton Spore',
   'Dazzling Gleam',
+  'Electroweb',
   'Heat Wave',
   'Hyper Voice',
   'Icy Wind',
+  'Matcha Gotcha',
+  'Mortal Spin',
   'Muddy Water',
   'Rock Slide',
   'Snarl',
+  'String Shot',
   'Struggle Bug',
   'Swift',
+  'Sweet Scent',
 ]);
 const allAdjacentPokemonMoves = new Set([
   'Bulldoze',
   'Discharge',
   'Earthquake',
+  'Explosion',
   'Lava Plume',
+  'Misty Explosion',
+  'Parabolic Charge',
+  'Self-Destruct',
+  'Sludge Wave',
+  'Sparkling Aria',
   'Surf',
 ]);
 const pivotMoves = new Set(['Volt Switch', 'U-turn', 'Flip Turn']);
@@ -496,7 +518,7 @@ function moveScope(move: PokemonMove): MoveScope {
     return 'all-adjacent';
   }
 
-  if (allAdjacentFoeMoves.has(move.name) || /targets'/i.test(move.description)) {
+  if (allAdjacentFoeMoves.has(move.name) || /\btargets\b/i.test(move.description)) {
     return 'all-opponents';
   }
 
@@ -526,6 +548,14 @@ function protectionSuccessChance(streak: number) {
 
 function healAmount(unit: SimUnit, fraction: number) {
   return Math.max(1, Math.round(unit.maxHp * fraction));
+}
+
+function drainFractionForMove(moveName: string) {
+  if (moveName === 'Draining Kiss') {
+    return 0.75;
+  }
+
+  return 0.5;
 }
 
 function typeListForUnit(state: SimulatorBattleState, unit: SimUnit) {
@@ -2194,9 +2224,10 @@ function applyStatusMove(
   }
 
   if (move.name === 'Helping Hand') {
-    const allyIndex = actingSide.active.find((index) => index !== actingSide.units.indexOf(actor));
-    if (typeof allyIndex === 'number') {
-      actingSide.units[allyIndex].helpingHand = true;
+    const allyIndex = actingSide.active.find((index) => index >= 0 && index !== actingSide.units.indexOf(actor));
+    const ally = typeof allyIndex === 'number' && allyIndex >= 0 ? actingSide.units[allyIndex] ?? null : null;
+    if (ally && !ally.fainted) {
+      ally.helpingHand = true;
       state.log.unshift(`${actor.pokemon.displayName} boosted its ally with Helping Hand.`);
       return;
     }
@@ -3725,7 +3756,8 @@ function executeDamageMove(
   }
 
   if (drainingMoves.has(move.name) && totalDamage > 0 && !actor.fainted) {
-    if (tryHealUnit(state, actor, Math.max(1, Math.round(totalDamage * 0.5)), move.name)) {
+    const recoveredHp = Math.max(1, Math.round(totalDamage * drainFractionForMove(move.name)));
+    if (tryHealUnit(state, actor, recoveredHp, move.name)) {
       state.log.unshift(`${actor.pokemon.displayName} drained health back.`);
     }
   }
