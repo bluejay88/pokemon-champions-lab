@@ -1653,11 +1653,27 @@ button {
   grid-template-columns: minmax(0, 1.28fr) minmax(240px, 0.72fr);
 }
 
+.battlefield-layout-with-controls,
+.battlefield-live-combat-row {
+  grid-template-columns: minmax(0, 1.26fr) minmax(340px, 0.84fr);
+  gap: 18px;
+  align-items: start;
+}
+
 .battlefield-scroll-panel {
   min-width: 0;
   max-height: 780px;
   overflow: auto;
   padding-right: 6px;
+}
+
+.battlefield-main-stack,
+.battlefield-control-panel,
+.battlefield-action-rail,
+.battlefield-action-stack {
+  display: grid;
+  gap: 18px;
+  min-width: 0;
 }
 
 .battlefield-stage-shell {
@@ -1878,6 +1894,13 @@ button {
   font-size: 0.98rem;
 }
 
+.battlefield-panel-expansive .battlefield-type-pill,
+.battlefield-panel-expansive .battlefield-status-clear,
+.battlefield-panel-expansive .battlefield-status-chip {
+  min-height: 36px;
+  font-size: 0.84rem;
+}
+
 .battlefield-card.is-actor {
   animation: battlefield-lunge 640ms ease;
   border-color: rgba(94, 199, 255, 0.48);
@@ -1897,7 +1920,7 @@ button {
 
 .battlefield-card-copy {
   display: grid;
-  gap: 6px;
+  gap: 10px;
   min-width: 0;
 }
 
@@ -1921,6 +1944,63 @@ button {
   font-weight: 700;
   letter-spacing: 0.02em;
   color: #e9f5ff;
+}
+
+.battlefield-card-footer {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.battlefield-type-row,
+.battlefield-status-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.battlefield-type-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(120, 214, 173, 0.28);
+  background: rgba(14, 44, 31, 0.72);
+  color: #dcffee;
+  font-size: 0.78rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.battlefield-type-pill.muted {
+  border-color: rgba(162, 201, 255, 0.18);
+  background: rgba(255, 255, 255, 0.03);
+  color: rgba(222, 238, 255, 0.78);
+}
+
+.battlefield-status-chip {
+  position: static;
+  min-width: 72px;
+  justify-content: center;
+  box-shadow: none;
+}
+
+.battlefield-status-clear {
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(94, 199, 255, 0.18);
+  background: rgba(9, 23, 38, 0.76);
+  color: #d8eeff;
+  font-size: 0.78rem;
+  font-weight: 700;
 }
 
 .battlefield-bench-strip {
@@ -1972,6 +2052,54 @@ button {
   border-radius: 22px;
   border: 1px solid rgba(162, 201, 255, 0.14);
   background: rgba(5, 16, 28, 0.62);
+}
+
+.battlefield-side-rail-inline {
+  padding: 16px;
+}
+
+.battlefield-control-panel .sim-action-grid {
+  grid-template-columns: minmax(0, 1fr);
+  margin-top: 0;
+}
+
+.battlefield-control-panel .sim-action-card {
+  min-height: 0;
+}
+
+.battlefield-control-panel .team-actions {
+  margin-top: 0;
+}
+
+.battlefield-control-panel .notes-list,
+.battlefield-action-rail .notes-list {
+  max-height: 260px;
+}
+
+.battlefield-side-top .battlefield-card {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.battlefield-side-top .battlefield-card .sprite-shell.standard {
+  order: 2;
+}
+
+.battlefield-side-top .battlefield-card-copy {
+  order: 1;
+  text-align: right;
+}
+
+.battlefield-side-top .battlefield-card-footer {
+  justify-content: flex-end;
+}
+
+.battlefield-side-top .battlefield-type-row,
+.battlefield-side-top .battlefield-status-row {
+  justify-content: flex-end;
+}
+
+.battlefield-side-top .battlefield-card .sprite-image {
+  transform: scaleX(-1);
 }
 
 .battlefield-panel-expansive .battlefield-side-rail {
@@ -2329,6 +2457,11 @@ button {
     grid-template-columns: minmax(0, 1fr);
   }
 
+  .battlefield-live-combat-row,
+  .battlefield-layout-with-controls {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
   .battlefield-stage {
     min-height: 540px;
   }
@@ -2417,6 +2550,32 @@ button {
   .move-selector-grid,
   .ev-grid {
     grid-template-columns: 1fr;
+  }
+
+  .battlefield-side-top .battlefield-card,
+  .battlefield-card {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .battlefield-side-top .battlefield-card .sprite-shell.standard,
+  .battlefield-card .sprite-shell.standard {
+    order: 0;
+  }
+
+  .battlefield-side-top .battlefield-card .sprite-image {
+    transform: none;
+  }
+
+  .battlefield-side-top .battlefield-card-copy,
+  .battlefield-card-copy {
+    text-align: left;
+  }
+
+  .battlefield-side-top .battlefield-card-footer,
+  .battlefield-card-footer,
+  .battlefield-side-top .battlefield-type-row,
+  .battlefield-side-top .battlefield-status-row {
+    justify-content: flex-start;
   }
 
   .move-table-head,

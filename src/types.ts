@@ -151,7 +151,7 @@ export interface SimulatorMatchRecord {
   format: BattleFormat;
   teamName: string;
   mode: 'AI Simulator' | 'PvP';
-  result: 'Win' | 'Loss';
+  result: 'Win' | 'Loss' | 'Draw';
   turns: number;
   opponentPreview: string[];
   starPokemon: string | null;
@@ -161,7 +161,7 @@ export interface SimulatorMatchRecord {
   opponentName?: string | null;
   roomCode?: string | null;
   musicTrackId?: string | null;
-  resultReason?: 'normal' | 'forfeit' | null;
+  resultReason?: 'normal' | 'forfeit' | 'timeout' | null;
   battleLog: string[];
   turnReviews: SimulatorTurnReview[];
 }
@@ -212,8 +212,8 @@ export interface OnlineBattleRoomHistoryEntry {
   format: BattleFormat;
   trainerName: string;
   opponentName: string;
-  result: 'Win' | 'Loss';
-  resultReason: 'normal' | 'forfeit' | null;
+  result: 'Win' | 'Loss' | 'Draw';
+  resultReason: 'normal' | 'forfeit' | 'timeout' | null;
   turns: number;
   musicTrackId: string;
   winnerName: string | null;

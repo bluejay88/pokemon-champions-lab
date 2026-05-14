@@ -1557,13 +1557,31 @@ deadlineAuditRoom = submitBringOrderState(deadlineAuditRoom, guestAccount.player
 const deadlineAuditTurn = deadlineAuditRoom.battle?.turn ?? 0;
 deadlineAuditRoom = submitTurnChoicesState(deadlineAuditRoom, hostAccount.playerId, randomChoicesForSide(deadlineAuditRoom.battle, 'player'));
 deadlineAuditRoom = submitTurnChoicesState(deadlineAuditRoom, guestAccount.playerId, randomChoicesForSide(deadlineAuditRoom.battle, 'opponent'));
-assert.equal(deadlineAuditRoom.battle?.turn, deadlineAuditTurn, 'PvP turn resolution should wait for the move clock even when both players lock early.');
-deadlineAuditRoom.deadlineAt = new Date(Date.now() - 1000).toISOString();
-deadlineAuditRoom = touchRoomState(deadlineAuditRoom);
-assert.equal(deadlineAuditRoom.battle?.turn, deadlineAuditTurn + 1, 'PvP turn resolution should advance as soon as the move clock expires.');
+assert.equal(deadlineAuditRoom.battle?.turn, deadlineAuditTurn + 1, 'PvP turn resolution should advance immediately once both battlers lock their choices.');
+
+let timeoutAuditRoom = createRoomState(hostAccount, auditHostTeam, 'Singles', 'gen5-final', true);
+timeoutAuditRoom = joinRoomState(timeoutAuditRoom, guestAccount, auditGuestTeam, 'gen4-champion', true);
+timeoutAuditRoom = submitBringOrderState(timeoutAuditRoom, hostAccount.playerId, [0, 1, 2, 3]);
+timeoutAuditRoom = submitBringOrderState(timeoutAuditRoom, guestAccount.playerId, [0, 1, 2, 3]);
+const timeoutAuditTurn = timeoutAuditRoom.battle?.turn ?? 0;
+timeoutAuditRoom = submitTurnChoicesState(timeoutAuditRoom, hostAccount.playerId, randomChoicesForSide(timeoutAuditRoom.battle, 'player'));
+timeoutAuditRoom.deadlineAt = new Date(Date.now() - 1000).toISOString();
+timeoutAuditRoom = touchRoomState(timeoutAuditRoom);
+assert.equal(timeoutAuditRoom.battle?.turn, timeoutAuditTurn + 1, 'PvP turn resolution should still advance when the move clock expires without both players locking in.');
+
+let roomMatchTimeoutAudit = createRoomState(hostAccount, auditHostTeam, 'Singles', 'gen5-final', true);
+roomMatchTimeoutAudit = joinRoomState(roomMatchTimeoutAudit, guestAccount, auditGuestTeam, 'gen4-champion', true);
+roomMatchTimeoutAudit = submitBringOrderState(roomMatchTimeoutAudit, hostAccount.playerId, [0, 1, 2, 3]);
+roomMatchTimeoutAudit = submitBringOrderState(roomMatchTimeoutAudit, guestAccount.playerId, [0, 1, 2, 3]);
+roomMatchTimeoutAudit.matchDeadlineAt = new Date(Date.now() - 1000).toISOString();
+roomMatchTimeoutAudit = touchRoomState(roomMatchTimeoutAudit);
+assert.equal(roomMatchTimeoutAudit.stage, 'finished', 'PvP rooms should end cleanly when the overall match timer expires.');
+assert.equal(roomMatchTimeoutAudit.resultReason, 'timeout', 'PvP rooms should mark overall match timer endings as timeout results.');
+assert.equal(roomMatchTimeoutAudit.winnerSeat, null, 'Current Pokemon Champions timeout parity should record overall timer expiry as a draw.');
 
 let onlineBattleHostWins = 0;
 let onlineBattleGuestWins = 0;
+let onlineBattleDraws = 0;
 for (let matchIndex = 0; matchIndex < 50; matchIndex += 1) {
   let room = createRoomState(hostAccount, auditHostTeam, 'Singles', 'gen5-final', true);
   room = joinRoomState(room, guestAccount, auditGuestTeam, 'gen4-champion', true);
@@ -1583,15 +1601,18 @@ for (let matchIndex = 0; matchIndex < 50; matchIndex += 1) {
   }
 
   if (room.stage === 'battle') {
-    room = forfeitRoomState(room, guestAccount.playerId);
+    room.matchDeadlineAt = new Date(Date.now() - 1000).toISOString();
+    room = touchRoomState(room);
   }
 
   assert.equal(room.stage, 'finished', 'A fully automated PvP audit battle should reach a finished state.');
-  assert.ok(room.winnerSeat === 'host' || room.winnerSeat === 'guest', 'A finished PvP room should always name a winner.');
+  assert.ok(room.winnerSeat === 'host' || room.winnerSeat === 'guest' || room.winnerSeat === null, 'A finished PvP room should resolve to a winner or a timeout draw.');
   if (room.winnerSeat === 'host') {
     onlineBattleHostWins += 1;
-  } else {
+  } else if (room.winnerSeat === 'guest') {
     onlineBattleGuestWins += 1;
+  } else {
+    onlineBattleDraws += 1;
   }
 }
 
@@ -1647,7 +1668,7 @@ const summary = [
   `Verified damage engine produces live damage output under the Champions EV model, including Doubles spread reduction, Aurora Veil, Helping Hand, Magic Room, and Wonder Room checks.`,
   `Verified simulator rules for chained Protect odds, confusion/trap timers, Trick and Recycle item flow, Substitute and Healing Wish handling, Lock-On accuracy, ally-target support hooks, rain-locked Thunder accuracy, Snarl spread debuffs, Earthquake ally collateral, Parabolic Charge spread healing, Draining Kiss and Bitter Blade drain ratios, Matcha Gotcha spread recovery, Pain Split averaging, Sparkling Aria burn cures, Sticky Web and Toxic Spikes switch-in hooks, forced-thaw freeze timing, Rest sleep timing, Disable and Torment move locks, weather field timers, opponent reveal state, Calm Mind and Nasty Plot boosts, Trick Room toggling, recharge turns, charge-turn attacks, mid-turn doubles retargeting, Struggle locks, Dark-type immunity to opposing Prankster status moves, and Mega weather ordering.`,
   `Verified 50 fully automated simulator battle sweeps across Singles and Doubles (${simulatorBattlePlayerWins} player-side wins / ${simulatorBattleOpponentWins} opponent-side wins).`,
-  `Verified shared PvP room logic, including bring-four lock-in, full roster integrity, deadline-based turn resolution, forfeit handling, and 50 automated room-code battle simulations (${onlineBattleHostWins} host wins / ${onlineBattleGuestWins} guest wins).`,
+  `Verified shared PvP room logic, including bring-four lock-in, full roster integrity, immediate dual-lock resolution, deadline-based turn resolution, overall match-timer draws, forfeit handling, and 50 automated room-code battle simulations (${onlineBattleHostWins} host wins / ${onlineBattleGuestWins} guest wins / ${onlineBattleDraws} draws).`,
   warnings.length ? `Source-data warnings: ${warnings.length} HP floor rows on the scraped form pages disagree with fixed 31 IV policy, so the app keeps the fixed-IV result intentionally.` : 'Source-data warnings: none.',
 ];
 

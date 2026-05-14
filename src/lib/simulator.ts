@@ -399,6 +399,118 @@ function activeItemForUnit(state: SimulatorBattleState, unit: SimUnit): ItemEntr
   return item;
 }
 
+function applyTriggeredAbilityResponse(
+  state: SimulatorBattleState,
+  actor: SimUnit,
+  target: SimUnit,
+  move: PokemonMove,
+  moveType: string,
+) {
+  const ability = abilityNameForUnit(target);
+  if (!ability) {
+    return false;
+  }
+
+  const targetTypes = typeListForUnit(state, target);
+  const logKickIn = (detail: string) => {
+    state.log.unshift(`${target.pokemon.displayName}'s ability ${ability} kicks in and ${detail}.`);
+  };
+
+  switch (ability) {
+    case 'Lightning Rod':
+      if (moveType === 'Electric') {
+        applySingleStage(target, 'specialAttackStage', 1);
+        logKickIn('absorbs the Electric attack and spikes its Special Attack');
+        return true;
+      }
+      break;
+    case 'Storm Drain':
+      if (moveType === 'Water') {
+        applySingleStage(target, 'specialAttackStage', 1);
+        logKickIn('pulls in the Water attack and boosts its Special Attack');
+        return true;
+      }
+      break;
+    case 'Motor Drive':
+      if (moveType === 'Electric') {
+        applySingleStage(target, 'speedStage', 1);
+        logKickIn('turns the Electric attack into a Speed boost');
+        return true;
+      }
+      break;
+    case 'Sap Sipper':
+      if (moveType === 'Grass') {
+        applySingleStage(target, 'attackStage', 1);
+        logKickIn('drinks up the Grass attack and boosts its Attack');
+        return true;
+      }
+      break;
+    case 'Well-Baked Body':
+      if (moveType === 'Fire') {
+        applySingleStage(target, 'defenseStage', 2);
+        logKickIn('shrugs off the Fire attack and sharply boosts its Defense');
+        return true;
+      }
+      break;
+    case 'Volt Absorb':
+      if (moveType === 'Electric') {
+        tryHealUnit(state, target, Math.max(1, Math.floor(target.maxHp / 4)), ability);
+        logKickIn('soaks up the Electric attack and recovers health');
+        return true;
+      }
+      break;
+    case 'Water Absorb':
+      if (moveType === 'Water') {
+        tryHealUnit(state, target, Math.max(1, Math.floor(target.maxHp / 4)), ability);
+        logKickIn('soaks up the Water attack and recovers health');
+        return true;
+      }
+      break;
+    case 'Dry Skin':
+      if (moveType === 'Water') {
+        tryHealUnit(state, target, Math.max(1, Math.floor(target.maxHp / 4)), ability);
+        logKickIn('absorbs the Water attack and restores health');
+        return true;
+      }
+      break;
+    case 'Earth Eater':
+      if (moveType === 'Ground') {
+        tryHealUnit(state, target, Math.max(1, Math.floor(target.maxHp / 4)), ability);
+        logKickIn('devours the Ground attack and restores health');
+        return true;
+      }
+      break;
+    case 'Flash Fire':
+      if (moveType === 'Fire') {
+        logKickIn('blanks the Fire attack completely');
+        return true;
+      }
+      break;
+    case 'Levitate':
+      if (moveType === 'Ground') {
+        logKickIn('keeps it floating safely above the Ground attack');
+        return true;
+      }
+      break;
+    case 'Soundproof':
+      if (isSoundMove(move)) {
+        logKickIn('shuts out the sound-based attack');
+        return true;
+      }
+      break;
+    case 'Wonder Guard':
+      if (typeEffectiveness(moveType, targetTypes) <= 1) {
+        logKickIn('nullifies the attack because it is not super effective');
+        return true;
+      }
+      break;
+    default:
+      break;
+  }
+
+  return false;
+}
+
 function findMove(unit: SimUnit, moveId: string) {
   if (moveId === struggleMove.id) {
     return struggleMove;
@@ -3662,6 +3774,12 @@ function executeDamageMove(
       });
       if (!result) {
         state.log.unshift(`${actor.pokemon.displayName} used ${move.name}, but no direct damage line applied.`);
+        continue;
+      }
+      if (result.koSummary === 'Immune' || result.averageDamage <= 0) {
+        if (!applyTriggeredAbilityResponse(state, actor, targetRef.unit, activeMove, result.appliedType)) {
+          state.log.unshift(`${actor.pokemon.displayName}'s ${move.name} had no effect on ${targetRef.unit.pokemon.displayName}.`);
+        }
         continue;
       }
       damage = Math.round((result.minDamage + result.maxDamage) / 2);

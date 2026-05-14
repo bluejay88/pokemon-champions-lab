@@ -35,12 +35,13 @@ export interface OnlineBattleRoomState {
   pendingGuestChoices: SimulatorChoice[] | null;
   battle: SimulatorBattleState | null;
   deadlineAt: string | null;
+  matchDeadlineAt: string | null;
   timerSeconds: number;
   musicTrackId: string;
   hostAnnouncerEnabled: boolean;
   guestAnnouncerEnabled: boolean;
   winnerSeat: OnlineSeat | null;
-  resultReason: 'normal' | 'forfeit' | null;
+  resultReason: 'normal' | 'forfeit' | 'timeout' | null;
   lastActionSummary: string;
 }
 
@@ -57,11 +58,12 @@ export interface OnlineBattleRoomView {
   playerBringOrder: number[];
   opponentBringCount: number;
   deadlineAt: string | null;
+  matchDeadlineAt: string | null;
   timerSeconds: number;
   playerChoicesLocked: boolean;
   opponentChoicesLocked: boolean;
   winnerName: string | null;
-  resultReason: 'normal' | 'forfeit' | null;
+  resultReason: 'normal' | 'forfeit' | 'timeout' | null;
   musicTrackId: string;
   hostAnnouncerEnabled: boolean;
   guestAnnouncerEnabled: boolean;
@@ -87,6 +89,7 @@ const LOCAL_STORAGE_KEY = 'pokemon-champions-lab-online-v1';
 const SESSION_STORAGE_KEY = 'pokemon-champions-lab-online-session';
 const ACTIVE_WINDOW_MS = 90_000;
 const NETLIFY_FUNCTION_ENDPOINT = '/.netlify/functions/arena';
+const MATCH_TIMER_SECONDS = 8 * 60;
 
 const hiddenPokemon: PokemonEntry = {
   id: 'hidden-slot',
@@ -256,6 +259,7 @@ export function roomView(room: OnlineBattleRoomState, playerId: string): OnlineB
     playerBringOrder: clone(seatBringOrder(room, seat)),
     opponentBringCount: seatBringOrder(room, isHost ? 'guest' : 'host').length,
     deadlineAt: room.deadlineAt,
+    matchDeadlineAt: room.matchDeadlineAt,
     timerSeconds: room.timerSeconds,
     playerChoicesLocked: seat === 'host' ? Boolean(room.pendingHostChoices) : Boolean(room.pendingGuestChoices),
     opponentChoicesLocked: seat === 'host' ? Boolean(room.pendingGuestChoices) : Boolean(room.pendingHostChoices),
@@ -295,7 +299,7 @@ export function roomHistoryEntry(room: OnlineBattleRoomState, playerId: string):
     format: room.format,
     trainerName,
     opponentName,
-    result: room.winnerSeat === seat ? 'Win' : 'Loss',
+    result: room.winnerSeat === seat ? 'Win' : room.winnerSeat ? 'Loss' : 'Draw',
     resultReason: room.resultReason,
     turns: room.battle ? Math.max(1, room.battle.turn - 1) : 0,
     musicTrackId: room.musicTrackId,
@@ -331,9 +335,29 @@ function startRoomBattle(room: OnlineBattleRoomState) {
   }
   room.stage = room.battle.winner ? 'finished' : 'battle';
   room.deadlineAt = room.battle.winner ? null : new Date(Date.now() + room.timerSeconds * 1000).toISOString();
+  room.matchDeadlineAt = room.battle.winner ? null : new Date(Date.now() + MATCH_TIMER_SECONDS * 1000).toISOString();
   room.pendingHostChoices = null;
   room.pendingGuestChoices = null;
   room.lastActionSummary = `${room.hostTrainerName} and ${room.guestTrainerName ?? 'Opponent'} entered the field.`;
+  return room;
+}
+
+function finishRoomAsTimeout(room: OnlineBattleRoomState) {
+  if (!room.battle) {
+    return room;
+  }
+
+  room.stage = 'finished';
+  room.deadlineAt = null;
+  room.matchDeadlineAt = null;
+  room.pendingHostChoices = null;
+  room.pendingGuestChoices = null;
+  room.winnerSeat = null;
+  room.resultReason = 'timeout';
+  room.battle.stage = 'finished';
+  room.battle.winner = null;
+  room.battle.log.unshift('Match timer expired. Under the current Pokemon Champions timeout rule, the battle ends in a draw.');
+  room.lastActionSummary = 'Match timer expired. The battle has been recorded as a draw.';
   return room;
 }
 
@@ -342,8 +366,14 @@ function maybeResolvePendingTurn(room: OnlineBattleRoomState) {
     return room;
   }
 
+  const matchDeadlineReached = room.matchDeadlineAt ? Date.now() >= new Date(room.matchDeadlineAt).getTime() : false;
+  if (matchDeadlineReached) {
+    return finishRoomAsTimeout(room);
+  }
+
   const deadlineReached = room.deadlineAt ? Date.now() >= new Date(room.deadlineAt).getTime() : false;
-  if (!deadlineReached) {
+  const bothPlayersLocked = Boolean(room.pendingHostChoices && room.pendingGuestChoices);
+  if (!deadlineReached && !bothPlayersLocked) {
     return room;
   }
 
@@ -357,9 +387,10 @@ function maybeResolvePendingTurn(room: OnlineBattleRoomState) {
     room.pendingHostChoices = null;
     room.pendingGuestChoices = null;
     room.deadlineAt = nextBattle.winner ? null : new Date(Date.now() + room.timerSeconds * 1000).toISOString();
+    room.matchDeadlineAt = nextBattle.winner ? null : room.matchDeadlineAt;
     room.lastActionSummary = nextBattle.winner
       ? `${nextBattle.winner === 'player' ? room.hostTrainerName : room.guestTrainerName ?? 'Opponent'} closed the battle.`
-      : `Replacement send-outs are complete for Turn ${nextBattle.turn}. Lock the next move phase.`;
+      : `Replacement send-outs are complete for Turn ${nextBattle.turn}. The next move phase is live.`;
 
     if (nextBattle.winner) {
       room.stage = 'finished';
@@ -379,6 +410,7 @@ function maybeResolvePendingTurn(room: OnlineBattleRoomState) {
   room.pendingHostChoices = null;
   room.pendingGuestChoices = null;
   room.deadlineAt = nextBattle.winner ? null : new Date(Date.now() + room.timerSeconds * 1000).toISOString();
+  room.matchDeadlineAt = nextBattle.winner ? null : room.matchDeadlineAt;
   room.lastActionSummary = nextBattle.winner
     ? `${nextBattle.winner === 'player' ? room.hostTrainerName : room.guestTrainerName ?? 'Opponent'} closed the battle.`
     : `Turn ${nextBattle.turn - 1} resolved and the board has reset for the next decision.`;
@@ -418,6 +450,7 @@ export function createRoomState(
     pendingGuestChoices: null,
     battle: null,
     deadlineAt: null,
+    matchDeadlineAt: null,
     timerSeconds: 30,
     musicTrackId,
     hostAnnouncerEnabled: announcerEnabled,
@@ -494,8 +527,8 @@ export function submitTurnChoicesState(room: OnlineBattleRoomState, playerId: st
     && nextRoom.deadlineAt
   ) {
     nextRoom.lastActionSummary = battleHasPendingReplacements(nextRoom.battle!)
-      ? 'Both players are locked in. The replacement clock keeps running until it expires, then the new Pokemon enter together at the top of the turn.'
-      : 'Both players are locked in. The move clock keeps running until the timer expires, then the turn resolves together.';
+      ? 'Both players are locked in. The new Pokemon are entering together at the top of the turn now.'
+      : 'Both players are locked in. The turn is resolving right away.';
   }
   return nextRoom;
 }
@@ -513,6 +546,7 @@ export function forfeitRoomState(room: OnlineBattleRoomState, playerId: string) 
   }
   room.resultReason = 'forfeit';
   room.deadlineAt = null;
+  room.matchDeadlineAt = null;
   room.pendingHostChoices = null;
   room.pendingGuestChoices = null;
   room.lastActionSummary = `${seat === 'host' ? room.hostTrainerName : room.guestTrainerName ?? 'Opponent'} forfeited the battle.`;
