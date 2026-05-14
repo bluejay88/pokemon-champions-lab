@@ -1,5 +1,4 @@
 import { startTransition, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
-import { analyzeTeam, archetypeLibrary, describeBuildRole, generateTeamPlans, recommendMoveIds, suggestArchetypesForCore, validateLockedPokemonInputs } from './lib/ai';
 import {
   applyEffortValue,
   battleFormats,
@@ -39,22 +38,8 @@ import {
   usesMegaSpriteFallback,
   weatherOptions,
 } from './lib/champions';
-import {
-  battleMusicTracks,
-  createOnlineRoom,
-  ensureOnlineSessionId,
-  fetchOnlineRoomHistory,
-  fetchOnlineRoom,
-  forfeitOnlineRoom,
-  heartbeatPresence,
-  joinOnlineRoom,
-  loginOnlineAccount,
-  registerOnlineAccount,
-  submitOnlineBringOrder,
-  submitOnlineChoices,
-} from './lib/online';
+import { battleMusicTracks } from './lib/battleMusic';
 import { clearState, listStoredProfiles, loadState, saveState } from './lib/storage';
-import { getMoveUsageInsight, getPokemonUsageInsight, getPopularPresetPatch, getPopularPresetSummary } from './lib/usage';
 import type {
   BattleFormat,
   BattleMusicMode,
@@ -72,23 +57,33 @@ import type {
   SimulatorTurnReview,
   TeamAnalysis,
   Team,
+  UsageInsight,
 } from './types';
 import type { SimSide, SimUnit, SimulatorBattleState, SimulatorChoice } from './lib/simulator';
 import type { OnlineBattleRoomView } from './lib/online';
+type AiRuntimeModule = typeof import('./lib/ai');
+type UsageRuntimeModule = typeof import('./lib/usage');
 type DamageRuntimeModule = typeof import('./lib/damage');
 type MoveParityRuntimeModule = typeof import('./lib/moveParity');
 type AbilityParityRuntimeModule = typeof import('./lib/abilityParity');
 type SimulatorRuntimeModule = typeof import('./lib/simulator');
+type OnlineRuntimeModule = typeof import('./lib/online');
 type DamageResult = ReturnType<DamageRuntimeModule['calculateDamage']>;
 type MoveParitySummary = ReturnType<MoveParityRuntimeModule['buildMoveParitySummary']>;
 type MoveParityEntry = ReturnType<MoveParityRuntimeModule['moveParityForMove']>;
 type AbilityParitySummary = ReturnType<AbilityParityRuntimeModule['buildAbilityParitySummary']>;
+type PokemonInputValidation = ReturnType<AiRuntimeModule['validateLockedPokemonInput']>;
 
 type BattleCoreRuntime = {
   damage: DamageRuntimeModule;
   moveParity: MoveParityRuntimeModule;
   abilityParity: AbilityParityRuntimeModule;
   simulator: SimulatorRuntimeModule;
+};
+
+type TeamIntelRuntime = {
+  ai: AiRuntimeModule;
+  usage: UsageRuntimeModule;
 };
 
 type SimulatorPreviewState = {
@@ -151,6 +146,29 @@ type BattlefieldConditionSection = {
 
 let battleCoreRuntimeCache: BattleCoreRuntime | null = null;
 let battleCoreRuntimePromise: Promise<BattleCoreRuntime> | null = null;
+let teamIntelRuntimeCache: TeamIntelRuntime | null = null;
+let teamIntelRuntimePromise: Promise<TeamIntelRuntime> | null = null;
+let onlineRuntimeCache: OnlineRuntimeModule | null = null;
+let onlineRuntimePromise: Promise<OnlineRuntimeModule> | null = null;
+
+const ONLINE_SESSION_STORAGE_KEY = 'pokemon-champions-lab-online-session';
+const LOCAL_PRESENCE_STORAGE_KEY = 'pokemon-champions-lab-presence-v1';
+const ACTIVE_PRESENCE_WINDOW_MS = 90_000;
+const NETLIFY_FUNCTION_ENDPOINT = '/.netlify/functions/arena';
+const fallbackUsageInsight: UsageInsight = {
+  label: 'UU',
+  reason: 'Usage insight is still loading for this surface.',
+  source: 'Deferred runtime',
+};
+
+const fallbackArchetypes = [
+  { id: 'stadium-balance', name: 'Stadium Balance' },
+  { id: 'rain-circuit', name: 'Rain Circuit' },
+  { id: 'sun-circuit', name: 'Sun Circuit' },
+  { id: 'sand-bunker', name: 'Sand Bunker' },
+  { id: 'snow-glacier', name: 'Snow Glacier' },
+  { id: 'deep-cut', name: 'Deep Cut' },
+];
 
 const emptyMoveParitySummary: MoveParitySummary = {
   total: dataset.moves.length,
@@ -170,6 +188,32 @@ const emptyAbilityParitySummary: AbilityParitySummary = {
   coveredPercent: 0,
   topReviewAbilities: [],
 };
+
+const emptyTeamAnalysis = (format: BattleFormat): TeamAnalysis => ({
+  format,
+  synergyScore: 0,
+  estimatedWinRate: 0,
+  estimatedWinRateLow: 0,
+  estimatedWinRateHigh: 0,
+  survivabilityScore: 0,
+  survivabilityGrade: '--',
+  survivabilityTurns: 0,
+  winRateSummary: 'Win-rate modeling is still loading for this team.',
+  survivabilitySummary: 'Survivability modeling is still loading for this team.',
+  metricNotes: ['Team analysis is deferred until the intelligence runtime loads.'],
+  overview: 'The team analysis runtime is still loading.',
+  strengths: [],
+  weaknesses: [],
+  threats: [],
+  recommendations: [],
+  balanceHints: [],
+  coverageHighlights: [],
+  formatNotes: [],
+  previewPlans: [],
+  archetypeSuggestions: [],
+  easyTargets: [],
+  teamUsage: fallbackUsageInsight,
+});
 
 function hasBattleCoreRuntime() {
   return battleCoreRuntimeCache !== null;
@@ -191,6 +235,58 @@ async function ensureBattleCoreRuntime() {
   });
 
   return battleCoreRuntimePromise;
+}
+
+function hasTeamIntelRuntime() {
+  return teamIntelRuntimeCache !== null;
+}
+
+async function ensureTeamIntelRuntime() {
+  if (teamIntelRuntimeCache) {
+    return teamIntelRuntimeCache;
+  }
+
+  teamIntelRuntimePromise ??= Promise.all([
+    import('./lib/ai'),
+    import('./lib/usage'),
+  ]).then(([ai, usage]) => {
+    teamIntelRuntimeCache = { ai, usage };
+    return teamIntelRuntimeCache;
+  });
+
+  return teamIntelRuntimePromise;
+}
+
+function hasOnlineRuntime() {
+  return onlineRuntimeCache !== null;
+}
+
+async function ensureOnlineRuntime() {
+  if (onlineRuntimeCache) {
+    return onlineRuntimeCache;
+  }
+
+  onlineRuntimePromise ??= import('./lib/online').then((runtime) => {
+    onlineRuntimeCache = runtime;
+    return runtime;
+  });
+
+  return onlineRuntimePromise;
+}
+
+function ensureOnlineSessionId() {
+  if (typeof window === 'undefined') {
+    return makeId('session');
+  }
+
+  const existing = window.localStorage.getItem(ONLINE_SESSION_STORAGE_KEY);
+  if (existing) {
+    return existing;
+  }
+
+  const created = makeId('session');
+  window.localStorage.setItem(ONLINE_SESSION_STORAGE_KEY, created);
+  return created;
 }
 
 function fallbackLegalMovesForUnit(unit: SimUnit) {
@@ -284,6 +380,203 @@ function resolveTurn(...args: Parameters<SimulatorRuntimeModule['resolveTurn']>)
   }
 
   return battleCoreRuntimeCache.simulator.resolveTurn(...args);
+}
+
+function usageInsightWithReason(reason: string): UsageInsight {
+  return {
+    ...fallbackUsageInsight,
+    reason,
+  };
+}
+
+function getMoveUsageInsight(...args: Parameters<UsageRuntimeModule['getMoveUsageInsight']>) {
+  return teamIntelRuntimeCache?.usage.getMoveUsageInsight(...args) ?? usageInsightWithReason('Move usage reads are still loading for this view.');
+}
+
+function getPokemonUsageInsight(...args: Parameters<UsageRuntimeModule['getPokemonUsageInsight']>) {
+  return teamIntelRuntimeCache?.usage.getPokemonUsageInsight(...args) ?? usageInsightWithReason('Pokemon usage reads are still loading for this view.');
+}
+
+function getPopularPresetPatch(...args: Parameters<UsageRuntimeModule['getPopularPresetPatch']>) {
+  return teamIntelRuntimeCache?.usage.getPopularPresetPatch(...args) ?? null;
+}
+
+function getPopularPresetSummary(...args: Parameters<UsageRuntimeModule['getPopularPresetSummary']>) {
+  return teamIntelRuntimeCache?.usage.getPopularPresetSummary(...args) ?? null;
+}
+
+function recommendMoveIds(...args: Parameters<AiRuntimeModule['recommendMoveIds']>) {
+  if (teamIntelRuntimeCache) {
+    return teamIntelRuntimeCache.ai.recommendMoveIds(...args);
+  }
+
+  const [pokemon] = args;
+  return pokemon.movePool.slice(0, 4).map((move) => move.id);
+}
+
+function validateLockedPokemonInput(...args: Parameters<AiRuntimeModule['validateLockedPokemonInput']>): PokemonInputValidation {
+  if (teamIntelRuntimeCache) {
+    return teamIntelRuntimeCache.ai.validateLockedPokemonInput(...args);
+  }
+
+  const [input] = args;
+  const normalized = input.trim().toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  const roster = dataset.pokemon.filter((pokemon) => !pokemon.isMega);
+  const matchedPokemon = roster.find((pokemon) => {
+    const names = [pokemon.displayName, pokemon.baseSpecies]
+      .map((value) => value.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim());
+    return names.includes(normalized);
+  }) ?? null;
+  const suggestions = normalized
+    ? roster
+      .filter((pokemon) => {
+        const name = pokemon.displayName.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+        const base = pokemon.baseSpecies.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+        return name.includes(normalized) || base.includes(normalized);
+      })
+      .slice(0, 3)
+      .map((pokemon) => ({
+        pokemon,
+        reason: 'Suggested from the current Champions roster while the full AI validation runtime loads.',
+        usageLabel: getPokemonUsageInsight(pokemon, args[1]).label,
+      }))
+    : [];
+
+  return {
+    input,
+    normalizedInput: normalized,
+    isValid: Boolean(matchedPokemon),
+    matchedPokemon,
+    autoReplacement: matchedPokemon,
+    message: matchedPokemon
+      ? `${matchedPokemon.displayName} is available in the live Champions roster.`
+      : 'Full roster validation is still loading. Try again in a moment for smarter role-based replacements.',
+    suggestions,
+  };
+}
+
+function validateLockedPokemonInputs(...args: Parameters<AiRuntimeModule['validateLockedPokemonInputs']>) {
+  if (teamIntelRuntimeCache) {
+    return teamIntelRuntimeCache.ai.validateLockedPokemonInputs(...args);
+  }
+
+  const [inputs, format] = args;
+  return inputs.map((input) => validateLockedPokemonInput(input, format));
+}
+
+function describeBuildRole(...args: Parameters<AiRuntimeModule['describeBuildRole']>) {
+  return teamIntelRuntimeCache?.ai.describeBuildRole(...args) ?? 'Role loading';
+}
+
+function suggestArchetypesForCore(...args: Parameters<AiRuntimeModule['suggestArchetypesForCore']>) {
+  return teamIntelRuntimeCache?.ai.suggestArchetypesForCore(...args) ?? fallbackArchetypes.map((entry) => entry.name).slice(0, 3);
+}
+
+function analyzeTeam(...args: Parameters<AiRuntimeModule['analyzeTeam']>) {
+  return teamIntelRuntimeCache?.ai.analyzeTeam(...args) ?? emptyTeamAnalysis(args[0].format);
+}
+
+function generateTeamPlans(...args: Parameters<AiRuntimeModule['generateTeamPlans']>) {
+  return teamIntelRuntimeCache?.ai.generateTeamPlans(...args) ?? [];
+}
+
+function activeArchetypeOptions() {
+  return teamIntelRuntimeCache?.ai.archetypeLibrary ?? fallbackArchetypes;
+}
+
+function localHeartbeatPresence(sessionId: string): OnlinePresenceStats {
+  if (typeof window === 'undefined') {
+    return { activeUsers: 1, totalVisits: 1, activeBattles: 0 };
+  }
+
+  const now = new Date().toISOString();
+  const raw = window.localStorage.getItem(LOCAL_PRESENCE_STORAGE_KEY);
+  const store = raw
+    ? JSON.parse(raw) as { totalVisits: number; sessions: Record<string, string> }
+    : { totalVisits: 0, sessions: {} as Record<string, string> };
+
+  if (!store.sessions[sessionId]) {
+    store.totalVisits += 1;
+  }
+  store.sessions[sessionId] = now;
+
+  for (const [storedSessionId, lastSeen] of Object.entries(store.sessions)) {
+    if (Date.now() - new Date(lastSeen).getTime() > ACTIVE_PRESENCE_WINDOW_MS) {
+      delete store.sessions[storedSessionId];
+    }
+  }
+
+  window.localStorage.setItem(LOCAL_PRESENCE_STORAGE_KEY, JSON.stringify(store));
+  return {
+    activeUsers: Object.keys(store.sessions).length,
+    totalVisits: store.totalVisits,
+    activeBattles: 0,
+  };
+}
+
+async function heartbeatPresence(sessionId: string) {
+  try {
+    const response = await fetch(NETLIFY_FUNCTION_ENDPOINT, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ action: 'heartbeat', sessionId }),
+    });
+    if (!response.ok) {
+      throw new Error(`Presence request failed with ${response.status}`);
+    }
+    const payload = await response.json() as { stats?: OnlinePresenceStats; remoteUnavailable?: boolean };
+    if (!payload.stats || payload.remoteUnavailable) {
+      throw new Error('Remote presence unavailable.');
+    }
+    return payload.stats;
+  } catch {
+    return localHeartbeatPresence(sessionId);
+  }
+}
+
+async function fetchOnlineRoom(...args: Parameters<OnlineRuntimeModule['fetchOnlineRoom']>) {
+  const runtime = await ensureOnlineRuntime();
+  return runtime.fetchOnlineRoom(...args);
+}
+
+async function fetchOnlineRoomHistory(...args: Parameters<OnlineRuntimeModule['fetchOnlineRoomHistory']>) {
+  const runtime = await ensureOnlineRuntime();
+  return runtime.fetchOnlineRoomHistory(...args);
+}
+
+async function registerOnlineAccount(...args: Parameters<OnlineRuntimeModule['registerOnlineAccount']>) {
+  const runtime = await ensureOnlineRuntime();
+  return runtime.registerOnlineAccount(...args);
+}
+
+async function loginOnlineAccount(...args: Parameters<OnlineRuntimeModule['loginOnlineAccount']>) {
+  const runtime = await ensureOnlineRuntime();
+  return runtime.loginOnlineAccount(...args);
+}
+
+async function createOnlineRoom(...args: Parameters<OnlineRuntimeModule['createOnlineRoom']>) {
+  const runtime = await ensureOnlineRuntime();
+  return runtime.createOnlineRoom(...args);
+}
+
+async function joinOnlineRoom(...args: Parameters<OnlineRuntimeModule['joinOnlineRoom']>) {
+  const runtime = await ensureOnlineRuntime();
+  return runtime.joinOnlineRoom(...args);
+}
+
+async function submitOnlineBringOrder(...args: Parameters<OnlineRuntimeModule['submitOnlineBringOrder']>) {
+  const runtime = await ensureOnlineRuntime();
+  return runtime.submitOnlineBringOrder(...args);
+}
+
+async function submitOnlineChoices(...args: Parameters<OnlineRuntimeModule['submitOnlineChoices']>) {
+  const runtime = await ensureOnlineRuntime();
+  return runtime.submitOnlineChoices(...args);
+}
+
+async function forfeitOnlineRoom(...args: Parameters<OnlineRuntimeModule['forfeitOnlineRoom']>) {
+  const runtime = await ensureOnlineRuntime();
+  return runtime.forfeitOnlineRoom(...args);
 }
 
 const appTabs: { id: BattleTab; label: string; short: string; description: string }[] = [
@@ -1001,9 +1294,28 @@ function displayNamesFromValidations(validations: ReturnType<typeof validateLock
 }
 
 function randomOpponentTeam(format: BattleFormat, offMetaBias: number) {
-  const archetype = archetypeLibrary[Math.floor(Math.random() * archetypeLibrary.length)] ?? archetypeLibrary[0];
+  const archetypes = activeArchetypeOptions();
+  const archetype = archetypes[Math.floor(Math.random() * archetypes.length)] ?? archetypes[0];
   const plans = generateTeamPlans(archetype.id, format, offMetaBias, [], 6, true);
-  return buildTeamFromPlan(plans[Math.floor(Math.random() * plans.length)] ?? plans[0]);
+  const selectedPlan = plans[Math.floor(Math.random() * plans.length)] ?? plans[0];
+  if (selectedPlan) {
+    return buildTeamFromPlan(selectedPlan);
+  }
+
+  const fallbackTeam = createTeam('Fallback Opponent', format);
+  fallbackTeam.slots = fallbackTeam.slots.map((slot, index) => {
+    const pokemon = dataset.pokemon.filter((entry) => !entry.isMega)[index];
+    if (!pokemon) {
+      return slot;
+    }
+    return {
+      ...slot,
+      pokemonId: pokemon.id,
+      moveIds: pokemon.movePool.slice(0, 4).map((move) => move.id),
+      abilityName: pokemon.abilities[0]?.name ?? null,
+    };
+  });
+  return fallbackTeam;
 }
 
 function usablePokemonForBuild(build: PokemonBuild) {
@@ -2207,6 +2519,8 @@ function App() {
   const initialState = useMemo(() => loadState(), []);
   const [state, setState] = useState(initialState);
   const [battleCoreReady, setBattleCoreReady] = useState(() => hasBattleCoreRuntime());
+  const [teamIntelReady, setTeamIntelReady] = useState(() => hasTeamIntelRuntime());
+  const [onlineRuntimeReady, setOnlineRuntimeReady] = useState(() => hasOnlineRuntime());
   const [activeTab, setActiveTab] = useState<BattleTab>('team-builder');
   const [selectedSlotIndex, setSelectedSlotIndex] = useState(0);
   const [calcAttacker, setCalcAttacker] = useState<PokemonBuild>(() => copyBuild(initialState.teams[0]?.slots[0] ?? createDefaultState().teams[0].slots[0]));
@@ -2218,7 +2532,7 @@ function App() {
   const [selectedDamageMoveId, setSelectedDamageMoveId] = useState<string | null>(null);
   const [pokedexSearch, setPokedexSearch] = useState('');
   const [selectedPokedexId, setSelectedPokedexId] = useState<string>(dataset.pokemon[0]?.id ?? '');
-  const [selectedArchetype, setSelectedArchetype] = useState(archetypeLibrary[0].id);
+  const [selectedArchetype, setSelectedArchetype] = useState(fallbackArchetypes[0].id);
   const [aiFormat, setAiFormat] = useState<BattleFormat>(() => activeTeamFromState(initialState).format);
   const [aiLockedNames, setAiLockedNames] = useState<string[]>(['', '', '', '', '']);
   const [aiVariantCount, setAiVariantCount] = useState(8);
@@ -2300,6 +2614,7 @@ function App() {
     () => battleCoreReady ? defenderMoves.map((move) => ({ move, result: calculateDamage(defenderBuild, attackerBuild, move, environment) })) : [],
     [attackerBuild, battleCoreReady, defenderBuild, defenderMoves, environment],
   );
+  const archetypeOptions = useMemo(() => activeArchetypeOptions(), [teamIntelReady]);
   const selectedGeneratedPlan = generatedPlans.find((plan) => plan.id === selectedGeneratedPlanId) ?? generatedPlans[0] ?? null;
   const aiLockedValidations = useMemo(() => validateLockedPokemonInputs(aiLockedNames, aiFormat), [aiLockedNames, aiFormat]);
   const coreArchetypeSuggestions = suggestArchetypesForCore(lockedNamesFromValidations(aiLockedValidations), aiFormat);
@@ -2464,6 +2779,54 @@ function App() {
       cancelled = true;
     };
   }, [activeTab, battleCoreReady, pvpRoom?.battle, simBattle, simPreview]);
+
+  useEffect(() => {
+    const tabsNeedingIntel: BattleTab[] = ['team-builder', 'damage-lab', 'pokedex', 'ai-builder', 'analyzer', 'simulator', 'pvp-battles'];
+    const shouldLoadTeamIntel =
+      tabsNeedingIntel.includes(activeTab) ||
+      Boolean(simPreview || simBattle || pvpRoom?.battle);
+    if (!shouldLoadTeamIntel || hasTeamIntelRuntime()) {
+      if (hasTeamIntelRuntime() && !teamIntelReady) {
+        setTeamIntelReady(true);
+      }
+      return;
+    }
+
+    let cancelled = false;
+    void ensureTeamIntelRuntime().then(() => {
+      if (!cancelled) {
+        setTeamIntelReady(true);
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeTab, pvpRoom?.battle, simBattle, simPreview, teamIntelReady]);
+
+  useEffect(() => {
+    const shouldLoadOnlineRuntime =
+      activeTab === 'pvp-battles' ||
+      Boolean(pvpRoom) ||
+      (activeTab === 'profile' && Boolean(onlineAccount));
+    if (!shouldLoadOnlineRuntime || hasOnlineRuntime()) {
+      if (hasOnlineRuntime() && !onlineRuntimeReady) {
+        setOnlineRuntimeReady(true);
+      }
+      return;
+    }
+
+    let cancelled = false;
+    void ensureOnlineRuntime().then(() => {
+      if (!cancelled) {
+        setOnlineRuntimeReady(true);
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeTab, onlineAccount, onlineRuntimeReady, pvpRoom]);
 
   useEffect(() => {
     const handle = window.setTimeout(() => {
@@ -3134,8 +3497,14 @@ function App() {
     }
   }
 
-  function runAiBuilder() {
-    const validations = aiLockedValidations;
+  async function runAiBuilder() {
+    if (!teamIntelReady) {
+      setAiBuilderMessage('Loading AI team planning, usage reads, and preset logic. Try again in a moment.');
+      await ensureTeamIntelRuntime();
+      setTeamIntelReady(true);
+    }
+
+    const validations = validateLockedPokemonInputs(aiLockedNames, aiFormat);
     const unresolved = validations.filter((validation) => validation.input.trim() && !validation.isValid && !validation.autoReplacement);
     if (unresolved.length) {
       setAiBuilderMessage(`The AI Builder needs live Champions roster matches before it can lock every requested core. Check the replacement suggestions beneath those inputs.`);
@@ -3252,11 +3621,16 @@ function App() {
     setSelectedSlotIndex(0);
   }
 
-  function startSimulatorPreview() {
+  async function startSimulatorPreview() {
     if (!battleCoreReady) {
       setSimPreviewMessage('Loading the battle engine and damage runtime. Try again in a moment.');
       void ensureBattleCoreRuntime().then(() => setBattleCoreReady(true));
       return;
+    }
+    if (!teamIntelReady) {
+      setSimPreviewMessage('Loading AI matchup planning and opponent draft logic. Try again in a moment.');
+      await ensureTeamIntelRuntime();
+      setTeamIntelReady(true);
     }
     const selectable = filledSlotIndices(team);
     if (selectable.length < 4) {
@@ -4054,7 +4428,7 @@ function App() {
               <label className="field">
                 <span>Archetype</span>
                 <select value={selectedArchetype} onChange={(event) => setSelectedArchetype(event.target.value)}>
-                  {archetypeLibrary.map((archetype) => (
+                  {archetypeOptions.map((archetype) => (
                     <option key={archetype.id} value={archetype.id}>{archetype.name}</option>
                   ))}
                 </select>
@@ -4125,12 +4499,13 @@ function App() {
                 <small>{getNinetalesBiasLabel(state.profile.offMetaBias)} - higher values hunt unusual but coherent win paths.</small>
               </label>
               <ToggleField label="Random Team Generator" checked={aiRandomMode} onChange={setAiRandomMode} />
-              <button className="action-button primary ai-build-button" onClick={runAiBuilder}>
+              <button className="action-button primary ai-build-button" onClick={runAiBuilder} disabled={!teamIntelReady}>
                 {aiRandomMode ? `Generate ${aiVariantCount} Random Teams` : `Generate ${aiVariantCount} Team Plans`}
               </button>
               {aiBuilderMessage ? <div className="validation-banner info"><strong>AI Builder Update</strong><small>{aiBuilderMessage}</small></div> : null}
 
               <div className="notes-list scroll-stack compact-scroll">
+                {!teamIntelReady ? <div className="note-row">Loading AI planning, matchup scoring, usage reads, and preset recommendations for this tab...</div> : null}
                 {coreArchetypeSuggestions.map((note) => (
                   <div key={note} className="note-row">Core fit suggestion: {note}</div>
                 ))}
@@ -4343,9 +4718,10 @@ function App() {
                   </label>
                 </div>
               ) : null}
-              <button className="action-button primary" onClick={startSimulatorPreview} disabled={!battleCoreReady}>Generate Viable Opponent</button>
+              <button className="action-button primary" onClick={startSimulatorPreview} disabled={!battleCoreReady || !teamIntelReady}>Generate Viable Opponent</button>
               <div className="notes-list compact-scroll">
                 {!battleCoreReady ? <div className="note-row">Loading the battle runtime for simulator, damage math, and parity reports...</div> : null}
+                {!teamIntelReady ? <div className="note-row">Loading AI opponent drafting, matchup heuristics, and preview planning...</div> : null}
                 <div className="note-row">The simulator uses the live roster, your saved spreads, the current damage engine, and a battle sandbox with targeting, switching, preview order, and AI decisions.</div>
                 <div className="note-row">Opponent preview now behaves like ranked team preview: you see all six species, but their items, abilities, and moves stay hidden until battle actions reveal them.</div>
                 <div className="note-row">Mega-capable Pokemon can now choose a dedicated Mega Evolve action, trigger their Mega ability before moving, and only one Mega can be used per side in each battle.</div>
