@@ -2069,6 +2069,48 @@ function battlePlaylistSummary(trackIds: string[]) {
   return playlist.map(battleTrackLabel).join(', ');
 }
 
+function reservedMegaActorForDrafts(drafts: Record<number, ChoiceDraft>) {
+  for (const [actor, draft] of Object.entries(drafts)) {
+    if (draft.type === 'mega') {
+      return Number(actor);
+    }
+  }
+
+  return null;
+}
+
+function mergeChoiceDraftWithSingleMegaRule(
+  current: Record<number, ChoiceDraft>,
+  actor: number,
+  fallback: ChoiceDraft,
+  partial: Partial<ChoiceDraft>,
+) {
+  const next = {
+    ...current,
+    [actor]: {
+      ...(current[actor] ?? fallback),
+      ...partial,
+    } satisfies ChoiceDraft,
+  };
+
+  if (next[actor]?.type === 'mega') {
+    for (const key of Object.keys(next)) {
+      const otherActor = Number(key);
+      if (otherActor === actor) {
+        continue;
+      }
+      if (next[otherActor]?.type === 'mega') {
+        next[otherActor] = {
+          ...next[otherActor],
+          type: 'move',
+        };
+      }
+    }
+  }
+
+  return next;
+}
+
 function BattleMusicPlayer({
   trackId,
   mode,
@@ -2119,17 +2161,18 @@ function BattleMusicPlayer({
 
     const currentTrack = battleMusicTracks.find((track) => track.id === currentTrackId) ?? battleMusicTracks[0];
     if (!audioRef.current) {
-      audioRef.current = new Audio(currentTrack.audioUrl);
+      audioRef.current = new Audio();
+      audioRef.current.preload = 'auto';
     }
 
-    if (audioRef.current.src !== currentTrack.audioUrl) {
-      audioRef.current.pause();
-      audioRef.current = new Audio(currentTrack.audioUrl);
-    }
+    const audio = audioRef.current;
+    audio.pause();
+    audio.src = currentTrack.audioUrl;
+    audio.load();
 
     const playlist = normalizedPlaylistIds(playlistIds);
-    audioRef.current.loop = mode === 'single';
-    audioRef.current.onended = () => {
+    audio.loop = mode === 'single';
+    audio.onended = () => {
       if (mode === 'playlist') {
         const currentIndex = playlist.indexOf(currentTrack.id);
         const nextTrackId = playlist[(currentIndex + 1) % playlist.length] ?? playlist[0];
@@ -2143,16 +2186,30 @@ function BattleMusicPlayer({
       }
     };
 
-    audioRef.current.volume = Math.max(0, Math.min(1, volume / 100));
+    audio.volume = Math.max(0, Math.min(1, volume / 100));
     if (active && enabled) {
-      void audioRef.current.play().catch(() => undefined);
+      const attemptPlay = () => {
+        void audio.play().catch(() => {
+          window.setTimeout(() => {
+            void audio.play().catch(() => undefined);
+          }, 120);
+        });
+      };
+
+      audio.oncanplay = () => {
+        if (active && enabled) {
+          attemptPlay();
+        }
+      };
+      attemptPlay();
     } else {
-      audioRef.current.pause();
-      audioRef.current.currentTime = 0;
+      audio.pause();
+      audio.currentTime = 0;
     }
 
     return () => {
-      audioRef.current?.pause();
+      audio.pause();
+      audio.oncanplay = null;
     };
   }, [currentTrackId, playlistIds, mode, active, enabled, volume]);
 
@@ -2583,6 +2640,7 @@ function App() {
   const [simBringOrder, setSimBringOrder] = useState<number[]>([]);
   const [simBattle, setSimBattle] = useState<SimulatorBattleState | null>(null);
   const [simBattlefieldSeed, setSimBattlefieldSeed] = useState<string>(() => `sim-idle-${activeTeamFromState(initialState).format}`);
+  const [simBattleMusicSeed, setSimBattleMusicSeed] = useState(0);
   const [simChoiceDrafts, setSimChoiceDrafts] = useState<Record<number, ChoiceDraft>>({});
   const [simTurnTimerEnabled, setSimTurnTimerEnabled] = useState(false);
   const [simTurnClock, setSimTurnClock] = useState(30);
@@ -2607,6 +2665,7 @@ function App() {
   const [onlineStatusMessage, setOnlineStatusMessage] = useState<string | null>(null);
   const [pvpRoomCodeInput, setPvpRoomCodeInput] = useState('');
   const [pvpRoom, setPvpRoom] = useState<OnlineBattleRoomView | null>(null);
+  const [pvpBattleMusicSeed, setPvpBattleMusicSeed] = useState(0);
   const [pvpBringOrder, setPvpBringOrder] = useState<number[]>([]);
   const [pvpChoiceDrafts, setPvpChoiceDrafts] = useState<Record<number, ChoiceDraft>>({});
   const [pvpCountdown, setPvpCountdown] = useState(0);
@@ -2628,6 +2687,8 @@ function App() {
   const simChoicesLockedRef = useRef(false);
   const previousBattleRef = useRef<SimulatorBattleState | null>(null);
   const previousPvpBattleRef = useRef<SimulatorBattleState | null>(null);
+  const previousSimStageRef = useRef<string | null>(null);
+  const previousPvpStageRef = useRef<string | null>(null);
   const recordedBattleKeyRef = useRef<string | null>(null);
   const recordedPvpBattleKeyRef = useRef<string | null>(null);
 
@@ -2678,10 +2739,10 @@ function App() {
     : primaryBattleMusicTrackId(state.profile.preferredBattleTrackId, state.profile.battleMusicPlaylistIds);
   const battleMusicSessionKey = activeTab === 'pvp-battles'
     ? pvpRoom?.stage === 'battle'
-      ? `pvp-battle-${pvpRoom?.code ?? 'idle'}`
+      ? `pvp-battle-${pvpRoom?.code ?? 'idle'}-${pvpBattleMusicSeed}`
       : 'pvp-idle'
     : simBattle?.stage === 'battle'
-        ? `sim-battle-${simBattle.player.units.map((unit) => unit.slotIndex).join('-')}-${simBattle.opponent.units.map((unit) => unit.slotIndex).join('-')}`
+        ? `sim-battle-${simBattleMusicSeed}`
         : 'sim-idle';
   const profileReady = Boolean(state.profile.trainerName.trim());
   const storedProfiles = useMemo(() => listStoredProfiles(), [state.profile.trainerName, lastSavedAt]);
@@ -2910,6 +2971,14 @@ function App() {
   }, [simBattle, simFormat, simPreview]);
 
   useEffect(() => {
+    const nextStage = simBattle?.stage ?? null;
+    if (nextStage === 'battle' && previousSimStageRef.current !== 'battle') {
+      setSimBattleMusicSeed((current) => current + 1);
+    }
+    previousSimStageRef.current = nextStage;
+  }, [simBattle?.stage]);
+
+  useEffect(() => {
     if (!simPreview) {
       setSimCountdown(0);
       return;
@@ -3039,6 +3108,14 @@ function App() {
     setSimBattle(nextBattle);
     setSimTurnNotice('Arena AI sent out its replacement at the top of the turn. Pick your next action when ready.');
   }, [simBattle]);
+
+  useEffect(() => {
+    const nextStage = pvpRoom?.stage ?? null;
+    if (nextStage === 'battle' && previousPvpStageRef.current !== 'battle') {
+      setPvpBattleMusicSeed((current) => current + 1);
+    }
+    previousPvpStageRef.current = nextStage;
+  }, [pvpRoom?.stage]);
 
   useEffect(() => {
     if (!pvpRoom || !onlineAccount) {
@@ -3857,33 +3934,31 @@ function App() {
   }
 
   function updateChoiceDraft(actor: number, partial: Partial<ChoiceDraft>) {
-    setSimChoiceDrafts((current) => ({
-      ...current,
-      [actor]: {
-        ...(current[actor] ?? {
-          type: 'move' as const,
-          moveId: simBattle?.player.units[simBattle.player.active[actor]]?.build.moveIds[0] ?? '',
-          target: 0,
-          switchTarget: simBattle?.player.bench[0] ?? 0,
-        }),
-        ...partial,
-      } satisfies ChoiceDraft,
-    }));
+    setSimChoiceDrafts((current) => mergeChoiceDraftWithSingleMegaRule(
+      current,
+      actor,
+      {
+        type: 'move' as const,
+        moveId: simBattle?.player.units[simBattle.player.active[actor]]?.build.moveIds[0] ?? '',
+        target: 0,
+        switchTarget: simBattle?.player.bench[0] ?? 0,
+      },
+      partial,
+    ));
   }
 
   function updatePvpChoiceDraft(actor: number, partial: Partial<ChoiceDraft>) {
-    setPvpChoiceDrafts((current) => ({
-      ...current,
-      [actor]: {
-        ...(current[actor] ?? {
-          type: 'move' as const,
-          moveId: pvpRoom?.battle?.player.units[pvpRoom.battle.player.active[actor]]?.build.moveIds[0] ?? '',
-          target: 0,
-          switchTarget: pvpRoom?.battle?.player.bench[0] ?? 0,
-        }),
-        ...partial,
-      } satisfies ChoiceDraft,
-    }));
+    setPvpChoiceDrafts((current) => mergeChoiceDraftWithSingleMegaRule(
+      current,
+      actor,
+      {
+        type: 'move' as const,
+        moveId: pvpRoom?.battle?.player.units[pvpRoom.battle.player.active[actor]]?.build.moveIds[0] ?? '',
+        target: 0,
+        switchTarget: pvpRoom?.battle?.player.bench[0] ?? 0,
+      },
+      partial,
+    ));
   }
 
   function submitSimTurn() {
@@ -5024,6 +5099,20 @@ function App() {
                     <div className="battlefield-control-panel">
                       {!simBattleResolved ? (
                         <>
+                      <SectionHeader
+                        title={simBattleNeedsReplacementPhase ? 'Replacement Command Deck' : 'Battle Command Deck'}
+                        subtitle="Keep the field in view while you lock moves, Mega timing, or replacement send-outs for the next board state."
+                        compact
+                      />
+                      {!simBattle.player.megaUsed && reservedMegaActorForDrafts(simChoiceDrafts) !== null ? (
+                        <div className="note-row compact-note battle-mega-banner">
+                          Mega Evolution is reserved this turn for {battleUnitDisplayName(simBattle.player.units[simBattle.player.active[reservedMegaActorForDrafts(simChoiceDrafts)!]])}. Other lanes lose the Mega option until that reservation is changed.
+                        </div>
+                      ) : (
+                        <div className="note-row compact-note battle-mega-banner">
+                          Hard rule active: only one Pokemon on your side can Mega Evolve during the entire battle, even if multiple active lanes are holding Mega Stones.
+                        </div>
+                      )}
                       {simPendingReplacementActors.length ? (
                         <div className="sim-action-grid replacement-phase-grid">
                           {simPendingReplacementActors.map((actor) => {
@@ -5067,8 +5156,9 @@ function App() {
                               switchTarget: switchTargets[0] ?? 0,
                             };
                             const canMegaEvolve = Boolean(unit.megaPokemon && !unit.megaEvolved && !simBattle.player.megaUsed);
-                            const otherMegaReserved = Object.entries(simChoiceDrafts).some(([draftActor, entry]) => Number(draftActor) !== actor && entry.type === 'mega');
-                            const allowMegaOption = canMegaEvolve && (!otherMegaReserved || draft.type === 'mega');
+                            const reservedMegaActor = reservedMegaActorForDrafts(simChoiceDrafts);
+                            const megaReservedByOtherLane = reservedMegaActor !== null && reservedMegaActor !== actor;
+                            const allowMegaOption = canMegaEvolve && !megaReservedByOtherLane;
                             const canSwitch = switchTargets.length > 0 && !unit.trappedByMove && unit.bindingTurns <= 0;
                             const statusBadge = simulatorStatusBadge(unit);
                             const battleTags = simulatorBattleTags(unit);
@@ -5156,6 +5246,10 @@ function App() {
                                     {effectiveDraftType === 'mega' && unit.megaPokemon ? (
                                       <div className="note-row compact-note">
                                         {unit.basePokemon.displayName} will Mega Evolve into {unit.megaPokemon.displayName} before acting this turn.
+                                      </div>
+                                    ) : megaReservedByOtherLane ? (
+                                      <div className="note-row compact-note">
+                                        Mega Evolution is already reserved for another active lane this turn.
                                       </div>
                                     ) : null}
                                   </>
@@ -5438,6 +5532,20 @@ function App() {
                     <div className="battlefield-control-panel">
                       {!pvpBattleResolved ? (
                         <>
+                      <SectionHeader
+                        title={pvpBattleNeedsReplacementPhase ? 'PvP Replacement Deck' : 'PvP Command Deck'}
+                        subtitle="Lock your live battle choices here while the field stays visible. One Mega Evolution per side is enforced across the whole room."
+                        compact
+                      />
+                      {!pvpRoom.battle!.player.megaUsed && reservedMegaActorForDrafts(pvpChoiceDrafts) !== null ? (
+                        <div className="note-row compact-note battle-mega-banner">
+                          Mega Evolution is reserved this turn for {battleUnitDisplayName(pvpRoom.battle!.player.units[pvpRoom.battle!.player.active[reservedMegaActorForDrafts(pvpChoiceDrafts)!]])}. Other lanes lose the Mega option until that reservation is changed.
+                        </div>
+                      ) : (
+                        <div className="note-row compact-note battle-mega-banner">
+                          Hard rule active: one Mega Evolution per side for the full PvP battle, even if multiple teammates are carrying Mega Stones.
+                        </div>
+                      )}
                       {pvpPendingReplacementActors.length ? (
                         <div className="sim-action-grid replacement-phase-grid">
                           {pvpPendingReplacementActors.map((actor) => {
@@ -5481,8 +5589,9 @@ function App() {
                               switchTarget: switchTargets[0] ?? 0,
                             };
                             const canMegaEvolve = Boolean(unit.megaPokemon && !unit.megaEvolved && !pvpRoom.battle!.player.megaUsed);
-                            const otherMegaReserved = Object.entries(pvpChoiceDrafts).some(([draftActor, entry]) => Number(draftActor) !== actor && entry.type === 'mega');
-                            const allowMegaOption = canMegaEvolve && (!otherMegaReserved || draft.type === 'mega');
+                            const reservedMegaActor = reservedMegaActorForDrafts(pvpChoiceDrafts);
+                            const megaReservedByOtherLane = reservedMegaActor !== null && reservedMegaActor !== actor;
+                            const allowMegaOption = canMegaEvolve && !megaReservedByOtherLane;
                             const canSwitch = switchTargets.length > 0 && !unit.trappedByMove && unit.bindingTurns <= 0;
                             const statusBadge = simulatorStatusBadge(unit);
                             const battleTags = simulatorBattleTags(unit);
@@ -5556,6 +5665,15 @@ function App() {
                                           : unit.chargingTurns > 0
                                             ? 'This slot is already charging a two-turn move and will fire that stored move automatically on its next action.'
                                             : 'No legal move is currently available under the active locks. If the PvP timer expires here, the correct forced line will be submitted automatically.'}
+                                      </div>
+                                    ) : null}
+                                    {effectiveDraftType === 'mega' && unit.megaPokemon ? (
+                                      <div className="note-row compact-note">
+                                        {unit.basePokemon.displayName} will Mega Evolve into {unit.megaPokemon.displayName} before acting this turn.
+                                      </div>
+                                    ) : megaReservedByOtherLane ? (
+                                      <div className="note-row compact-note">
+                                        Mega Evolution is already reserved for another active lane this turn.
                                       </div>
                                     ) : null}
                                   </>

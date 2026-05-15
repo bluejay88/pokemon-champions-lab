@@ -1137,6 +1137,32 @@ assert.equal(megaWeatherBattle.weatherTurns, 4, 'Mega weather abilities should a
 assert.equal(megaWeatherBattle.player.megaUsed, true, 'A side should record that its Mega Evolution has been used.');
 assert.equal(megaWeatherBattle.opponent.megaUsed, true, 'The opposing side should also record Mega usage.');
 
+let megaExclusivityBattle = buildBattle(
+  'Doubles',
+  [
+    buildSlot('mega-lock-charizard', charizardBase, ['Flamethrower'], { itemId: charizarditeYId, evs: { ...blankStats(), specialAttack: 32, speed: 20, hp: 14 } }),
+    buildSlot('mega-lock-abomasnow', abomasnowBase, ['Blizzard'], { itemId: abomasiteId, evs: { ...blankStats(), specialAttack: 32, hp: 20, defense: 14 } }),
+  ],
+  [
+    buildSlot('mega-lock-foe-a', protectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } }),
+    buildSlot('mega-lock-foe-b', groundedProtectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } }),
+  ],
+);
+megaExclusivityBattle = withMockRandom([0.1, 0.1, 0.1, 0.1], () => resolveTurnWithChoices(
+  megaExclusivityBattle,
+  [
+    { type: 'mega', actor: 0, moveId: megaCharizardMoveId, target: 0 },
+    { type: 'mega', actor: 1, moveId: megaAbomasnowMoveId, target: 0 },
+  ],
+  [
+    { type: 'move', actor: 0, moveId: protectChoiceId, target: 0 },
+    { type: 'move', actor: 1, moveId: protectChoiceId, target: 0 },
+  ],
+));
+assert.equal(megaExclusivityBattle.player.units[0].megaEvolved, true, 'The first queued Mega Evolution should resolve for the player side.');
+assert.equal(megaExclusivityBattle.player.units[1].megaEvolved, false, 'A side should never resolve a second Mega Evolution in the same battle.');
+assert.equal(megaExclusivityBattle.player.megaUsed, true, 'Spending one Mega Evolution should hard-lock the side from using another later in the battle.');
+
 let revealBattle = buildBattle(
   'Singles',
   [buildSlot('reveal-user', earthquakeUser, ['Earthquake'], { natureId: 'jolly', evs: { ...blankStats(), attack: 32, speed: 32, hp: 2 } })],
@@ -1189,6 +1215,23 @@ megaSolBattle = withMockRandom([0.1, 0.1, 0.1, 0.1], () => resolveTurn(megaSolBa
 assert.equal(megaSolBattle.player.units[0].megaEvolved, true, 'Mega Meganium should Mega Evolve before acting.');
 assert.ok(megaSolBattle.opponent.units[0].currentHp < megaSolStartHp, 'Mega Sol should let Solar Beam fire immediately without a charge turn.');
 assert.equal(megaSolBattle.player.units[0].chargingTurns, 0, 'Mega Sol should bypass Solar Beam charging entirely.');
+
+const aiMegaAllocationBattle = buildBattle(
+  'Doubles',
+  [
+    buildSlot('ai-mega-player-a', protectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } }),
+    buildSlot('ai-mega-player-b', groundedProtectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } }),
+  ],
+  [
+    buildSlot('ai-mega-charizard', charizardBase, ['Flamethrower'], { itemId: charizarditeYId, evs: { ...blankStats(), specialAttack: 32, speed: 20, hp: 14 } }),
+    buildSlot('ai-mega-abomasnow', abomasnowBase, ['Blizzard'], { itemId: abomasiteId, evs: { ...blankStats(), specialAttack: 32, hp: 20, defense: 14 } }),
+  ],
+);
+const aiMegaChoices = generateAiChoices(aiMegaAllocationBattle, 'opponent');
+assert.ok(
+  aiMegaChoices.filter((choice) => choice.type === 'mega').length <= 1,
+  'Expert AI should only reserve one Mega Evolution even if two active lanes are Mega-capable.',
+);
 
 let meteorBeamBattle = buildBattle(
   'Singles',

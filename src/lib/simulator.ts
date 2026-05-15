@@ -4198,6 +4198,46 @@ function maybeUpgradeChoiceToMega(state: SimulatorBattleState, sideId: SideId, a
   return shouldMegaNow ? ({ ...choice, type: 'mega' } satisfies SimulatorChoice) : choice;
 }
 
+function megaTransformationScore(unit: SimUnit) {
+  if (!unit.megaPokemon) {
+    return -Infinity;
+  }
+
+  const baseStats = unit.basePokemon.baseStats;
+  const megaStats = unit.megaPokemon.baseStats;
+  const offensiveGain =
+    Math.max(0, megaStats.attack - baseStats.attack)
+    + Math.max(0, megaStats.specialAttack - baseStats.specialAttack)
+    + Math.max(0, megaStats.speed - baseStats.speed) * 0.9;
+  const bulkGain =
+    Math.max(0, megaStats.defense - baseStats.defense) * 0.7
+    + Math.max(0, megaStats.specialDefense - baseStats.specialDefense) * 0.7
+    + Math.max(0, megaStats.hp - baseStats.hp) * 0.2;
+
+  return offensiveGain + bulkGain;
+}
+
+function aiMegaChoiceScore(state: SimulatorBattleState, sideId: SideId, choice: SimulatorChoice) {
+  if (choice.type !== 'mega') {
+    return -Infinity;
+  }
+
+  const side = sideForId(state, sideId);
+  const unit = targetActiveUnit(side, choice.actor);
+  if (!unit || !unit.megaPokemon) {
+    return -Infinity;
+  }
+
+  const hpRatio = unit.maxHp ? unit.currentHp / unit.maxHp : 0;
+  const megaAbility = resolveAbility({ ...unit.build, useMega: true }, unit.megaPokemon)?.name ?? null;
+  const weatherUtility = weatherAbilities.has(megaAbility ?? '') && state.environment.weather === 'clear' ? 34 : 0;
+  const terrainUtility = terrainAbilities.has(megaAbility ?? '') && state.environment.terrain === 'none' ? 24 : 0;
+  const immediateTempo = state.turn <= 2 ? 20 : state.turn <= 4 ? 10 : 0;
+  const healthWindow = hpRatio > 0.7 ? 18 : hpRatio > 0.45 ? 8 : -10;
+
+  return megaTransformationScore(unit) + weatherUtility + terrainUtility + immediateTempo + healthWindow;
+}
+
 type AiThreatProfile = {
   maxDamage: number;
   maxRatio: number;
@@ -4865,7 +4905,26 @@ export function advancePreviewToBattle(state: SimulatorBattleState) {
 
 export function generateAiChoices(state: SimulatorBattleState, sideId: SideId) {
   const side = sideForId(state, sideId);
-  return side.active.map((_, actor) => aiChoiceForUnit(state, sideId, actor));
+  const draftedChoices = side.active.map((_, actor) => aiChoiceForUnit(state, sideId, actor));
+  const megaChoices = draftedChoices.filter((choice): choice is Extract<SimulatorChoice, { type: 'mega' }> => choice.type === 'mega');
+  if (megaChoices.length <= 1) {
+    return draftedChoices;
+  }
+
+  const chosenMega = megaChoices
+    .map((choice) => ({ choice, score: aiMegaChoiceScore(state, sideId, choice) }))
+    .sort((left, right) => right.score - left.score)[0]?.choice;
+
+  return draftedChoices.map((choice) => {
+    if (choice.type !== 'mega' || !chosenMega || choice.actor === chosenMega.actor) {
+      return choice;
+    }
+
+    return {
+      ...choice,
+      type: 'move',
+    } satisfies SimulatorChoice;
+  });
 }
 
 export function randomChoicesForSide(state: SimulatorBattleState, sideId: SideId) {
