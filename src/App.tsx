@@ -2104,6 +2104,15 @@ function BattleMusicPlayer({
   }, [trackId, playlistIds, mode, sessionKey]);
 
   useEffect(() => {
+    if (!audioRef.current) {
+      return;
+    }
+
+    audioRef.current.pause();
+    audioRef.current.currentTime = 0;
+  }, [sessionKey]);
+
+  useEffect(() => {
     if (typeof window === 'undefined') {
       return;
     }
@@ -2139,6 +2148,7 @@ function BattleMusicPlayer({
       void audioRef.current.play().catch(() => undefined);
     } else {
       audioRef.current.pause();
+      audioRef.current.currentTime = 0;
     }
 
     return () => {
@@ -2658,8 +2668,8 @@ function App() {
     null;
   const simBattleResolved = Boolean(simBattle && simBattle.stage === 'finished');
   const pvpBattleResolved = Boolean(pvpRoom && pvpRoom.stage === 'finished');
-  const aiBattleMusicActive = activeTab === 'simulator' && Boolean(simPreview || simBattle);
-  const pvpBattleMusicActive = activeTab === 'pvp-battles' && Boolean(pvpRoom && (pvpRoom.stage === 'preview' || pvpRoom.stage === 'battle'));
+  const aiBattleMusicActive = activeTab === 'simulator' && simBattle?.stage === 'battle';
+  const pvpBattleMusicActive = activeTab === 'pvp-battles' && pvpRoom?.stage === 'battle';
   const simDecisionPhaseKey = simBattle
     ? `${simBattle.turn}-${simBattle.player.active.join(',')}-${simBattle.opponent.active.join(',')}-${simBattle.player.bench.join(',')}-${simBattle.opponent.bench.join(',')}`
     : 'sim-idle';
@@ -2667,10 +2677,10 @@ function App() {
     ? pvpRoom?.musicTrackId ?? primaryBattleMusicTrackId(state.profile.preferredBattleTrackId, state.profile.battleMusicPlaylistIds)
     : primaryBattleMusicTrackId(state.profile.preferredBattleTrackId, state.profile.battleMusicPlaylistIds);
   const battleMusicSessionKey = activeTab === 'pvp-battles'
-    ? `pvp-${pvpRoom?.code ?? 'idle'}-${pvpRoom?.stage ?? 'idle'}`
-    : simPreview
-      ? `sim-preview-${simPreview.previewEndsAt}`
-      : simBattle
+    ? pvpRoom?.stage === 'battle'
+      ? `pvp-battle-${pvpRoom?.code ?? 'idle'}`
+      : 'pvp-idle'
+    : simBattle?.stage === 'battle'
         ? `sim-battle-${simBattle.player.units.map((unit) => unit.slotIndex).join('-')}-${simBattle.opponent.units.map((unit) => unit.slotIndex).join('-')}`
         : 'sim-idle';
   const profileReady = Boolean(state.profile.trainerName.trim());

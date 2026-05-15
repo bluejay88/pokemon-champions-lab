@@ -169,6 +169,7 @@ const {
   battleHasPendingReplacements,
   buildAutoReplacementChoices,
   createSimulatorBattle,
+  generateAiChoices,
   legalMovesForUnit,
   randomChoicesForSide,
   resolveTurn,
@@ -545,10 +546,46 @@ assert.equal(protectBattle.player.units[0].currentHp, protectBattle.player.units
 protectBattle = withMockRandom([0.2, 0.2, 0.2], () => resolveTurn(protectBattle, [{ type: 'move', actor: 0, moveId: protectChoiceId, target: 0 }]));
 assert.ok(protectBattle.player.units[0].currentHp < protectBattle.player.units[0].maxHp, 'Third consecutive Protect should fail at the 1/9 rate with a 0.2 roll.');
 
+let residualBattle = buildBattle(
+  'Singles',
+  [buildSlot('burned-user', groundedProtectUser, ['Protect'], { status: 'burn', evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } })],
+  [buildSlot('leftovers-foe', protectUser, ['Protect'], { itemId: itemIdByName('Leftovers'), evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } })],
+);
+residualBattle.opponent.units[0].currentHp = Math.max(1, residualBattle.opponent.units[0].currentHp - 24);
+const burnStartHp = residualBattle.player.units[0].currentHp;
+const leftoversStartHp = residualBattle.opponent.units[0].currentHp;
+residualBattle = withMockRandom([0.1, 0.1, 0.1], () =>
+  resolveTurnWithChoices(
+    residualBattle,
+    [{ type: 'move', actor: 0, moveId: protectChoiceId, target: 0 }],
+    [{ type: 'move', actor: 0, moveId: protectChoiceId, target: 0 }],
+  ));
+assert.equal(
+  residualBattle.player.units[0].currentHp,
+  burnStartHp - Math.max(1, Math.round(residualBattle.player.units[0].maxHp * 0.0625)),
+  'Burn should deal one-sixteenth max HP at the end of the turn.',
+);
+assert.ok(residualBattle.opponent.units[0].currentHp > leftoversStartHp, 'Leftovers should heal its holder automatically at the end of the turn.');
+
+let sitrusBattle = buildBattle(
+  'Singles',
+  [buildSlot('sitrus-attacker', protectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } })],
+  [buildSlot('sitrus-target', groundedProtectUser, ['Protect'], { itemId: itemIdByName('Sitrus Berry'), evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } })],
+);
+sitrusBattle.opponent.units[0].currentHp = Math.max(1, Math.floor(sitrusBattle.opponent.units[0].maxHp * 0.45));
+sitrusBattle = withMockRandom([0.1, 0.1, 0.1], () =>
+  resolveTurnWithChoices(
+    sitrusBattle,
+    [{ type: 'move', actor: 0, moveId: protectChoiceId, target: 0 }],
+    [{ type: 'move', actor: 0, moveId: protectChoiceId, target: 0 }],
+  ));
+assert.equal(sitrusBattle.opponent.units[0].heldItemId, null, 'Sitrus Berry should be consumed automatically after the holder drops to half HP or lower.');
+assert.ok(sitrusBattle.log.some((entry) => entry.includes('Sitrus Berry')), 'Sitrus Berry should be called out in the battle log when it triggers.');
+
 let rainBattle = buildBattle(
   'Singles',
   [buildSlot('rain-thunder', thunderUser, ['Thunder'], { natureId: 'timid', evs: { ...blankStats(), specialAttack: 32, speed: 32, hp: 2 } })],
-  [buildSlot('rain-target', protectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, specialDefense: 20, defense: 14 } })],
+  [buildSlot('rain-target', protectUser, [protectUser.movePool.find((move) => move.category !== 'Status')?.name ?? protectUser.movePool[0].name], { evs: { ...blankStats(), hp: 32, specialDefense: 20, defense: 14 } })],
 );
 rainBattle.environment.weather = 'rain';
 rainBattle = withMockRandom([0.99, 0.99, 0.99], () => resolveTurn(rainBattle, [{ type: 'move', actor: 0, moveId: thunderChoiceId, target: 0 }]));
@@ -557,7 +594,7 @@ assert.ok(rainBattle.opponent.units[0].currentHp < rainBattle.opponent.units[0].
 let dryBattle = buildBattle(
   'Singles',
   [buildSlot('dry-thunder', thunderUser, ['Thunder'], { natureId: 'timid', evs: { ...blankStats(), specialAttack: 32, speed: 32, hp: 2 } })],
-  [buildSlot('dry-target', protectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, specialDefense: 20, defense: 14 } })],
+  [buildSlot('dry-target', protectUser, [protectUser.movePool.find((move) => move.category !== 'Status')?.name ?? protectUser.movePool[0].name], { evs: { ...blankStats(), hp: 32, specialDefense: 20, defense: 14 } })],
 );
 dryBattle.environment.weather = 'clear';
 dryBattle = withMockRandom([0.99, 0.99, 0.99], () => resolveTurn(dryBattle, [{ type: 'move', actor: 0, moveId: thunderChoiceId, target: 0 }]));
@@ -582,6 +619,35 @@ assert.equal(snarlBattle.opponent.units[0].build.specialAttackStage, -1, 'Snarl 
 assert.equal(snarlBattle.opponent.units[1].build.specialAttackStage, -1, 'Snarl should drop the second target\'s Sp. Atk.');
 assert.ok(snarlBattle.opponent.units[0].currentHp < snarlBattle.opponent.units[0].maxHp, 'Snarl should damage the first opposing target.');
 assert.ok(snarlBattle.opponent.units[1].currentHp < snarlBattle.opponent.units[1].maxHp, 'Snarl should damage the second opposing target.');
+
+let aiDisciplineBattle = buildBattle(
+  'Doubles',
+  [
+    buildSlot('ai-fakeout-user', pranksterUser, ['Fake Out', 'Taunt'], { abilityName: 'Prankster', evs: { ...blankStats(), hp: 20, speed: 32, defense: 14 } }),
+    buildSlot('ai-fakeout-ally', protectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } }),
+  ],
+  [
+    buildSlot('ai-fakeout-foe-a', groundedProtectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } }),
+    buildSlot('ai-fakeout-foe-b', specialTargetA, [specialTargetA.movePool.find((move) => move.id === specialTargetAAttackId)?.name ?? specialTargetA.movePool[0].name], { evs: { ...blankStats(), hp: 20, defense: 20, specialDefense: 26 } }),
+  ],
+);
+aiDisciplineBattle = withMockRandom([0.1, 0.1, 0.1, 0.1], () =>
+  resolveTurnWithChoices(
+    aiDisciplineBattle,
+    [
+      { type: 'move', actor: 0, moveId: pranksterFakeOutChoiceId, target: 0 },
+      { type: 'move', actor: 1, moveId: protectChoiceId, target: 0 },
+    ],
+    [
+      { type: 'move', actor: 0, moveId: protectChoiceId, target: 0 },
+      { type: 'move', actor: 1, moveId: specialTargetAAttackId, target: 0 },
+    ],
+  ));
+const aiFollowUpChoices = generateAiChoices(aiDisciplineBattle, 'player');
+assert.ok(
+  aiFollowUpChoices.every((choice) => choice.type === 'switch' || choice.moveId !== pranksterFakeOutChoiceId),
+  'Expert AI should stop selecting Fake Out after the opener turn has passed.',
+);
 
 let coachingBattle = buildBattle(
   'Doubles',
@@ -838,10 +904,18 @@ let stickyWebBattle = buildBattle(
   ],
 );
 stickyWebBattle.opponent.units[0].currentHp = 1;
-stickyWebBattle = withMockRandom([0.2, 0.2, 0.2, 0.2], () => resolveTurn(stickyWebBattle, [
-  { type: 'move', actor: 0, moveId: stickyWebChoiceId, target: 0 },
-  { type: 'move', actor: 1, moveId: slowEarthquakeChoiceId, target: 0 },
-]));
+stickyWebBattle = withMockRandom([0.2, 0.2, 0.2, 0.2], () =>
+  resolveTurnWithChoices(
+    stickyWebBattle,
+    [
+      { type: 'move', actor: 0, moveId: stickyWebChoiceId, target: 0 },
+      { type: 'move', actor: 1, moveId: slowEarthquakeChoiceId, target: 0 },
+    ],
+    [
+      { type: 'move', actor: 0, moveId: specialTargetAAttackId, target: 0 },
+      { type: 'move', actor: 1, moveId: protectChoiceId, target: 0 },
+    ],
+  ));
 stickyWebBattle = applyReplacementChoices(stickyWebBattle, [], buildAutoReplacementChoices(stickyWebBattle, 'opponent'));
 assert.equal(stickyWebBattle.opponent.units[2].revealed, true, 'A replacement switch-in should reveal the incoming Pokemon.');
 assert.equal(stickyWebBattle.opponent.units[2].build.speedStage, -1, 'Sticky Web should lower the Speed of grounded switch-ins.');
@@ -859,10 +933,18 @@ let toxicSpikesBattle = buildBattle(
   ],
 );
 toxicSpikesBattle.opponent.units[0].currentHp = 1;
-toxicSpikesBattle = withMockRandom([0.2, 0.2, 0.2, 0.2], () => resolveTurn(toxicSpikesBattle, [
-  { type: 'move', actor: 0, moveId: toxicSpikesChoiceId, target: 0 },
-  { type: 'move', actor: 1, moveId: slowEarthquakeChoiceId, target: 0 },
-]));
+toxicSpikesBattle = withMockRandom([0.2, 0.2, 0.2, 0.2], () =>
+  resolveTurnWithChoices(
+    toxicSpikesBattle,
+    [
+      { type: 'move', actor: 0, moveId: toxicSpikesChoiceId, target: 0 },
+      { type: 'move', actor: 1, moveId: slowEarthquakeChoiceId, target: 0 },
+    ],
+    [
+      { type: 'move', actor: 0, moveId: specialTargetAAttackId, target: 0 },
+      { type: 'move', actor: 1, moveId: protectChoiceId, target: 0 },
+    ],
+  ));
 toxicSpikesBattle = applyReplacementChoices(toxicSpikesBattle, [], buildAutoReplacementChoices(toxicSpikesBattle, 'opponent'));
 assert.equal(toxicSpikesBattle.opponent.units[2].build.status, 'poison', 'Toxic Spikes should poison grounded switch-ins when one layer is active.');
 
@@ -884,11 +966,22 @@ let wishBattle = buildBattle(
     buildSlot('wish-user', wishUser, ['Wish'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 }, currentHpPercent: 40 }),
     buildSlot('wish-bench', protectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } }),
   ],
-  [buildSlot('wish-foe', shadowBallUser, ['Shadow Ball'], { evs: { ...blankStats(), specialAttack: 32, speed: 20, hp: 14 } })],
+  [buildSlot('wish-foe', protectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } })],
 );
-wishBattle = withMockRandom([0.2, 0.2, 0.2], () => resolveTurn(wishBattle, [{ type: 'move', actor: 0, moveId: wishChoiceId, target: 0 }]));
+wishBattle.player.units[0].currentHp = Math.max(1, Math.floor(wishBattle.player.units[0].maxHp * 0.4));
+wishBattle = withMockRandom([0.2, 0.2, 0.2], () =>
+  resolveTurnWithChoices(
+    wishBattle,
+    [{ type: 'move', actor: 0, moveId: wishChoiceId, target: 0 }],
+    [{ type: 'move', actor: 0, moveId: protectChoiceId, target: 0 }],
+  ));
 const postWishHp = wishBattle.player.units[0].currentHp;
-wishBattle = withMockRandom([0.2, 0.2, 0.2], () => resolveTurn(wishBattle, [{ type: 'move', actor: 0, moveId: protectChoiceId, target: 0 }]));
+wishBattle = withMockRandom([0.2, 0.2, 0.2], () =>
+  resolveTurnWithChoices(
+    wishBattle,
+    [{ type: 'move', actor: 0, moveId: wishChoiceId, target: 0 }],
+    [{ type: 'move', actor: 0, moveId: protectChoiceId, target: 0 }],
+  ));
 assert.ok(wishBattle.player.units[0].currentHp > postWishHp, 'Wish should heal the active slot at the end of the following turn.');
 
 let pivotBattle = buildBattle(
@@ -927,7 +1020,7 @@ assert.equal(terrainBattle.environment.terrain, 'none', 'Ice Spinner should clea
 let seedBattle = buildBattle(
   'Singles',
   [buildSlot('seed-user', leechSeedUser, ['Leech Seed'], { evs: { ...blankStats(), hp: 32, specialDefense: 20, defense: 14 }, currentHpPercent: 60 })],
-  [buildSlot('seed-foe', protectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } })],
+  [buildSlot('seed-foe', protectUser, [protectUser.movePool.find((move) => move.category !== 'Status')?.name ?? protectUser.movePool[0].name], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } })],
 );
 seedBattle = withMockRandom([0.1, 0.1, 0.1], () => resolveTurn(seedBattle, [{ type: 'move', actor: 0, moveId: leechSeedChoiceId, target: 0 }]));
 assert.ok(seedBattle.opponent.units[0].currentHp < seedBattle.opponent.units[0].maxHp, 'Leech Seed should drain HP at end of turn.');
@@ -938,6 +1031,7 @@ let restBattle = buildBattle(
   [buildSlot('rest-user', restUser, ['Rest'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 }, currentHpPercent: 35, status: 'burn' })],
   [buildSlot('rest-foe', protectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } })],
 );
+restBattle.player.units[0].currentHp = Math.max(1, Math.floor(restBattle.player.units[0].maxHp * 0.35));
 restBattle = withMockRandom([0.1, 0.1, 0.1], () => resolveTurn(restBattle, [{ type: 'move', actor: 0, moveId: restChoiceId, target: 0 }]));
 assert.equal(restBattle.player.units[0].currentHp, restBattle.player.units[0].maxHp, 'Rest should fully restore HP.');
 assert.equal(restBattle.player.units[0].build.status, 'sleep', 'Rest should put the user to sleep.');
@@ -1428,7 +1522,7 @@ assert.ok(dragonDartsBattle.opponent.units[0].currentHp < dragonDartsHpA && drag
 let finalGambitBattle = buildBattle(
   'Singles',
   [buildSlot('final-gambit-user', finalGambitUser, ['Final Gambit'], { evs: { ...blankStats(), speed: 32, hp: 32, attack: 2 } })],
-  [buildSlot('final-gambit-foe', groundedProtectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } })],
+  [buildSlot('final-gambit-foe', groundedProtectUser, [groundedProtectUser.movePool.find((move) => move.category !== 'Status')?.name ?? groundedProtectUser.movePool[0].name], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } })],
 );
 const finalGambitStartHp = finalGambitBattle.opponent.units[0].currentHp;
 finalGambitBattle = withMockRandom([0.1, 0.1, 0.1], () => resolveTurn(finalGambitBattle, [{ type: 'move', actor: 0, moveId: finalGambitChoiceId, target: 0 }]));
@@ -1449,7 +1543,7 @@ let partingShotBattle = buildBattle(
     buildSlot('parting-shot-user', partingShotUser, ['Parting Shot'], { evs: { ...blankStats(), speed: 32, hp: 20, defense: 14 } }),
     buildSlot('parting-shot-bench', protectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } }),
   ],
-  [buildSlot('parting-shot-foe', groundedProtectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } })],
+  [buildSlot('parting-shot-foe', groundedProtectUser, [groundedProtectUser.movePool.find((move) => move.category !== 'Status')?.name ?? groundedProtectUser.movePool[0].name], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } })],
 );
 partingShotBattle = withMockRandom([0.1, 0.1, 0.1], () => resolveTurn(partingShotBattle, [{ type: 'move', actor: 0, moveId: partingShotChoiceId, target: 0 }]));
 assert.equal(partingShotBattle.player.active[0], 1, 'Parting Shot should pivot the user out after the stat drops land.');
@@ -1666,7 +1760,7 @@ const summary = [
   `Verified item clause sanitization for manual teams and AI-generated teams.`,
   `Verified move-parity registry coverage at ${paritySummary.coveredPercent}% across ${paritySummary.total} Champions moves, with ${paritySummary.explicit} explicit hooks tagged in the report.`,
   `Verified damage engine produces live damage output under the Champions EV model, including Doubles spread reduction, Aurora Veil, Helping Hand, Magic Room, and Wonder Room checks.`,
-  `Verified simulator rules for chained Protect odds, confusion/trap timers, Trick and Recycle item flow, Substitute and Healing Wish handling, Lock-On accuracy, ally-target support hooks, rain-locked Thunder accuracy, Snarl spread debuffs, Earthquake ally collateral, Parabolic Charge spread healing, Draining Kiss and Bitter Blade drain ratios, Matcha Gotcha spread recovery, Pain Split averaging, Sparkling Aria burn cures, Sticky Web and Toxic Spikes switch-in hooks, forced-thaw freeze timing, Rest sleep timing, Disable and Torment move locks, weather field timers, opponent reveal state, Calm Mind and Nasty Plot boosts, Trick Room toggling, recharge turns, charge-turn attacks, mid-turn doubles retargeting, Struggle locks, Dark-type immunity to opposing Prankster status moves, and Mega weather ordering.`,
+  `Verified simulator rules for chained Protect odds, burn end-turn chip, Leftovers healing, Sitrus auto-consumption, confusion/trap timers, Trick and Recycle item flow, Substitute and Healing Wish handling, Lock-On accuracy, ally-target support hooks, rain-locked Thunder accuracy, Snarl spread debuffs, Earthquake ally collateral, Parabolic Charge spread healing, Draining Kiss and Bitter Blade drain ratios, Matcha Gotcha spread recovery, Pain Split averaging, Sparkling Aria burn cures, Sticky Web and Toxic Spikes switch-in hooks, forced-thaw freeze timing, Rest sleep timing, Disable and Torment move locks, weather field timers, opponent reveal state, Calm Mind and Nasty Plot boosts, Trick Room toggling, recharge turns, charge-turn attacks, mid-turn doubles retargeting, Struggle locks, Dark-type immunity to opposing Prankster status moves, and Mega weather ordering.`,
   `Verified 50 fully automated simulator battle sweeps across Singles and Doubles (${simulatorBattlePlayerWins} player-side wins / ${simulatorBattleOpponentWins} opponent-side wins).`,
   `Verified shared PvP room logic, including bring-four lock-in, full roster integrity, immediate dual-lock resolution, deadline-based turn resolution, overall match-timer draws, forfeit handling, and 50 automated room-code battle simulations (${onlineBattleHostWins} host wins / ${onlineBattleGuestWins} guest wins / ${onlineBattleDraws} draws).`,
   warnings.length ? `Source-data warnings: ${warnings.length} HP floor rows on the scraped form pages disagree with fixed 31 IV policy, so the app keeps the fixed-IV result intentionally.` : 'Source-data warnings: none.',

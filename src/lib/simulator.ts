@@ -4198,6 +4198,329 @@ function maybeUpgradeChoiceToMega(state: SimulatorBattleState, sideId: SideId, a
   return shouldMegaNow ? ({ ...choice, type: 'mega' } satisfies SimulatorChoice) : choice;
 }
 
+type AiThreatProfile = {
+  maxDamage: number;
+  maxRatio: number;
+  physicalPressure: number;
+  specialPressure: number;
+  fasterThreats: number;
+};
+
+type AiActionCandidate = {
+  choice: SimulatorChoice;
+  score: number;
+};
+
+function aiAccuracyFactor(state: SimulatorBattleState, actor: SimUnit, target: SimUnit, move: PokemonMove) {
+  if (!move.accuracy || move.accuracy >= 101) {
+    return 1;
+  }
+  if (move.name === 'Toxic' && typeListForUnit(state, actor).includes('Poison')) {
+    return 1;
+  }
+  if (move.name === 'Blizzard' && state.environment.weather === 'snow') {
+    return 1;
+  }
+  if (move.name === 'Thunder' && state.environment.weather === 'rain') {
+    return 1;
+  }
+  if ((move.name === 'Thunder' || move.name === 'Hurricane') && state.environment.weather === 'sun') {
+    return 0.5;
+  }
+  return Math.max(0.55, Math.min(1, move.accuracy / 100));
+}
+
+function aiProjectedDamage(
+  state: SimulatorBattleState,
+  actingSide: SimSide,
+  defendingSide: SimSide,
+  attacker: SimUnit,
+  target: SimUnit,
+  move: PokemonMove,
+) {
+  const spreadTargetsHit = moveScope(move) !== 'single' && livingActiveTargets(defendingSide).length > 1 ? 2 : 1;
+  const result = calculateDamageWithOverrides(currentBuild(attacker), currentBuild(target), move, {
+    ...screenAwareEnvironment(state, defendingSide),
+    helpingHand: attacker.helpingHand,
+    spreadTargetsHit,
+  }, {
+    attackerPokemon: attacker.pokemon,
+    defenderPokemon: target.pokemon,
+    attackerStats: effectiveStatsForUnit(attacker),
+    defenderStats: effectiveStatsForUnit(target),
+    attackerTypes: typeListForUnit(state, attacker),
+    defenderTypes: typeListForUnit(state, target),
+    attackerAbility: abilityNameForUnit(attacker),
+    defenderAbility: abilityNameForUnit(target),
+    attackerGrounded: unitGroundedInState(state, attacker),
+    defenderGrounded: unitGroundedInState(state, target),
+    attackerSpeed: combatSpeed(attacker, actingSide.tailwindTurns, state.trickRoomTurns),
+    defenderSpeed: combatSpeed(target, defendingSide.tailwindTurns, state.trickRoomTurns),
+  });
+
+  if (!result || result.koSummary === 'Immune' || result.averageDamage <= 0) {
+    return null;
+  }
+
+  return {
+    result,
+    spreadTargetsHit,
+    averageDamage: Math.round((result.minDamage + result.maxDamage) / 2),
+  };
+}
+
+function aiThreatProfileForUnit(state: SimulatorBattleState, sideId: SideId, unit: SimUnit) {
+  const actingSide = sideForId(state, sideId);
+  const opposingSideId: SideId = sideId === 'player' ? 'opponent' : 'player';
+  const defendingSide = opposingSide(state, sideId);
+  let maxDamage = 0;
+  let maxRatio = 0;
+  let physicalPressure = 0;
+  let specialPressure = 0;
+  let fasterThreats = 0;
+  const unitSpeed = combatSpeed(unit, actingSide.tailwindTurns, state.trickRoomTurns);
+
+  for (const foeRef of livingActiveTargets(defendingSide)) {
+    const foe = foeRef.unit;
+    const foeSpeed = combatSpeed(foe, defendingSide.tailwindTurns, state.trickRoomTurns);
+    if (foeSpeed > unitSpeed) {
+      fasterThreats += 1;
+    }
+
+    const moveList =
+      foe.chargingTurns > 0 && foe.chargingMoveId
+        ? [findMove(foe, foe.chargingMoveId)].filter((entry): entry is PokemonMove => Boolean(entry))
+        : legalMovesForUnit(foe, state, opposingSideId);
+
+    for (const move of moveList) {
+      if (move.category === 'Status') {
+        continue;
+      }
+
+      const projection = aiProjectedDamage(state, defendingSide, actingSide, foe, unit, move);
+      if (!projection) {
+        continue;
+      }
+
+      const adjustedDamage = Math.max(1, Math.round(projection.averageDamage * aiAccuracyFactor(state, foe, unit, move)));
+      const ratio = adjustedDamage / Math.max(1, unit.currentHp);
+      maxDamage = Math.max(maxDamage, adjustedDamage);
+      maxRatio = Math.max(maxRatio, ratio);
+      if (move.category === 'Physical') {
+        physicalPressure = Math.max(physicalPressure, ratio);
+      } else if (move.category === 'Special') {
+        specialPressure = Math.max(specialPressure, ratio);
+      }
+    }
+  }
+
+  return {
+    maxDamage,
+    maxRatio,
+    physicalPressure,
+    specialPressure,
+    fasterThreats,
+  } satisfies AiThreatProfile;
+}
+
+function aiAverageCombatSpeed(state: SimulatorBattleState, side: SimSide) {
+  const liveUnits = livingActiveTargets(side);
+  if (!liveUnits.length) {
+    return 0;
+  }
+
+  return liveUnits.reduce((sum, entry) => sum + combatSpeed(entry.unit, side.tailwindTurns, state.trickRoomTurns), 0) / liveUnits.length;
+}
+
+function aiStatusMoveCount(unit: SimUnit) {
+  return moveIdsForUnit(unit)
+    .map((moveId) => findMove(unit, moveId))
+    .filter((move): move is PokemonMove => Boolean(move))
+    .filter((move) => move.category === 'Status').length;
+}
+
+function aiOffensiveChoiceScore(
+  state: SimulatorBattleState,
+  sideId: SideId,
+  actorSlot: number,
+  unit: SimUnit,
+  move: PokemonMove,
+  targetSlot: number,
+) {
+  const actingSide = sideForId(state, sideId);
+  const defendingSide = opposingSide(state, sideId);
+  if ((move.name === 'Fake Out' || move.name === 'First Impression') && unit.turnsActive > 0) {
+    return null;
+  }
+  const target = targetActiveUnit(defendingSide, targetSlot);
+  if (!target || target.fainted) {
+    return null;
+  }
+
+  const projection = aiProjectedDamage(state, actingSide, defendingSide, unit, target, move);
+  if (!projection) {
+    return null;
+  }
+
+  const accuracyFactor = aiAccuracyFactor(state, unit, target, move);
+  let score = projection.averageDamage / Math.max(1, target.currentHp) * 92 * accuracyFactor;
+  score += projection.result.effectiveness > 1 ? projection.result.effectiveness * 18 : 0;
+  score -= projection.result.effectiveness > 0 && projection.result.effectiveness < 1 ? (1 - projection.result.effectiveness) * 18 : 0;
+
+  if (projection.result.minDamage >= target.currentHp) {
+    score += 130;
+  } else if (projection.result.maxDamage >= target.currentHp) {
+    score += 78;
+  }
+
+  if (movePriority(move, unit, state) > 0 && combatSpeed(unit, actingSide.tailwindTurns, state.trickRoomTurns) < combatSpeed(target, defendingSide.tailwindTurns, state.trickRoomTurns)) {
+    score += 12;
+  }
+  if (move.name === 'Fake Out') {
+    const targetThreat = aiThreatProfileForUnit(state, sideId === 'player' ? 'opponent' : 'player', target);
+    score += 58 + targetThreat.maxRatio * 18;
+  }
+
+  if (moveScope(move) !== 'single') {
+    const otherTargets = livingActiveTargets(defendingSide).filter((entry) => entry.activeSlot !== targetSlot);
+    for (const otherTargetRef of otherTargets) {
+      const otherProjection = aiProjectedDamage(state, actingSide, defendingSide, unit, otherTargetRef.unit, move);
+      if (!otherProjection) {
+        continue;
+      }
+      score += otherProjection.averageDamage / Math.max(1, otherTargetRef.unit.currentHp) * 42 * aiAccuracyFactor(state, unit, otherTargetRef.unit, move);
+      if (otherProjection.result.minDamage >= otherTargetRef.unit.currentHp) {
+        score += 55;
+      }
+    }
+  }
+
+  if (moveScope(move) === 'all-adjacent' && state.format === 'Doubles') {
+    for (const allyRef of livingActiveTargets(actingSide).filter((entry) => entry.activeSlot !== actorSlot)) {
+      const collateralProjection = aiProjectedDamage(state, actingSide, actingSide, unit, allyRef.unit, move);
+      if (!collateralProjection) {
+        continue;
+      }
+      score -= collateralProjection.averageDamage / Math.max(1, allyRef.unit.currentHp) * 68;
+      if (collateralProjection.result.minDamage >= allyRef.unit.currentHp) {
+        score -= 120;
+      }
+    }
+  }
+
+  if ((move.name === 'Icy Wind' || move.name === 'Electroweb' || move.name === 'Bulldoze' || move.name === 'Mud Shot' || move.name === 'Low Sweep' || move.name === 'Rock Tomb') && state.format === 'Doubles') {
+    const foesFasterNow = livingActiveTargets(defendingSide).filter((entry) =>
+      combatSpeed(entry.unit, defendingSide.tailwindTurns, state.trickRoomTurns) > combatSpeed(unit, actingSide.tailwindTurns, state.trickRoomTurns),
+    ).length;
+    score += foesFasterNow * 16;
+  }
+
+  return score;
+}
+
+function aiBestDamageScoreForUnit(state: SimulatorBattleState, sideId: SideId, actorSlot: number, unit: SimUnit) {
+  const opposing = opposingSide(state, sideId);
+  let bestScore = -Infinity;
+  for (const move of legalMovesForUnit(unit, state, sideId)) {
+    if (move.category === 'Status') {
+      continue;
+    }
+    for (const targetRef of livingActiveTargets(opposing)) {
+      const score = aiOffensiveChoiceScore(state, sideId, actorSlot, unit, move, targetRef.activeSlot);
+      if (score !== null) {
+        bestScore = Math.max(bestScore, score);
+      }
+    }
+  }
+  return Number.isFinite(bestScore) ? bestScore : 0;
+}
+
+function aiSwitchInBonus(state: SimulatorBattleState, sideId: SideId, candidate: SimUnit) {
+  const opposing = opposingSide(state, sideId);
+  const opposingTypes = new Set<string>();
+  for (const foeRef of livingActiveTargets(opposing)) {
+    for (const move of legalMovesForUnit(foeRef.unit, state, sideId === 'player' ? 'opponent' : 'player')) {
+      opposingTypes.add(move.type);
+    }
+  }
+
+  const ability = abilityNameForUnit(candidate);
+  switch (ability) {
+    case 'Intimidate':
+      return 20;
+    case 'Lightning Rod':
+      return opposingTypes.has('Electric') ? 18 : 8;
+    case 'Storm Drain':
+    case 'Water Absorb':
+      return opposingTypes.has('Water') ? 18 : 8;
+    case 'Flash Fire':
+      return opposingTypes.has('Fire') ? 18 : 8;
+    case 'Volt Absorb':
+      return opposingTypes.has('Electric') ? 16 : 6;
+    case 'Sap Sipper':
+      return opposingTypes.has('Grass') ? 14 : 4;
+    case 'Drought':
+    case 'Drizzle':
+    case 'Sand Stream':
+    case 'Snow Warning':
+      return state.weatherTurns <= 1 ? 14 : 6;
+    case 'Electric Surge':
+    case 'Grassy Surge':
+    case 'Misty Surge':
+    case 'Psychic Surge':
+      return state.terrainTurns <= 1 ? 12 : 5;
+    default:
+      return 0;
+  }
+}
+
+function aiBestSwitchChoice(
+  state: SimulatorBattleState,
+  sideId: SideId,
+  actorSlot: number,
+  unit: SimUnit,
+  bestMoveScore: number,
+  threat: AiThreatProfile,
+) {
+  const actingSide = sideForId(state, sideId);
+  if (!canUnitSwitchOut(state, unit) || !livingBenchTargets(actingSide).length) {
+    return null;
+  }
+
+  const hpRatio = unit.currentHp / Math.max(1, unit.maxHp);
+  const shouldLookForSwitch = threat.maxRatio >= 0.95 || (hpRatio <= 0.38 && threat.maxRatio >= 0.55);
+  if (!shouldLookForSwitch) {
+    return null;
+  }
+
+  let bestCandidate: AiActionCandidate | null = null;
+  for (const benchIndex of livingBenchTargets(actingSide)) {
+    const benchUnit = actingSide.units[benchIndex] ?? null;
+    if (!benchUnit || benchUnit.fainted) {
+      continue;
+    }
+
+    const benchThreat = aiThreatProfileForUnit(state, sideId, benchUnit);
+    const offensivePressure = aiBestDamageScoreForUnit(state, sideId, actorSlot, benchUnit);
+    const healthScore = benchUnit.currentHp / Math.max(1, benchUnit.maxHp) * 24;
+    const safetyScore = (1 - Math.min(1.4, benchThreat.maxRatio)) * 58;
+    const switchInScore = aiSwitchInBonus(state, sideId, benchUnit);
+    const candidateScore = offensivePressure * 0.72 + safetyScore + healthScore + switchInScore;
+    if (!bestCandidate || candidateScore > bestCandidate.score) {
+      bestCandidate = {
+        choice: { type: 'switch', actor: actorSlot, target: benchIndex },
+        score: candidateScore,
+      };
+    }
+  }
+
+  if (!bestCandidate) {
+    return null;
+  }
+
+  return bestCandidate.score > bestMoveScore + 10 ? bestCandidate : null;
+}
+
 function aiChoiceForUnit(state: SimulatorBattleState, sideId: SideId, actor: number): SimulatorChoice {
   const actingSide = sideForId(state, sideId);
   const defendingSide = opposingSide(state, sideId);
@@ -4207,105 +4530,237 @@ function aiChoiceForUnit(state: SimulatorBattleState, sideId: SideId, actor: num
   }
 
   const legalMoves = legalMovesForUnit(unit, state, sideId);
-  const recoveryMove = legalMoves.find((move) => healingMoves.has(move.name));
-  if (recoveryMove && unit.currentHp <= unit.maxHp * 0.35) {
-    return maybeUpgradeChoiceToMega(state, sideId, actor, { type: 'move', actor, moveId: recoveryMove.id, target: actor });
-  }
+  const liveOpponents = livingActiveTargets(defendingSide);
+  const liveAllies = livingActiveTargets(actingSide).filter((entry) => entry.activeSlot !== actor);
+  const threat = aiThreatProfileForUnit(state, sideId, unit);
+  const hpRatio = unit.currentHp / Math.max(1, unit.maxHp);
+  const ally = liveAllies[0]?.unit ?? null;
+  const allyThreat = ally ? aiThreatProfileForUnit(state, sideId, ally) : null;
+  const actingAverageSpeed = aiAverageCombatSpeed(state, actingSide);
+  const defendingAverageSpeed = aiAverageCombatSpeed(state, defendingSide);
+  const totalBoosts = unit.build.attackStage + unit.build.specialAttackStage + unit.build.speedStage + unit.build.defenseStage + unit.build.specialDefenseStage;
+  const candidates: AiActionCandidate[] = [];
 
-  if (state.turn <= 2 && actingSide.tailwindTurns === 0) {
-    const tailwind = legalMoves.find((move) => move.name === 'Tailwind');
-    if (tailwind) {
-      return maybeUpgradeChoiceToMega(state, sideId, actor, { type: 'move', actor, moveId: tailwind.id, target: actor });
-    }
-  }
-
-  if (state.turn <= 3 && actingSide.reflectTurns === 0) {
-    const reflect = legalMoves.find((move) => move.name === 'Reflect');
-    if (reflect) {
-      return maybeUpgradeChoiceToMega(state, sideId, actor, { type: 'move', actor, moveId: reflect.id, target: actor });
-    }
-  }
-
-  if (state.turn <= 3 && actingSide.lightScreenTurns === 0) {
-    const lightScreen = legalMoves.find((move) => move.name === 'Light Screen');
-    if (lightScreen) {
-      return maybeUpgradeChoiceToMega(state, sideId, actor, { type: 'move', actor, moveId: lightScreen.id, target: actor });
-    }
-  }
-
-  if (state.format === 'Singles' && state.turn <= 3 && !defendingSide.stealthRock) {
-    const stealthRock = legalMoves.find((move) => move.name === 'Stealth Rock');
-    if (stealthRock) {
-      return maybeUpgradeChoiceToMega(state, sideId, actor, { type: 'move', actor, moveId: stealthRock.id, target: 0 });
-    }
-  }
-
-  if (state.format === 'Singles' && state.turn <= 4 && defendingSide.spikesLayers < 2) {
-    const spikes = legalMoves.find((move) => move.name === 'Spikes');
-    if (spikes) {
-      return maybeUpgradeChoiceToMega(state, sideId, actor, { type: 'move', actor, moveId: spikes.id, target: 0 });
-    }
-  }
-
-  if (state.format === 'Doubles' && legalMoves.some((move) => redirectionMoves.has(move.name))) {
-    const redirectMove = legalMoves.find((move) => redirectionMoves.has(move.name));
-    if (redirectMove && unit.currentHp > unit.maxHp * 0.45 && actingSide.redirectionUnitIndex === null) {
-      return maybeUpgradeChoiceToMega(state, sideId, actor, { type: 'move', actor, moveId: redirectMove.id, target: actor });
-    }
-  }
-
-  const setupMove = legalMoves.find((move) => boostMoves.has(move.name));
-  if (setupMove && unit.currentHp > unit.maxHp * 0.7) {
-    const totalBoosts = unit.build.attackStage + unit.build.specialAttackStage + unit.build.speedStage;
-    if (totalBoosts <= 1) {
-      return maybeUpgradeChoiceToMega(state, sideId, actor, { type: 'move', actor, moveId: setupMove.id, target: actor });
-    }
-  }
-
-  if (unit.currentHp <= unit.maxHp * 0.25) {
-    const protect = legalMoves.find((move) => move.name === 'Protect');
-    if (protect) {
-      return maybeUpgradeChoiceToMega(state, sideId, actor, { type: 'move', actor, moveId: protect.id, target: actor });
-    }
-  }
-
-  let best: { moveId: string; target: number; damage: number } | null = null;
   for (const move of legalMoves) {
-    for (let targetIndex = 0; targetIndex < defendingSide.active.length; targetIndex += 1) {
-      const target = targetActiveUnit(defendingSide, targetIndex);
-      if (!target || move.category === 'Status') {
-        continue;
+    if (move.category !== 'Status') {
+      for (const targetRef of liveOpponents) {
+        const score = aiOffensiveChoiceScore(state, sideId, actor, unit, move, targetRef.activeSlot);
+        if (score !== null) {
+          candidates.push({
+            choice: { type: 'move', actor, moveId: move.id, target: targetRef.activeSlot },
+            score,
+          });
+        }
       }
-      const result = calculateDamageWithOverrides(currentBuild(unit), currentBuild(target), move, screenAwareEnvironment(state, defendingSide), {
-        attackerPokemon: unit.pokemon,
-        defenderPokemon: target.pokemon,
-        attackerStats: effectiveStatsForUnit(unit),
-        defenderStats: effectiveStatsForUnit(target),
-        attackerTypes: typeListForUnit(state, unit),
-        defenderTypes: typeListForUnit(state, target),
-        attackerAbility: abilityNameForUnit(unit),
-        defenderAbility: abilityNameForUnit(target),
-        attackerGrounded: unitGroundedInState(state, unit),
-        defenderGrounded: unitGroundedInState(state, target),
-        attackerSpeed: combatSpeed(unit, actingSide.tailwindTurns, state.trickRoomTurns),
-        defenderSpeed: combatSpeed(target, defendingSide.tailwindTurns, state.trickRoomTurns),
-      });
-      if (!result) {
-        continue;
-      }
-      const damage = (result.minDamage + result.maxDamage) / 2;
-      if (!best || damage > best.damage) {
-        best = { moveId: move.id, target: targetIndex, damage };
-      }
+      continue;
     }
+
+    if (redirectionMoves.has(move.name)) {
+      if (state.format === 'Doubles' && allyThreat && actingSide.redirectionUnitIndex === null) {
+        const redirectScore = allyThreat.maxRatio >= 0.8 && hpRatio >= 0.5 && threat.maxRatio < 1.15
+          ? 98 + Math.min(20, allyThreat.maxRatio * 22)
+          : 32;
+        candidates.push({ choice: { type: 'move', actor, moveId: move.id, target: actor }, score: redirectScore });
+      }
+      continue;
+    }
+
+    if (move.name === 'Helping Hand') {
+      if (ally) {
+        const allyBest = aiBestDamageScoreForUnit(state, sideId, liveAllies[0]?.activeSlot ?? actor, ally);
+        candidates.push({ choice: { type: 'move', actor, moveId: move.id, target: actor }, score: 36 + allyBest * 0.92 });
+      }
+      continue;
+    }
+
+    if (allyBoostMoves.has(move.name)) {
+      if (ally && threat.maxRatio < 0.7) {
+        const allyPhysicalBias = effectiveStatsForUnit(ally).attack >= effectiveStatsForUnit(ally).specialAttack;
+        const coachingScore = 54 + (allyPhysicalBias ? 18 : 6) + Math.max(0, 18 - threat.maxRatio * 18);
+        candidates.push({ choice: { type: 'move', actor, moveId: move.id, target: actor }, score: coachingScore });
+      }
+      continue;
+    }
+
+    if (healingMoves.has(move.name)) {
+      const recoveryScore =
+        hpRatio <= 0.3
+          ? threat.maxRatio < 0.95 ? 118 : 44
+          : hpRatio <= 0.5
+            ? threat.maxRatio < 0.8 ? 86 : 28
+            : 12;
+      candidates.push({ choice: { type: 'move', actor, moveId: move.id, target: actor }, score: move.name === 'Wish' ? recoveryScore - 18 : recoveryScore });
+      continue;
+    }
+
+    if (move.name === 'Rest') {
+      const score =
+        hpRatio <= 0.4 || unit.build.status !== 'healthy'
+          ? threat.maxRatio < 0.9 ? 104 : 40
+          : 8;
+      candidates.push({ choice: { type: 'move', actor, moveId: move.id, target: actor }, score });
+      continue;
+    }
+
+    if (move.name === 'Tailwind') {
+      const score = state.format === 'Doubles' && actingSide.tailwindTurns === 0 && state.trickRoomTurns === 0
+        ? 82 + Math.max(0, defendingAverageSpeed - actingAverageSpeed) * 0.18 + threat.fasterThreats * 8
+        : 8;
+      candidates.push({ choice: { type: 'move', actor, moveId: move.id, target: actor }, score });
+      continue;
+    }
+
+    if (move.name === 'Trick Room') {
+      const speedGap = defendingAverageSpeed - actingAverageSpeed;
+      const score = state.trickRoomTurns === 0
+        ? speedGap > 8 ? 84 + Math.min(24, speedGap * 0.35) : 12
+        : actingAverageSpeed > defendingAverageSpeed ? 62 : 8;
+      candidates.push({ choice: { type: 'move', actor, moveId: move.id, target: actor }, score });
+      continue;
+    }
+
+    if (move.name === 'Reflect') {
+      const score = actingSide.reflectTurns === 0 ? 44 + threat.physicalPressure * 54 : 6;
+      candidates.push({ choice: { type: 'move', actor, moveId: move.id, target: actor }, score });
+      continue;
+    }
+
+    if (move.name === 'Light Screen') {
+      const score = actingSide.lightScreenTurns === 0 ? 44 + threat.specialPressure * 54 : 6;
+      candidates.push({ choice: { type: 'move', actor, moveId: move.id, target: actor }, score });
+      continue;
+    }
+
+    if (move.name === 'Aurora Veil') {
+      const score = actingSide.auroraVeilTurns === 0 && state.environment.weather === 'snow'
+        ? 68 + Math.max(threat.physicalPressure, threat.specialPressure) * 45
+        : 0;
+      candidates.push({ choice: { type: 'move', actor, moveId: move.id, target: actor }, score });
+      continue;
+    }
+
+    if (protectionMoves.has(move.name) || sideProtectionMoves.has(move.name) || move.name === 'Endure') {
+      const fieldStallBonus =
+        Math.max(state.trickRoomTurns, actingSide.tailwindTurns, defendingSide.tailwindTurns, state.weatherTurns, state.terrainTurns) > 1
+          ? 16
+          : 0;
+      const protectScore =
+        unit.protectStreak === 0
+          ? 24 + threat.maxRatio * 78 + fieldStallBonus
+          : 12 + threat.maxRatio * 28;
+      candidates.push({ choice: { type: 'move', actor, moveId: move.id, target: actor }, score: protectScore });
+      continue;
+    }
+
+    if (move.name === 'Stealth Rock') {
+      const score = state.format === 'Singles' && !defendingSide.stealthRock && state.turn <= 5 ? 64 : 6;
+      candidates.push({ choice: { type: 'move', actor, moveId: move.id, target: 0 }, score });
+      continue;
+    }
+
+    if (move.name === 'Spikes') {
+      const score = state.format === 'Singles' && defendingSide.spikesLayers < 2 && state.turn <= 6 ? 58 - defendingSide.spikesLayers * 8 : 4;
+      candidates.push({ choice: { type: 'move', actor, moveId: move.id, target: 0 }, score });
+      continue;
+    }
+
+    if (move.name === 'Will-O-Wisp' || move.name === 'Thunder Wave' || move.name === 'Glare' || move.name === 'Toxic') {
+      for (const targetRef of liveOpponents) {
+        const status =
+          move.name === 'Will-O-Wisp'
+            ? 'burn'
+            : move.name === 'Toxic'
+              ? 'toxic'
+              : 'paralysis';
+        if (statusImmunityReason(state, unit, targetRef.unit, status)) {
+          continue;
+        }
+        const targetStats = effectiveStatsForUnit(targetRef.unit);
+        const isPhysicalTarget = targetStats.attack >= targetStats.specialAttack;
+        const targetThreat = aiThreatProfileForUnit(state, sideId === 'player' ? 'opponent' : 'player', targetRef.unit);
+        const statusScore =
+          move.name === 'Will-O-Wisp'
+            ? 50 + (isPhysicalTarget ? 24 : 0) + targetThreat.maxRatio * 18
+            : 48 + (targetThreat.fasterThreats > 0 ? 12 : 0) + (targetStats.speed > effectiveStatsForUnit(unit).speed ? 18 : 0);
+        candidates.push({ choice: { type: 'move', actor, moveId: move.id, target: targetRef.activeSlot }, score: statusScore });
+      }
+      continue;
+    }
+
+    if (move.name === 'Strength Sap') {
+      for (const targetRef of liveOpponents) {
+        const targetStats = effectiveStatsForUnit(targetRef.unit);
+        const targetThreat = aiThreatProfileForUnit(state, sideId === 'player' ? 'opponent' : 'player', targetRef.unit);
+        const score = hpRatio <= 0.55 ? 40 + targetStats.attack * 0.16 + targetThreat.maxRatio * 18 : 8;
+        candidates.push({ choice: { type: 'move', actor, moveId: move.id, target: targetRef.activeSlot }, score });
+      }
+      continue;
+    }
+
+    if (move.name === 'Heal Pulse' || move.name === 'Life Dew') {
+      if (ally) {
+        const allyHpRatio = ally.currentHp / Math.max(1, ally.maxHp);
+        const score = allyHpRatio <= 0.55 ? 72 + Math.max(0, 20 - allyHpRatio * 20) : 18;
+        candidates.push({ choice: { type: 'move', actor, moveId: move.id, target: actor }, score });
+      }
+      continue;
+    }
+
+    if (move.name === 'Taunt') {
+      for (const targetRef of liveOpponents) {
+        const statusCount = aiStatusMoveCount(targetRef.unit);
+        const score = targetRef.unit.tauntTurns > 0 ? 0 : 26 + statusCount * 10 + (targetRef.unit.lastMoveId ? 8 : 0);
+        candidates.push({ choice: { type: 'move', actor, moveId: move.id, target: targetRef.activeSlot }, score });
+      }
+      continue;
+    }
+
+    if (move.name === 'Encore') {
+      for (const targetRef of liveOpponents) {
+        const lastMove = targetRef.unit.lastMoveId ? findMove(targetRef.unit, targetRef.unit.lastMoveId) : null;
+        const score =
+          lastMove && targetRef.unit.encoreTurns <= 0
+            ? 40 + (lastMove.category === 'Status' ? 34 : 10) + (protectionMoves.has(lastMove.name) ? 30 : 0) + (boostMoves.has(lastMove.name) ? 20 : 0)
+            : 0;
+        candidates.push({ choice: { type: 'move', actor, moveId: move.id, target: targetRef.activeSlot }, score });
+      }
+      continue;
+    }
+
+    if (move.name === 'Disable') {
+      for (const targetRef of liveOpponents) {
+        const lastMove = targetRef.unit.lastMoveId ? findMove(targetRef.unit, targetRef.unit.lastMoveId) : null;
+        const score =
+          lastMove && targetRef.unit.disableTurns <= 0
+            ? 38 + (lastMove.category === 'Status' ? 8 : 22) + (lastMove.power ? Math.min(20, lastMove.power / 8) : 0)
+            : 0;
+        candidates.push({ choice: { type: 'move', actor, moveId: move.id, target: targetRef.activeSlot }, score });
+      }
+      continue;
+    }
+
+    if (move.name === 'Gravity') {
+      const score = state.gravityTurns === 0 && threat.fasterThreats > 0 ? 40 : 10;
+      candidates.push({ choice: { type: 'move', actor, moveId: move.id, target: actor }, score });
+      continue;
+    }
+
+    if (boostMoves.has(move.name)) {
+      const setupScore = hpRatio > 0.65 && threat.maxRatio < 0.55 && totalBoosts <= 2 ? 74 + (0.7 - threat.maxRatio) * 26 : 10;
+      candidates.push({ choice: { type: 'move', actor, moveId: move.id, target: actor }, score: setupScore });
+      continue;
+    }
+
+    candidates.push({ choice: { type: 'move', actor, moveId: move.id, target: 0 }, score: 6 });
   }
 
-  if (best) {
-    return maybeUpgradeChoiceToMega(state, sideId, actor, { type: 'move', actor, moveId: best.moveId, target: best.target });
-  }
+  const bestMoveCandidate =
+    candidates.sort((left, right) => right.score - left.score)[0] ??
+    { choice: { type: 'move', actor, moveId: legalMoves[0]?.id ?? '', target: 0 } satisfies SimulatorChoice, score: 0 };
 
-  const firstMove = legalMoves[0];
-  return maybeUpgradeChoiceToMega(state, sideId, actor, { type: 'move', actor, moveId: firstMove?.id ?? '', target: 0 });
+  const switchCandidate = aiBestSwitchChoice(state, sideId, actor, unit, bestMoveCandidate.score, threat);
+  const selected = switchCandidate && switchCandidate.score > bestMoveCandidate.score ? switchCandidate.choice : bestMoveCandidate.choice;
+  return maybeUpgradeChoiceToMega(state, sideId, actor, selected);
 }
 
 function normalizeMegaChoicesForSide(state: SimulatorBattleState, sideId: SideId, choices: SimulatorChoice[]) {
