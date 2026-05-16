@@ -2446,20 +2446,80 @@ function announcerWrapUpLines(current: SimulatorBattleState, style: AnnouncerSty
   return lines;
 }
 
+function introBattleSendOutPlaybackSteps(current: SimulatorBattleState, style: AnnouncerStyle) {
+  const steps: BattlePlaybackStep[] = [];
+  const appendSide = (side: SimSide) => {
+    side.active
+      .map((unitIndex) => side.units[unitIndex] ?? null)
+      .filter((unit): unit is SimUnit => Boolean(unit && !unit.fainted))
+      .forEach((unit) => {
+        const entry = `${side.name} sent out ${battleUnitDisplayName(unit)}.`;
+        steps.push({
+          id: makeId('battle-step'),
+          entry,
+          event: {
+            id: makeId('battlefield-event'),
+            tone: 'switch',
+            message: entry,
+            targetName: battleUnitDisplayName(unit),
+            targetBadge: 'On Field',
+          },
+          announcerLine: announcerStyleLine(style, fillAnnouncerLine(pickLine(announcerScripts.switch), { pokemon: battleUnitDisplayName(unit) })),
+          holdMs: BATTLEFIELD_SENDOUT_ANIMATION_MS + 260,
+        });
+      });
+  };
+
+  appendSide(current.opponent);
+  appendSide(current.player);
+  return steps;
+}
+
 function playbackStepsFromBattleUpdate(previous: SimulatorBattleState | null, current: SimulatorBattleState, style: AnnouncerStyle) {
   const previousLength = previous?.log.length ?? 0;
-  const newEntries = current.log.slice(0, Math.max(0, current.log.length - previousLength)).reverse();
-  const steps = newEntries.map((entry) => ({
+  const transitioningIntoBattle = current.stage === 'battle' && (!previous || previous.stage !== 'battle');
+  const introSummaryEntries = transitioningIntoBattle
+    ? new Set([
+        `${current.player.name} sent out ${current.player.active
+          .map((unitIndex) => current.player.units[unitIndex]?.pokemon.displayName)
+          .filter((name): name is string => Boolean(name))
+          .join(current.player.active.length > 1 ? ' and ' : '')}.`,
+        `${current.opponent.name} sent out ${current.opponent.active
+          .map((unitIndex) => current.opponent.units[unitIndex]?.pokemon.displayName)
+          .filter((name): name is string => Boolean(name))
+          .join(current.opponent.active.length > 1 ? ' and ' : '')}.`,
+      ])
+    : new Set<string>();
+  const newEntries = current.log
+    .slice(0, Math.max(0, current.log.length - previousLength))
+    .reverse()
+    .filter((entry) => !introSummaryEntries.has(entry));
+  const steps = [
+    ...(transitioningIntoBattle ? introBattleSendOutPlaybackSteps(current, style) : []),
+    ...newEntries.map((entry) => ({
     id: makeId('battle-step'),
     entry,
     event: parseBattlefieldPlaybackEvent([entry], current),
     announcerLine: announcerLineFromBattleEntry(entry, current, style),
     holdMs: playbackHoldForEntry(entry),
-  } satisfies BattlePlaybackStep));
+  } satisfies BattlePlaybackStep)),
+  ];
   return {
     steps,
     wrapUp: current.stage === 'finished' ? announcerWrapUpLines(current, style) : [],
   };
+}
+
+function mergeBattlePlaybackLog(currentVisible: string[], battle: SimulatorBattleState) {
+  const merged = [...currentVisible, ...[...battle.log].reverse()];
+  const seen = new Set<string>();
+  return merged.filter((entry) => {
+    if (seen.has(entry)) {
+      return false;
+    }
+    seen.add(entry);
+    return true;
+  }).slice(0, 60);
 }
 
 function normalizedPlaylistIds(trackIds: string[]) {
@@ -3009,6 +3069,7 @@ function App() {
   const [simAnnouncerFeed, setSimAnnouncerFeed] = useState<string[]>([]);
   const [simBattlefieldEvent, setSimBattlefieldEvent] = useState<BattlefieldPlaybackEvent | null>(null);
   const [simVisibleBattleLog, setSimVisibleBattleLog] = useState<string[]>([]);
+  const [simPlaybackLocked, setSimPlaybackLocked] = useState(false);
   const [simTurnReviews, setSimTurnReviews] = useState<SimulatorTurnReview[]>([]);
   const [simCountdown, setSimCountdown] = useState(0);
   const [simPreviewMessage, setSimPreviewMessage] = useState<string | null>(null);
@@ -3030,6 +3091,7 @@ function App() {
   const [pvpAnnouncerFeed, setPvpAnnouncerFeed] = useState<string[]>([]);
   const [pvpBattlefieldEvent, setPvpBattlefieldEvent] = useState<BattlefieldPlaybackEvent | null>(null);
   const [pvpVisibleBattleLog, setPvpVisibleBattleLog] = useState<string[]>([]);
+  const [pvpPlaybackLocked, setPvpPlaybackLocked] = useState(false);
   const [pvpRoomHistory, setPvpRoomHistory] = useState<OnlineBattleRoomHistoryEntry[]>([]);
   const [pvpHistorySearch, setPvpHistorySearch] = useState('');
   const [pvpChatInput, setPvpChatInput] = useState('');
@@ -3274,7 +3336,7 @@ function App() {
                 <div className="note-row compact-note">The KOed slot stays empty for the rest of the resolved turn. Your replacement will not enter until the new turn begins.</div>
                 <label className="field">
                   <span>Send In</span>
-                  <select value={draft.switchTarget} onChange={(event) => updateChoiceDraft(actor, { type: 'switch', switchTarget: Number(event.target.value) })}>
+                  <select value={draft.switchTarget} onChange={(event) => updateChoiceDraft(actor, { type: 'switch', switchTarget: Number(event.target.value) })} disabled={simPlaybackLocked}>
                     {availableBench.map((benchIndex) => (
                       <option key={benchIndex} value={benchIndex}>{simBattle.player.units[benchIndex]?.pokemon.displayName}</option>
                     ))}
@@ -3323,6 +3385,7 @@ function App() {
             const restrictionNotes = simulatorRestrictionNotes(unit);
             const previewMega = effectiveDraftType === 'mega';
             const selectedMoveReads = moveEffectivenessReadsForBattleTargets(simBattle, unit, liveEnemyTargets, selectedMove, previewMega);
+            const actionLocked = simPlaybackLocked || unit.rechargeTurns > 0 || unit.chargingTurns > 0;
 
             return (
               <div key={`${unit.pokemon.id}-${actor}`} className="subpanel sim-action-card">
@@ -3346,7 +3409,7 @@ function App() {
                 ) : null}
                 <label className="field">
                   <span>Action</span>
-                  <select value={effectiveDraftType} onChange={(event) => updateChoiceDraft(actor, { type: event.target.value as ChoiceDraft['type'] })} disabled={unit.rechargeTurns > 0 || unit.chargingTurns > 0}>
+                  <select value={effectiveDraftType} onChange={(event) => updateChoiceDraft(actor, { type: event.target.value as ChoiceDraft['type'] })} disabled={actionLocked}>
                     <option value="move">Move</option>
                     {allowMegaOption ? <option value="mega">Mega Evolve</option> : null}
                     {canSwitch ? <option value="switch">Switch</option> : null}
@@ -3356,7 +3419,7 @@ function App() {
                   <>
                     <label className="field">
                       <span>{effectiveDraftType === 'mega' ? 'Move After Mega' : 'Move'}</span>
-                      <select value={selectedMoveId} onChange={(event) => updateChoiceDraft(actor, { moveId: event.target.value })} disabled={!legalMoves.length}>
+                      <select value={selectedMoveId} onChange={(event) => updateChoiceDraft(actor, { moveId: event.target.value })} disabled={!legalMoves.length || simPlaybackLocked}>
                         {legalMoves.map((move) => {
                           const moveReads = moveEffectivenessReadsForBattleTargets(simBattle, unit, liveEnemyTargets, move, previewMega);
                           return <option key={move.id} value={move.id}>{moveLabelWithEffectiveness(move, moveReads, selectedTarget)}</option>;
@@ -3379,7 +3442,7 @@ function App() {
                     {targetMode === 'foe' ? (
                       <label className="field">
                         <span>Target</span>
-                        <select value={selectedTarget} onChange={(event) => updateChoiceDraft(actor, { target: Number(event.target.value) })}>
+                        <select value={selectedTarget} onChange={(event) => updateChoiceDraft(actor, { target: Number(event.target.value) })} disabled={simPlaybackLocked}>
                           {liveEnemyTargets.map(({ unit: enemy, targetIndex }) => (
                             <option key={`${enemy.pokemon.id}-${targetIndex}`} value={targetIndex}>{enemy.pokemon.displayName}</option>
                           ))}
@@ -3417,7 +3480,7 @@ function App() {
                 ) : (
                   <label className="field">
                     <span>Switch To</span>
-                    <select value={draft.switchTarget} onChange={(event) => updateChoiceDraft(actor, { switchTarget: Number(event.target.value) })}>
+                    <select value={draft.switchTarget} onChange={(event) => updateChoiceDraft(actor, { switchTarget: Number(event.target.value) })} disabled={simPlaybackLocked}>
                       {switchTargets.map((benchIndex) => (
                         <option key={benchIndex} value={benchIndex}>{simBattle.player.units[benchIndex]?.pokemon.displayName}</option>
                       ))}
@@ -3431,13 +3494,14 @@ function App() {
         </div>
       )}
       <div className="team-actions">
-        <button className="action-button primary" onClick={submitSimTurn} disabled={simTurnTimerEnabled && simChoicesLocked}>
+        <button className="action-button primary" onClick={submitSimTurn} disabled={simPlaybackLocked || (simTurnTimerEnabled && simChoicesLocked)}>
           {simBattleNeedsReplacementPhase
             ? (simTurnTimerEnabled ? (simChoicesLocked ? 'Replacements Locked' : 'Lock Replacements') : 'Send Replacements')
             : (simTurnTimerEnabled ? (simChoicesLocked ? 'Choices Locked' : 'Lock Turn') : 'Resolve Turn')}
         </button>
-        <button className="action-button" onClick={() => { setSimBattle(null); setSimMatchDeadlineAt(null); setSimChoiceDrafts({}); setSimChoicesLocked(false); }}>End Simulation</button>
+        <button className="action-button" onClick={() => { setSimBattle(null); setSimMatchDeadlineAt(null); setSimChoiceDrafts({}); setSimChoicesLocked(false); }} disabled={simPlaybackLocked}>End Simulation</button>
       </div>
+      {simPlaybackLocked ? <div className="note-row compact-note">Battle playback is still resolving this turn. The next input phase opens as soon as the animations, logs, and commentary finish.</div> : null}
     </>
   ) : (
     <div className="team-actions">
@@ -3478,7 +3542,7 @@ function App() {
                 <div className="note-row compact-note">Your opponent will not see the full backline details here. The send-out resolves when the replacement clock expires or both battlers lock in.</div>
                 <label className="field">
                   <span>Send In</span>
-                  <select value={draft.switchTarget} onChange={(event) => updatePvpChoiceDraft(actor, { type: 'switch', switchTarget: Number(event.target.value) })}>
+                  <select value={draft.switchTarget} onChange={(event) => updatePvpChoiceDraft(actor, { type: 'switch', switchTarget: Number(event.target.value) })} disabled={pvpPlaybackLocked}>
                     {availableBench.map((benchIndex) => (
                       <option key={benchIndex} value={benchIndex}>{pvpRoom.battle!.player.units[benchIndex]?.pokemon.displayName}</option>
                     ))}
@@ -3527,6 +3591,7 @@ function App() {
             const restrictionNotes = simulatorRestrictionNotes(unit);
             const previewMega = effectiveDraftType === 'mega';
             const selectedMoveReads = moveEffectivenessReadsForBattleTargets(pvpRoom.battle!, unit, liveEnemyTargets, selectedMove, previewMega);
+            const actionLocked = pvpPlaybackLocked || unit.rechargeTurns > 0 || unit.chargingTurns > 0;
 
             return (
               <div key={`${unit.pokemon.id}-${actor}`} className="subpanel sim-action-card">
@@ -3547,7 +3612,7 @@ function App() {
                 ) : null}
                 <label className="field">
                   <span>Action</span>
-                  <select value={effectiveDraftType} onChange={(event) => updatePvpChoiceDraft(actor, { type: event.target.value as ChoiceDraft['type'] })} disabled={unit.rechargeTurns > 0 || unit.chargingTurns > 0}>
+                  <select value={effectiveDraftType} onChange={(event) => updatePvpChoiceDraft(actor, { type: event.target.value as ChoiceDraft['type'] })} disabled={actionLocked}>
                     <option value="move">Move</option>
                     {allowMegaOption ? <option value="mega">Mega Evolve</option> : null}
                     {canSwitch ? <option value="switch">Switch</option> : null}
@@ -3557,7 +3622,7 @@ function App() {
                   <>
                     <label className="field">
                       <span>{effectiveDraftType === 'mega' ? 'Move After Mega' : 'Move'}</span>
-                      <select value={selectedMoveId} onChange={(event) => updatePvpChoiceDraft(actor, { moveId: event.target.value })} disabled={!legalMoves.length}>
+                      <select value={selectedMoveId} onChange={(event) => updatePvpChoiceDraft(actor, { moveId: event.target.value })} disabled={!legalMoves.length || pvpPlaybackLocked}>
                         {legalMoves.map((move) => {
                           const moveReads = moveEffectivenessReadsForBattleTargets(pvpRoom.battle!, unit, liveEnemyTargets, move, previewMega);
                           return <option key={move.id} value={move.id}>{moveLabelWithEffectiveness(move, moveReads, selectedTarget)}</option>;
@@ -3580,7 +3645,7 @@ function App() {
                     {targetMode === 'foe' ? (
                       <label className="field">
                         <span>Target</span>
-                        <select value={selectedTarget} onChange={(event) => updatePvpChoiceDraft(actor, { target: Number(event.target.value) })}>
+                        <select value={selectedTarget} onChange={(event) => updatePvpChoiceDraft(actor, { target: Number(event.target.value) })} disabled={pvpPlaybackLocked}>
                           {liveEnemyTargets.map(({ unit: enemy, targetIndex }) => (
                             <option key={`${enemy.pokemon.id}-${targetIndex}`} value={targetIndex}>{enemy.pokemon.displayName}</option>
                           ))}
@@ -3614,7 +3679,7 @@ function App() {
                 ) : (
                   <label className="field">
                     <span>Switch To</span>
-                    <select value={draft.switchTarget} onChange={(event) => updatePvpChoiceDraft(actor, { switchTarget: Number(event.target.value) })}>
+                    <select value={draft.switchTarget} onChange={(event) => updatePvpChoiceDraft(actor, { switchTarget: Number(event.target.value) })} disabled={pvpPlaybackLocked}>
                       {switchTargets.map((benchIndex) => (
                         <option key={benchIndex} value={benchIndex}>{pvpRoom.battle!.player.units[benchIndex]?.pokemon.displayName}</option>
                       ))}
@@ -3627,11 +3692,12 @@ function App() {
         </div>
       )}
       <div className="team-actions">
-        <button className="action-button primary" onClick={() => { void submitPvpTurn(false); }}>
+        <button className="action-button primary" onClick={() => { void submitPvpTurn(false); }} disabled={pvpPlaybackLocked}>
           {pvpBattleNeedsReplacementPhase ? 'Lock Replacements' : 'Lock Turn'}
         </button>
-        <button className="action-button danger" onClick={() => { void handlePvpForfeit(); }}>Forfeit Match</button>
+        <button className="action-button danger" onClick={() => { void handlePvpForfeit(); }} disabled={pvpPlaybackLocked}>Forfeit Match</button>
       </div>
+      {pvpPlaybackLocked ? <div className="note-row compact-note">Battle playback is still resolving this turn. Move inputs reopen once the current sequence has fully finished.</div> : null}
       {pvpMessage ? <div className="note-row">{pvpMessage}</div> : null}
     </>
   ) : (
@@ -3656,11 +3722,14 @@ function App() {
     setFeed: (value: string[] | ((current: string[]) => string[])) => void,
     rate: number,
     announcerEnabled = true,
+    setPlaybackLocked?: (locked: boolean) => void,
   ) {
     clearPlaybackTimers(timerRef);
     if (!steps.length && !wrapUp.length) {
+      setPlaybackLocked?.(false);
       return;
     }
+    setPlaybackLocked?.(true);
 
     let offset = 0;
     steps.forEach((step, index) => {
@@ -3692,12 +3761,14 @@ function App() {
     }
 
     const hydrationHandle = window.setTimeout(() => {
-      setVisibleLog((current) => {
-        const merged = [...battle.log].reverse();
-        return merged.slice(0, 60);
-      });
+      setVisibleLog((current) => mergeBattlePlaybackLog(current, battle));
     }, offset + 420);
     timerRef.current.push(hydrationHandle);
+
+    const unlockHandle = window.setTimeout(() => {
+      setPlaybackLocked?.(false);
+    }, offset + 520);
+    timerRef.current.push(unlockHandle);
   }
 
   useEffect(() => {
@@ -3881,6 +3952,7 @@ function App() {
       recordedBattleKeyRef.current = null;
       setSimBattlefieldEvent(null);
       setSimVisibleBattleLog([]);
+      setSimPlaybackLocked(false);
       setSimTurnClock(30);
       return;
     }
@@ -3905,6 +3977,7 @@ function App() {
         setSimAnnouncerFeed,
         simAnnouncerRate,
         simAnnouncerEnabled,
+        setSimPlaybackLocked,
       );
     }
 
@@ -3970,6 +4043,7 @@ function App() {
       recordedPvpBattleKeyRef.current = null;
       setPvpBattlefieldEvent(null);
       setPvpVisibleBattleLog([]);
+      setPvpPlaybackLocked(false);
       return;
     }
 
@@ -3988,6 +4062,7 @@ function App() {
           setPvpAnnouncerFeed,
           1,
           pvpAnnouncerEnabled,
+          setPvpPlaybackLocked,
         );
       }
 
@@ -7091,7 +7166,7 @@ function BattlefieldArena({
   controlDock?: ReactNode;
 }) {
   const renderBattlefieldSlot = (slot: BattlefieldSlotModel, orientation: 'top' | 'bottom') => {
-    const actor = battlefieldSlotMatches(slot, event?.actorName);
+    const actor = event?.tone === 'switch' ? false : battlefieldSlotMatches(slot, event?.actorName);
     const target = battlefieldSlotMatches(slot, event?.targetName);
     const revealTarget = target && event?.tone === 'switch';
     const impactTarget = target && event?.tone !== 'switch';

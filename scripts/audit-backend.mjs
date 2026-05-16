@@ -403,6 +403,9 @@ const pivotUser = findPokemonWithMoves(['Volt Switch'], ['Jolteon', 'Zapdos', 'R
 const brickBreakUser = findPokemonWithMoves(['Brick Break'], ['Garchomp', 'Dragonite', 'Lucario']);
 const iceSpinnerUser = findPokemonWithMoves(['Ice Spinner'], ['Sneasler', 'Weavile', 'Pawmot']);
 const leechSeedUser = findPokemonWithMoves(['Leech Seed'], ['Venusaur', 'Abomasnow', 'Ferrothorn']);
+const soakUser = findPokemonWithMoves(['Soak'], ['Bellibolt', 'Pelipper', 'Azumarill']);
+const thunderWaveSupport = findPokemonWithMoves(['Thunder Wave'], ['Mega Sableye', 'Hatterene', 'Reuniclus']);
+const electricStatusTarget = dataset.pokemon.find((pokemon) => pokemon.displayName === 'Jolteon') ?? null;
 const restUser = findPokemonWithMoves(['Rest'], ['Snorlax', 'Suicune', 'Milotic']);
 const disableUser = findPokemonWithMoves(['Disable', 'Protect'], ['Gengar', 'Sableye', 'Mismagius']);
 const willOWispUser = findPokemonWithMoves(['Will-O-Wisp'], ['Sableye', 'Rotom', 'Mismagius']);
@@ -512,6 +515,9 @@ assert(
     obliviousTarget &&
     contraryUser &&
     sheerForceSnarlUser &&
+    soakUser &&
+    thunderWaveSupport &&
+    electricStatusTarget &&
     soundOnlyTarget &&
     charizardBase &&
     abomasnowBase &&
@@ -528,6 +534,7 @@ const shadowBallChoiceId = moveIdFor(shadowBallUser, 'Shadow Ball');
 const specialTargetAAttackId = specialTargetA.movePool.find((move) => move.category !== 'Status')?.id ?? specialTargetA.movePool[0]?.id ?? null;
 const specialTargetBAttackId = specialTargetB.movePool.find((move) => move.category !== 'Status')?.id ?? specialTargetB.movePool[0]?.id ?? null;
 const darkTargetAttackId = darkTarget.movePool.find((move) => move.category !== 'Status')?.id ?? darkTarget.movePool[0]?.id ?? null;
+const electricStatusTargetAttackId = electricStatusTarget.movePool.find((move) => move.category !== 'Status')?.id ?? electricStatusTarget.movePool[0]?.id ?? null;
 const wishChoiceId = moveIdFor(wishUser, 'Wish');
 const voltSwitchChoiceId = moveIdFor(pivotUser, 'Volt Switch');
 const brickBreakChoiceId = moveIdFor(brickBreakUser, 'Brick Break');
@@ -564,6 +571,8 @@ const bitterBladeChoiceId = moveIdFor(bitterBladeUser, 'Bitter Blade');
 const matchaGotchaChoiceId = moveIdFor(matchaGotchaUser, 'Matcha Gotcha');
 const sparklingAriaChoiceId = moveIdFor(sparklingAriaUser, 'Sparkling Aria');
 const painSplitChoiceId = moveIdFor(painSplitUser, 'Pain Split');
+const soakChoiceId = moveIdFor(soakUser, 'Soak');
+const thunderWaveSupportChoiceId = moveIdFor(thunderWaveSupport, 'Thunder Wave');
 const pranksterTauntChoiceId = moveIdFor(pranksterUser, 'Taunt');
 const pranksterFakeOutChoiceId = moveIdFor(pranksterUser, 'Fake Out');
 const intimidateAttackId = intimidateUser.movePool.find((move) => move.category !== 'Status')?.id ?? intimidateUser.movePool[0]?.id ?? null;
@@ -590,6 +599,7 @@ assert(
     specialTargetAAttackId &&
     specialTargetBAttackId &&
     darkTargetAttackId &&
+    electricStatusTargetAttackId &&
     wishChoiceId &&
     voltSwitchChoiceId &&
     brickBreakChoiceId &&
@@ -626,6 +636,8 @@ assert(
     matchaGotchaChoiceId &&
     sparklingAriaChoiceId &&
     painSplitChoiceId &&
+    soakChoiceId &&
+    thunderWaveSupportChoiceId &&
     pranksterTauntChoiceId &&
     pranksterFakeOutChoiceId &&
     intimidateAttackId &&
@@ -763,6 +775,43 @@ let limberBattle = buildBattle(
 );
 limberBattle = withMockRandom([0.1, 0.1, 0.1], () => resolveTurn(limberBattle, [{ type: 'move', actor: 0, moveId: thunderWaveChoiceId, target: 0 }]));
 assert.equal(limberBattle.opponent.units[0].build.status, 'healthy', 'Limber should block paralysis.');
+
+let soakStatusBattle = buildBattle(
+  'Doubles',
+  [
+    buildSlot('soak-user', soakUser, ['Soak'], { natureId: 'timid', evs: { ...blankStats(), speed: 32, hp: 20, specialDefense: 14 } }),
+    buildSlot('soak-support', thunderWaveSupport, ['Thunder Wave'], { natureId: 'calm', evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } }),
+  ],
+  [
+    buildSlot('soak-target', electricStatusTarget, [electricStatusTarget.movePool.find((move) => move.category !== 'Status')?.name ?? electricStatusTarget.movePool[0]?.name ?? 'Thunderbolt'], {
+      natureId: 'timid',
+      evs: { ...blankStats(), speed: 20, hp: 18, specialDefense: 28 },
+    }),
+    buildSlot('soak-foe-support', groundedProtectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } }),
+  ],
+);
+soakStatusBattle = withMockRandom([0.1, 0.1, 0.1, 0.1, 0.1], () =>
+  resolveTurnWithChoices(
+    soakStatusBattle,
+    [
+      { type: 'move', actor: 0, moveId: soakChoiceId, target: 0 },
+      { type: 'move', actor: 1, moveId: thunderWaveSupportChoiceId, target: 0 },
+    ],
+    [
+      { type: 'move', actor: 0, moveId: electricStatusTargetAttackId, target: 0 },
+      { type: 'move', actor: 1, moveId: protectChoiceId, target: 0 },
+    ],
+  ));
+assert.deepEqual(soakStatusBattle.opponent.units[0].typeOverride, ['Water'], 'Soak should change the target to Water-type before later status checks in the same turn.');
+assert.equal(soakStatusBattle.opponent.units[0].build.status, 'paralysis', 'A Soaked Electric-type target should be able to be paralyzed later in the same turn.');
+assert.ok(
+  soakStatusBattle.log.some((entry) => /soaked the target into Water typing/i.test(entry)),
+  'Soak type changes should be called out in the battle log.',
+);
+assert.ok(
+  soakStatusBattle.log.some((entry) => /Thunder Wave \(paralysis\)/i.test(entry)),
+  'The follow-up Thunder Wave paralysis should be called out in the battle log after Soak resolves.',
+);
 
 let waterBubbleBattle = buildBattle(
   'Singles',
@@ -2158,7 +2207,7 @@ const summary = [
   `Verified item clause sanitization for manual teams and AI-generated teams.`,
   `Verified move-parity registry coverage at ${paritySummary.coveredPercent}% across ${paritySummary.total} Champions moves, with ${paritySummary.explicit} explicit hooks tagged in the report.`,
   `Verified damage engine produces live damage output under the Champions EV model, including Doubles spread reduction, Aurora Veil, Helping Hand, Magic Room, and Wonder Room checks.`,
-  `Verified simulator rules for chained Protect odds, burn end-turn chip, burn physical damage cuts, paralysis fail-rate and speed penalty, Hydration / Shed Skin / Healer / Natural Cure cures, Limber / Insomnia / Sweet Veil / Water Bubble status immunities, Leftovers healing, Sitrus auto-consumption, confusion/trap timers, Trick and Recycle item flow, Substitute and Healing Wish handling, Lock-On accuracy, ally-target support hooks, rain-locked Thunder accuracy, Snarl spread debuffs, Earthquake ally collateral, Parabolic Charge spread healing, Draining Kiss and Bitter Blade drain ratios, Matcha Gotcha spread recovery, Pain Split averaging, Sparkling Aria burn cures, Sticky Web and Toxic Spikes switch-in hooks, forced-thaw freeze timing, Rest sleep timing, Disable and Torment move locks, weather field timers, opponent reveal state, Calm Mind and Nasty Plot boosts, Trick Room toggling, recharge turns, charge-turn attacks, mid-turn doubles retargeting, Struggle locks, Dark-type immunity to opposing Prankster status moves, and Mega weather ordering.`,
+  `Verified simulator rules for chained Protect odds, burn end-turn chip, burn physical damage cuts, paralysis fail-rate and speed penalty, Hydration / Shed Skin / Healer / Natural Cure cures, Limber / Insomnia / Sweet Veil / Water Bubble status immunities, same-turn Soak into later status application, Leftovers healing, Sitrus auto-consumption, confusion/trap timers, Trick and Recycle item flow, Substitute and Healing Wish handling, Lock-On accuracy, ally-target support hooks, rain-locked Thunder accuracy, Snarl spread debuffs, Earthquake ally collateral, Parabolic Charge spread healing, Draining Kiss and Bitter Blade drain ratios, Matcha Gotcha spread recovery, Pain Split averaging, Sparkling Aria burn cures, Sticky Web and Toxic Spikes switch-in hooks, forced-thaw freeze timing, Rest sleep timing, Disable and Torment move locks, weather field timers, opponent reveal state, Calm Mind and Nasty Plot boosts, Trick Room toggling, recharge turns, charge-turn attacks, mid-turn doubles retargeting, Struggle locks, Dark-type immunity to opposing Prankster status moves, and Mega weather ordering.`,
   `Verified 50 fully automated simulator battle sweeps across Singles and Doubles (${simulatorBattlePlayerWins} player-side wins / ${simulatorBattleOpponentWins} opponent-side wins).`,
   `Verified shared PvP room logic, including bring-four lock-in, full roster integrity, immediate dual-lock resolution, deadline-based turn resolution, overall match-timer draws, forfeit handling, and 50 automated room-code battle simulations (${onlineBattleHostWins} host wins / ${onlineBattleGuestWins} guest wins / ${onlineBattleDraws} draws).`,
   warnings.length ? `Source-data warnings: ${warnings.length} HP floor rows on the scraped form pages disagree with fixed 31 IV policy, so the app keeps the fixed-IV result intentionally.` : 'Source-data warnings: none.',
