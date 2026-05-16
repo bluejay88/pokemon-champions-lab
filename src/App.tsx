@@ -6356,6 +6356,7 @@ function BattlefieldArena({
     const className = [
       'battlefield-card',
       orientation === 'top' ? 'battlefield-card-top' : 'battlefield-card-bottom',
+      event && (actor || target) ? `battlefield-card-tone-${event.tone}` : '',
       actor ? 'is-actor' : '',
       target ? 'is-target' : '',
       slot.fainted ? 'is-fainted' : '',
@@ -6456,25 +6457,25 @@ function BattlefieldArena({
                     <strong>{event.message}</strong>
                   </div>
                 ) : null}
+                {topBench.length ? (
+                  <div className="battlefield-opponent-backline" aria-label={`${topLabel} backline`}>
+                    {topBench.map((slot) => (
+                      <div
+                        key={`${slot.key}-top-reserve`}
+                        className={slot.fainted ? 'battlefield-opponent-backline-token is-fainted' : 'battlefield-opponent-backline-token'}
+                        title={slot.hidden ? 'Hidden opponent reserve' : slot.title}
+                      >
+                        {slot.hidden ? <HiddenBenchFrame size="tiny" /> : <PokemonSpriteFrame pokemon={slot.pokemon} size="tiny" statusBadge={slot.statusBadge ?? null} />}
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
 
                 <div className="battlefield-side battlefield-side-top">
                   <div className="battlefield-side-label">{topLabel}</div>
                   <div className={`battlefield-active-lanes lanes-${topSlots.length}`}>
                     {topSlots.map((slot) => renderBattlefieldSlot(slot, 'top'))}
                   </div>
-                  {topBench.length ? (
-                    <div className="battlefield-bench-strip">
-                      {topBench.map((slot) => (
-                        <div key={slot.key} className={slot.fainted ? 'battlefield-bench-card is-fainted' : 'battlefield-bench-card'}>
-                          {slot.hidden ? <HiddenBenchFrame size="tiny" /> : <PokemonSpriteFrame pokemon={slot.pokemon} size="tiny" statusBadge={slot.statusBadge ?? null} />}
-                          <div>
-                            <strong>{slot.title}</strong>
-                            <small>{slot.subtitle}</small>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  ) : null}
                 </div>
 
                 <div className="battlefield-side battlefield-side-bottom">

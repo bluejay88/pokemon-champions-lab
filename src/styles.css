@@ -1730,6 +1730,35 @@ button {
   z-index: 1;
 }
 
+.battlefield-opponent-backline {
+  position: absolute;
+  top: 28px;
+  right: 32px;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 14px;
+}
+
+.battlefield-opponent-backline-token {
+  display: grid;
+  place-items: center;
+  width: 74px;
+  height: 74px;
+  padding: 6px;
+  border-radius: 20px;
+  border: 1px solid rgba(162, 201, 255, 0.16);
+  background: rgba(3, 11, 24, 0.56);
+  backdrop-filter: blur(10px);
+}
+
+.battlefield-opponent-backline-token .sprite-shell.tiny,
+.battlefield-opponent-backline-token .pokeball-shell {
+  width: 58px;
+  height: 58px;
+}
+
 .battlefield-backdrop-meta {
   display: grid;
   gap: 4px;
@@ -1821,6 +1850,7 @@ button {
 
 .battlefield-side-top {
   align-self: start;
+  padding-top: 72px;
 }
 
 .battlefield-side-bottom {
@@ -1933,10 +1963,13 @@ button {
 }
 
 .battlefield-card-stage {
+  --battlefield-trail-color: rgba(94, 199, 255, 0.92);
+  position: relative;
   display: grid;
   align-items: end;
   justify-items: center;
   min-height: 132px;
+  isolation: isolate;
 }
 
 .battlefield-panel-expansive .battlefield-card-stage {
@@ -1953,6 +1986,14 @@ button {
 .battlefield-card .sprite-image,
 .battlefield-bench-card .sprite-image {
   filter: drop-shadow(0 18px 24px rgba(5, 11, 18, 0.42));
+}
+
+.battlefield-card-stage::before,
+.battlefield-card-stage::after {
+  content: '';
+  position: absolute;
+  pointer-events: none;
+  opacity: 0;
 }
 
 .battlefield-card-copy {
@@ -2065,6 +2106,70 @@ button {
   box-shadow: 0 10px 18px rgba(0, 0, 0, 0.12);
 }
 
+.battlefield-card.is-actor .battlefield-card-stage {
+  animation: battlefield-stage-surge 620ms ease;
+}
+
+.battlefield-card.is-actor .sprite-image {
+  animation: battlefield-sprite-surge 620ms ease;
+}
+
+.battlefield-card.is-actor .battlefield-card-stage::after {
+  top: 48%;
+  width: 150px;
+  height: 16px;
+  border-radius: 999px;
+  transform-origin: center;
+  filter: blur(2px);
+  animation: battlefield-attack-trail 620ms ease;
+}
+
+.battlefield-card-bottom.is-actor .battlefield-card-stage::after {
+  left: 62%;
+  background: linear-gradient(90deg, rgba(94, 199, 255, 0), var(--battlefield-trail-color));
+}
+
+.battlefield-card-top.is-actor .battlefield-card-stage::after {
+  right: 62%;
+  background: linear-gradient(90deg, var(--battlefield-trail-color), rgba(94, 199, 255, 0));
+}
+
+.battlefield-card.is-target .battlefield-card-stage::before {
+  inset: 18%;
+  border: 3px solid rgba(255, 216, 122, 0.92);
+  border-radius: 999px;
+  box-shadow: 0 0 24px rgba(255, 216, 122, 0.42);
+  animation: battlefield-impact-ring 560ms ease;
+}
+
+.battlefield-card.is-target .sprite-image {
+  animation: battlefield-target-hit 560ms ease;
+}
+
+.battlefield-card.is-target .battlefield-card-copy {
+  animation: battlefield-impact-panel 560ms ease;
+}
+
+.battlefield-card-tone-impact .battlefield-card-stage::after {
+  --battlefield-trail-color: rgba(94, 199, 255, 0.92);
+}
+
+.battlefield-card-tone-status .battlefield-card-stage::after {
+  --battlefield-trail-color: rgba(164, 123, 255, 0.94);
+}
+
+.battlefield-card-tone-ability .battlefield-card-stage::after {
+  --battlefield-trail-color: rgba(110, 231, 183, 0.94);
+}
+
+.battlefield-card-tone-guard .battlefield-card-stage::after {
+  --battlefield-trail-color: rgba(255, 196, 126, 0.94);
+}
+
+.battlefield-card-tone-ko .battlefield-card-stage::after {
+  --battlefield-trail-color: rgba(255, 116, 116, 0.96);
+}
+
 .battlefield-bench-strip {
   display: grid;
   grid-auto-flow: column;
@@ -2130,7 +2235,7 @@ button {
 }
 
 .battlefield-side-rail-docked .battlefield-condition-stack {
-  grid-template-columns: 1fr;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   max-height: none;
   overflow: visible;
   padding-right: 0;
@@ -2145,15 +2250,19 @@ button {
 }
 
 .battlefield-action-rail-docked .sim-action-grid {
-  gap: 14px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
 }
 
 .battlefield-action-rail-docked .sim-action-card {
   padding: 16px;
 }
 
+.battlefield-action-rail-docked .replacement-phase-grid {
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
 .battlefield-control-panel .sim-action-grid {
-  grid-template-columns: minmax(0, 1fr);
   margin-top: 0;
 }
 
@@ -2261,7 +2370,7 @@ button {
 .battlefield-empty-rail {
   display: grid;
   gap: 10px;
-  padding: 14px;
+  padding: 12px;
   border-radius: 18px;
   border: 1px solid rgba(162, 201, 255, 0.12);
   background: rgba(255, 255, 255, 0.03);
@@ -2277,6 +2386,10 @@ button {
   letter-spacing: 0.04em;
   text-transform: uppercase;
   color: #eaf6ff;
+}
+
+.battlefield-side-rail-docked .battlefield-condition-group strong {
+  font-size: 0.76rem;
 }
 
 .sim-field-panel {
@@ -2380,6 +2493,47 @@ button {
   40% { transform: translate3d(8px, 0, 0); }
   60% { transform: translate3d(-6px, 0, 0); }
   100% { transform: translate3d(0, 0, 0); }
+}
+
+@keyframes battlefield-stage-surge {
+  0% { transform: translate3d(0, 0, 0); }
+  28% { transform: translate3d(14px, -12px, 0); }
+  52% { transform: translate3d(4px, -4px, 0); }
+  100% { transform: translate3d(0, 0, 0); }
+}
+
+@keyframes battlefield-sprite-surge {
+  0% { transform: scale(1); }
+  30% { transform: scale(1.08); }
+  55% { transform: scale(1.02); }
+  100% { transform: scale(1); }
+}
+
+@keyframes battlefield-attack-trail {
+  0% { opacity: 0; transform: translate3d(0, 0, 0) scaleX(0.2); }
+  20% { opacity: 0.95; }
+  55% { opacity: 0.82; transform: translate3d(0, 0, 0) scaleX(1); }
+  100% { opacity: 0; transform: translate3d(8px, -6px, 0) scaleX(1.05); }
+}
+
+@keyframes battlefield-impact-ring {
+  0% { opacity: 0; transform: scale(0.65); }
+  22% { opacity: 0.92; }
+  100% { opacity: 0; transform: scale(1.18); }
+}
+
+@keyframes battlefield-target-hit {
+  0% { transform: translate3d(0, 0, 0) scale(1); }
+  18% { transform: translate3d(-8px, 0, 0) scale(0.98); }
+  34% { transform: translate3d(10px, -3px, 0) scale(1.02); }
+  55% { transform: translate3d(-5px, 0, 0) scale(0.99); }
+  100% { transform: translate3d(0, 0, 0) scale(1); }
+}
+
+@keyframes battlefield-impact-panel {
+  0% { box-shadow: 0 16px 30px rgba(0, 0, 0, 0.16); }
+  24% { box-shadow: 0 0 0 1px rgba(255, 221, 141, 0.42), 0 18px 36px rgba(255, 188, 102, 0.28); }
+  100% { box-shadow: 0 16px 30px rgba(0, 0, 0, 0.16); }
 }
 
 .growth-chart-list,
@@ -2609,6 +2763,17 @@ button {
     grid-template-columns: minmax(220px, 0.34fr) minmax(0, 0.66fr);
   }
 
+  .battlefield-opponent-backline {
+    top: 20px;
+    right: 24px;
+    gap: 10px;
+  }
+
+  .battlefield-opponent-backline-token {
+    width: 66px;
+    height: 66px;
+  }
+
   .panel.tall,
   .panels-resizable .panel {
     min-height: auto;
@@ -2671,6 +2836,17 @@ button {
 
   .battlefield-dock-row {
     gap: 14px;
+  }
+
+  .battlefield-opponent-backline {
+    position: static;
+    justify-content: flex-start;
+    margin-left: auto;
+    margin-bottom: 6px;
+  }
+
+  .battlefield-side-top {
+    padding-top: 0;
   }
 
   .main-shell {
@@ -2790,6 +2966,10 @@ button {
 @media (max-width: 980px) {
   .battlefield-dock-row {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .battlefield-action-rail-docked .sim-action-grid {
+    grid-template-columns: 1fr;
   }
 }
 
