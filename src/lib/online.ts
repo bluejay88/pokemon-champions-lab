@@ -11,7 +11,18 @@ import {
 } from './simulator';
 import { battleMusicTracks } from './battleMusic';
 import { createTeam, makeId, resolvePokemonForm, sanitizeTeamForChampions, selectedPokemon } from './champions';
-import type { BattleFormat, OnlineBattleAccount, OnlineBattleRoomHistoryEntry, OnlinePresenceStats, PokemonEntry, Team } from '../types';
+import type {
+  BattleFormat,
+  OnlineBattleAccount,
+  OnlineBattleChatMessage,
+  OnlineBattleChatParticipant,
+  OnlineBattleRecordSummary,
+  OnlineBattleReportEntry,
+  OnlineBattleRoomHistoryEntry,
+  OnlinePresenceStats,
+  PokemonEntry,
+  Team,
+} from '../types';
 export type { OnlineBattleTrack } from './battleMusic';
 
 export type OnlineSeat = 'host' | 'guest';
@@ -43,6 +54,12 @@ export interface OnlineBattleRoomState {
   winnerSeat: OnlineSeat | null;
   resultReason: 'normal' | 'forfeit' | 'timeout' | null;
   lastActionSummary: string;
+  hostWinnerPick: OnlineSeat | null;
+  guestWinnerPick: OnlineSeat | null;
+  chatParticipants: OnlineBattleChatParticipant[];
+  chatMessages: OnlineBattleChatMessage[];
+  moderationReports: OnlineBattleReportEntry[];
+  mirroredBattleLogCount: number;
 }
 
 export interface OnlineBattleRoomView {
@@ -50,6 +67,8 @@ export interface OnlineBattleRoomView {
   format: BattleFormat;
   stage: OnlineRoomStage;
   seat: OnlineSeat | null;
+  playerId: string;
+  opponentPlayerId: string | null;
   hostTrainerName: string;
   guestTrainerName: string | null;
   playerTeam: Team;
@@ -68,6 +87,14 @@ export interface OnlineBattleRoomView {
   hostAnnouncerEnabled: boolean;
   guestAnnouncerEnabled: boolean;
   lastActionSummary: string;
+  playerRecord: OnlineBattleRecordSummary;
+  opponentRecord: OnlineBattleRecordSummary;
+  chatParticipants: OnlineBattleChatParticipant[];
+  chatMessages: OnlineBattleChatMessage[];
+  playerChatJoined: boolean;
+  opponentChatJoined: boolean;
+  playerWinnerPick: OnlineSeat | null;
+  opponentWinnerPick: OnlineSeat | null;
 }
 
 type StoredOnlineAccount = OnlineBattleAccount & {
@@ -134,6 +161,26 @@ function clone<T>(value: T) {
   return structuredClone(value);
 }
 
+function emptyBattleRecordSummary(): OnlineBattleRecordSummary {
+  return {
+    matches: 0,
+    wins: 0,
+    losses: 0,
+    draws: 0,
+    winRate: 0,
+  };
+}
+
+function normalizeRoomState(room: OnlineBattleRoomState): OnlineBattleRoomState {
+  room.hostWinnerPick ??= null;
+  room.guestWinnerPick ??= null;
+  room.chatParticipants ??= [];
+  room.chatMessages ??= [];
+  room.moderationReports ??= [];
+  room.mirroredBattleLogCount ??= 0;
+  return room;
+}
+
 function sixDigitCode() {
   return `${Math.floor(100000 + Math.random() * 900000)}`;
 }
@@ -187,6 +234,86 @@ function setSeatChoices(room: OnlineBattleRoomState, seat: OnlineSeat, choices: 
   }
 }
 
+function trainerNameForSeat(room: OnlineBattleRoomState, seat: OnlineSeat) {
+  return seat === 'host' ? room.hostTrainerName : room.guestTrainerName ?? 'Guest';
+}
+
+function playerIdForSeat(room: OnlineBattleRoomState, seat: OnlineSeat) {
+  return seat === 'host' ? room.hostPlayerId : room.guestPlayerId ?? '';
+}
+
+function chatParticipantForSeat(room: OnlineBattleRoomState, seat: OnlineSeat): OnlineBattleChatParticipant {
+  return {
+    playerId: playerIdForSeat(room, seat),
+    trainerName: trainerNameForSeat(room, seat),
+    seat,
+    joinedAt: nowIso(),
+  };
+}
+
+function appendRoomMessage(
+  room: OnlineBattleRoomState,
+  message: Omit<OnlineBattleChatMessage, 'id' | 'createdAt'>,
+) {
+  room.chatMessages.push({
+    ...message,
+    id: makeId('room-message'),
+    createdAt: nowIso(),
+  });
+}
+
+function appendSystemMessage(
+  room: OnlineBattleRoomState,
+  text: string,
+  kind: OnlineBattleChatMessage['kind'] = 'system',
+) {
+  appendRoomMessage(room, {
+    kind,
+    senderPlayerId: null,
+    senderName: kind === 'announcer' ? 'Arena Commentary' : 'System',
+    seat: null,
+    text,
+    emoji: null,
+  });
+}
+
+function appendBattleLogMessages(room: OnlineBattleRoomState) {
+  if (!room.battle?.log.length) {
+    return;
+  }
+  const unseenCount = Math.max(0, room.battle.log.length - room.mirroredBattleLogCount);
+  if (!unseenCount) {
+    return;
+  }
+  room.battle.log
+    .slice(0, unseenCount)
+    .reverse()
+    .forEach((entry) => appendSystemMessage(room, entry, 'announcer'));
+  room.mirroredBattleLogCount = room.battle.log.length;
+}
+
+function recordSummaryForPlayer(rooms: OnlineBattleRoomState[], playerId: string): OnlineBattleRecordSummary {
+  const summary = emptyBattleRecordSummary();
+  for (const room of rooms) {
+    const seat = seatForPlayer(room, playerId);
+    if (!seat || room.stage !== 'finished') {
+      continue;
+    }
+    summary.matches += 1;
+    if (!room.winnerSeat) {
+      summary.draws += 1;
+    } else if (room.winnerSeat === seat) {
+      summary.wins += 1;
+    } else {
+      summary.losses += 1;
+    }
+  }
+  if (summary.matches) {
+    summary.winRate = Math.round((summary.wins / summary.matches) * 100);
+  }
+  return summary;
+}
+
 function sanitizePreviewTeam(team: Team) {
   const next = clone(team);
   next.notes = '';
@@ -237,20 +364,28 @@ function sanitizeBattleForViewer(battle: SimulatorBattleState, viewerSeat: Onlin
   return next;
 }
 
-export function roomView(room: OnlineBattleRoomState, playerId: string): OnlineBattleRoomView | null {
+export function roomView(room: OnlineBattleRoomState, playerId: string, allRooms: OnlineBattleRoomState[] = [room]): OnlineBattleRoomView | null {
+  normalizeRoomState(room);
   const seat = seatForPlayer(room, playerId);
   if (!seat) {
     return null;
   }
 
   const isHost = seat === 'host';
+  const opponentSeat: OnlineSeat = isHost ? 'guest' : 'host';
+  const playerIdForView = playerIdForSeat(room, seat);
   const playerTeam = clone((isHost ? room.hostTeam : room.guestTeam) ?? createTeam('Empty'));
   const opponentTeam = clone((isHost ? room.guestTeam : room.hostTeam) ?? createTeam('Empty'));
+  const playerChatJoined = room.chatParticipants.some((participant) => participant.playerId === playerId);
+  const opponentPlayerId = playerIdForSeat(room, opponentSeat);
+  const opponentChatJoined = room.chatParticipants.some((participant) => participant.playerId === opponentPlayerId);
   return {
     code: room.code,
     format: room.format,
     stage: room.stage,
     seat,
+    playerId: playerIdForView,
+    opponentPlayerId: opponentPlayerId || null,
     hostTrainerName: room.hostTrainerName,
     guestTrainerName: room.guestTrainerName,
     playerTeam,
@@ -274,10 +409,19 @@ export function roomView(room: OnlineBattleRoomState, playerId: string): OnlineB
     hostAnnouncerEnabled: room.hostAnnouncerEnabled,
     guestAnnouncerEnabled: room.guestAnnouncerEnabled,
     lastActionSummary: room.lastActionSummary,
+    playerRecord: recordSummaryForPlayer(allRooms, playerId),
+    opponentRecord: opponentPlayerId ? recordSummaryForPlayer(allRooms, opponentPlayerId) : emptyBattleRecordSummary(),
+    chatParticipants: clone(room.chatParticipants),
+    chatMessages: clone(room.chatMessages),
+    playerChatJoined,
+    opponentChatJoined,
+    playerWinnerPick: isHost ? room.hostWinnerPick : room.guestWinnerPick,
+    opponentWinnerPick: isHost ? room.guestWinnerPick : room.hostWinnerPick,
   };
 }
 
 export function roomHistoryEntry(room: OnlineBattleRoomState, playerId: string): OnlineBattleRoomHistoryEntry | null {
+  normalizeRoomState(room);
   const seat = seatForPlayer(room, playerId);
   if (!seat || room.stage !== 'finished') {
     return null;
@@ -318,6 +462,7 @@ function allPreviewReady(room: OnlineBattleRoomState) {
 }
 
 function startRoomBattle(room: OnlineBattleRoomState) {
+  normalizeRoomState(room);
   if (!room.guestTeam || !allPreviewReady(room)) {
     return room;
   }
@@ -339,10 +484,13 @@ function startRoomBattle(room: OnlineBattleRoomState) {
   room.pendingHostChoices = null;
   room.pendingGuestChoices = null;
   room.lastActionSummary = `${room.hostTrainerName} and ${room.guestTrainerName ?? 'Opponent'} entered the field.`;
+  appendSystemMessage(room, `Battle start: ${room.hostTrainerName} and ${room.guestTrainerName ?? 'Opponent'} sent their leads to the field.`, 'announcer');
+  appendBattleLogMessages(room);
   return room;
 }
 
 function finishRoomAsTimeout(room: OnlineBattleRoomState) {
+  normalizeRoomState(room);
   if (!room.battle) {
     return room;
   }
@@ -358,10 +506,13 @@ function finishRoomAsTimeout(room: OnlineBattleRoomState) {
   room.battle.winner = null;
   room.battle.log.unshift('Match timer expired. Under the current Pokemon Champions timeout rule, the battle ends in a draw.');
   room.lastActionSummary = 'Match timer expired. The battle has been recorded as a draw.';
+  appendBattleLogMessages(room);
+  appendSystemMessage(room, 'Room closed on match time. The result is a draw.', 'system');
   return room;
 }
 
 function maybeResolvePendingTurn(room: OnlineBattleRoomState) {
+  normalizeRoomState(room);
   if (room.stage !== 'battle' || !room.battle || room.winnerSeat || !room.guestPlayerId) {
     return room;
   }
@@ -398,6 +549,11 @@ function maybeResolvePendingTurn(room: OnlineBattleRoomState) {
       room.resultReason = room.resultReason ?? 'normal';
     }
 
+    appendBattleLogMessages(room);
+    if (nextBattle.winner) {
+      appendSystemMessage(room, `Battle end: ${room.winnerSeat === 'host' ? room.hostTrainerName : room.guestTrainerName ?? 'Opponent'} wins the room.`, 'announcer');
+    }
+
     return room;
   }
 
@@ -419,6 +575,11 @@ function maybeResolvePendingTurn(room: OnlineBattleRoomState) {
     room.stage = 'finished';
     room.winnerSeat = nextBattle.winner === 'player' ? 'host' : 'guest';
     room.resultReason = room.resultReason ?? 'normal';
+  }
+
+  appendBattleLogMessages(room);
+  if (nextBattle.winner) {
+    appendSystemMessage(room, `Battle end: ${room.winnerSeat === 'host' ? room.hostTrainerName : room.guestTrainerName ?? 'Opponent'} wins the room.`, 'announcer');
   }
 
   return room;
@@ -458,6 +619,12 @@ export function createRoomState(
     winnerSeat: null,
     resultReason: null,
     lastActionSummary: `${account.trainerName} opened room ${musicTrackId ? `with ${musicTrackId}` : 'for a live battle'}.`,
+    hostWinnerPick: null,
+    guestWinnerPick: null,
+    chatParticipants: [],
+    chatMessages: [],
+    moderationReports: [],
+    mirroredBattleLogCount: 0,
   } satisfies OnlineBattleRoomState;
 }
 
@@ -468,6 +635,7 @@ export function joinRoomState(
   musicTrackId: string,
   announcerEnabled: boolean,
 ) {
+  normalizeRoomState(room);
   if (room.guestPlayerId && room.guestPlayerId !== account.playerId) {
     throw new Error('This room already has two battlers.');
   }
@@ -481,10 +649,12 @@ export function joinRoomState(
   room.deadlineAt = new Date(Date.now() + 60_000).toISOString();
   room.lastActionSummary = `${account.trainerName} joined the room. Team preview is live.`;
   room.updatedAt = nowIso();
+  appendSystemMessage(room, `${account.trainerName} entered room ${room.code}. Team preview is now live.`);
   return room;
 }
 
 export function submitBringOrderState(room: OnlineBattleRoomState, playerId: string, order: number[]) {
+  normalizeRoomState(room);
   const seat = seatForPlayer(room, playerId);
   if (!seat) {
     throw new Error('You are not seated in this room.');
@@ -504,10 +674,12 @@ export function submitBringOrderState(room: OnlineBattleRoomState, playerId: str
   setSeatBringOrder(room, seat, nextOrder);
   room.updatedAt = nowIso();
   room.lastActionSummary = `${seat === 'host' ? room.hostTrainerName : room.guestTrainerName ?? 'Opponent'} locked their bring-four order.`;
+  appendSystemMessage(room, `${trainerNameForSeat(room, seat)} locked their bring-four order.`);
   return startRoomBattle(room);
 }
 
 export function submitTurnChoicesState(room: OnlineBattleRoomState, playerId: string, choices: SimulatorChoice[]) {
+  normalizeRoomState(room);
   const seat = seatForPlayer(room, playerId);
   if (!seat) {
     throw new Error('You are not seated in this room.');
@@ -519,6 +691,7 @@ export function submitTurnChoicesState(room: OnlineBattleRoomState, playerId: st
   setSeatChoices(room, seat, choices);
   room.updatedAt = nowIso();
   room.lastActionSummary = `${seat === 'host' ? room.hostTrainerName : room.guestTrainerName ?? 'Opponent'} locked their turn choices.`;
+  appendSystemMessage(room, `${trainerNameForSeat(room, seat)} locked turn choices.`, 'system');
   const nextRoom = maybeResolvePendingTurn(room);
   if (
     nextRoom.stage === 'battle'
@@ -534,6 +707,7 @@ export function submitTurnChoicesState(room: OnlineBattleRoomState, playerId: st
 }
 
 export function forfeitRoomState(room: OnlineBattleRoomState, playerId: string) {
+  normalizeRoomState(room);
   const seat = seatForPlayer(room, playerId);
   if (!seat) {
     throw new Error('You are not seated in this room.');
@@ -551,12 +725,114 @@ export function forfeitRoomState(room: OnlineBattleRoomState, playerId: string) 
   room.pendingGuestChoices = null;
   room.lastActionSummary = `${seat === 'host' ? room.hostTrainerName : room.guestTrainerName ?? 'Opponent'} forfeited the battle.`;
   room.updatedAt = nowIso();
+  appendSystemMessage(room, `${trainerNameForSeat(room, seat)} forfeited the battle.`, 'announcer');
   return room;
 }
 
 export function touchRoomState(room: OnlineBattleRoomState) {
+  normalizeRoomState(room);
   room.updatedAt = nowIso();
   return maybeResolvePendingTurn(room);
+}
+
+export function joinRoomChatState(room: OnlineBattleRoomState, playerId: string) {
+  normalizeRoomState(room);
+  const seat = seatForPlayer(room, playerId);
+  if (!seat) {
+    throw new Error('You are not seated in this room.');
+  }
+  if (!room.chatParticipants.some((participant) => participant.playerId === playerId)) {
+    room.chatParticipants.push(chatParticipantForSeat(room, seat));
+    appendSystemMessage(room, `${trainerNameForSeat(room, seat)} joined battle chat.`);
+  }
+  room.updatedAt = nowIso();
+  return room;
+}
+
+export function leaveRoomChatState(room: OnlineBattleRoomState, playerId: string) {
+  normalizeRoomState(room);
+  const seat = seatForPlayer(room, playerId);
+  if (!seat) {
+    throw new Error('You are not seated in this room.');
+  }
+  const previousLength = room.chatParticipants.length;
+  room.chatParticipants = room.chatParticipants.filter((participant) => participant.playerId !== playerId);
+  if (room.chatParticipants.length !== previousLength) {
+    appendSystemMessage(room, `${trainerNameForSeat(room, seat)} left battle chat.`);
+  }
+  room.updatedAt = nowIso();
+  return room;
+}
+
+export function sendRoomChatMessageState(
+  room: OnlineBattleRoomState,
+  playerId: string,
+  text: string,
+  emoji: string | null = null,
+) {
+  normalizeRoomState(room);
+  const seat = seatForPlayer(room, playerId);
+  if (!seat) {
+    throw new Error('You are not seated in this room.');
+  }
+  const trimmed = text.trim();
+  if (!trimmed && !emoji) {
+    throw new Error('Enter a message or choose a reaction.');
+  }
+  if (!room.chatParticipants.some((participant) => participant.playerId === playerId)) {
+    joinRoomChatState(room, playerId);
+  }
+  appendRoomMessage(room, {
+    kind: emoji && !trimmed ? 'reaction' : 'chat',
+    senderPlayerId: playerId,
+    senderName: trainerNameForSeat(room, seat),
+    seat,
+    text: trimmed,
+    emoji,
+  });
+  room.updatedAt = nowIso();
+  return room;
+}
+
+export function reportRoomPlayerState(
+  room: OnlineBattleRoomState,
+  reporterPlayerId: string,
+  reportedPlayerId: string,
+  reason: string,
+) {
+  normalizeRoomState(room);
+  const reporterSeat = seatForPlayer(room, reporterPlayerId);
+  const reportedSeat = seatForPlayer(room, reportedPlayerId);
+  if (!reporterSeat || !reportedSeat || reporterPlayerId === reportedPlayerId) {
+    throw new Error('Select a valid player to report.');
+  }
+  room.moderationReports.push({
+    id: makeId('battle-report'),
+    reporterPlayerId,
+    reportedPlayerId,
+    reportedTrainerName: trainerNameForSeat(room, reportedSeat),
+    reason: reason.trim() || 'No reason provided.',
+    createdAt: nowIso(),
+    status: 'open',
+  });
+  appendSystemMessage(room, `${trainerNameForSeat(room, reporterSeat)} filed a conduct report.`);
+  room.updatedAt = nowIso();
+  return room;
+}
+
+export function voteRoomWinnerState(room: OnlineBattleRoomState, playerId: string, pick: OnlineSeat | null) {
+  normalizeRoomState(room);
+  const seat = seatForPlayer(room, playerId);
+  if (!seat) {
+    throw new Error('You are not seated in this room.');
+  }
+  if (seat === 'host') {
+    room.hostWinnerPick = pick;
+  } else {
+    room.guestWinnerPick = pick;
+  }
+  room.updatedAt = nowIso();
+  return room;
 }
 
 function initialLocalStore(): LocalOnlineStore {
@@ -580,7 +856,9 @@ function readLocalStore() {
     if (!raw) {
       return initialLocalStore();
     }
-    return JSON.parse(raw) as LocalOnlineStore;
+    const parsed = JSON.parse(raw) as LocalOnlineStore;
+    parsed.rooms = (parsed.rooms ?? []).map((room) => normalizeRoomState(room));
+    return parsed;
   } catch {
     return initialLocalStore();
   }
@@ -624,7 +902,8 @@ export function heartbeatPresenceStore(store: LocalOnlineStore, sessionId: strin
 }
 
 function findLocalRoom(store: LocalOnlineStore, code: string) {
-  return store.rooms.find((room) => room.code === code) ?? null;
+  const room = store.rooms.find((entry) => entry.code === code) ?? null;
+  return room ? normalizeRoomState(room) : null;
 }
 
 export async function localRegisterAccount(input: { trainerName: string; email: string; password: string }) {
@@ -686,7 +965,7 @@ export function localCreateRoom(input: {
   }
   store.rooms = [...store.rooms.filter((entry) => entry.hostPlayerId !== input.account.playerId || entry.stage === 'finished'), room];
   writeLocalStore(store);
-  const nextView = roomView(room, input.account.playerId);
+  const nextView = roomView(room, input.account.playerId, store.rooms);
   if (!nextView) {
     throw new Error('Could not create the local room view.');
   }
@@ -707,7 +986,7 @@ export function localJoinRoom(input: {
   }
   joinRoomState(room, input.account, input.team, input.musicTrackId, input.announcerEnabled);
   writeLocalStore(store);
-  const nextView = roomView(room, input.account.playerId);
+  const nextView = roomView(room, input.account.playerId, store.rooms);
   if (!nextView) {
     throw new Error('Could not open the joined room view.');
   }
@@ -722,7 +1001,7 @@ export function localFetchRoom(input: { account: OnlineBattleAccount; code: stri
   }
   touchRoomState(room);
   writeLocalStore(store);
-  return roomView(room, input.account.playerId);
+  return roomView(room, input.account.playerId, store.rooms);
 }
 
 export function localSubmitBringOrder(input: { account: OnlineBattleAccount; code: string; bringOrder: number[] }) {
@@ -733,7 +1012,7 @@ export function localSubmitBringOrder(input: { account: OnlineBattleAccount; cod
   }
   submitBringOrderState(room, input.account.playerId, input.bringOrder);
   writeLocalStore(store);
-  const nextView = roomView(room, input.account.playerId);
+  const nextView = roomView(room, input.account.playerId, store.rooms);
   if (!nextView) {
     throw new Error('Could not refresh the room after bring order submission.');
   }
@@ -748,7 +1027,7 @@ export function localSubmitChoices(input: { account: OnlineBattleAccount; code: 
   }
   submitTurnChoicesState(room, input.account.playerId, input.choices);
   writeLocalStore(store);
-  const nextView = roomView(room, input.account.playerId);
+  const nextView = roomView(room, input.account.playerId, store.rooms);
   if (!nextView) {
     throw new Error('Could not refresh the room after turn submission.');
   }
@@ -763,9 +1042,84 @@ export function localForfeitRoom(input: { account: OnlineBattleAccount; code: st
   }
   forfeitRoomState(room, input.account.playerId);
   writeLocalStore(store);
-  const nextView = roomView(room, input.account.playerId);
+  const nextView = roomView(room, input.account.playerId, store.rooms);
   if (!nextView) {
     throw new Error('Could not refresh the room after the forfeit.');
+  }
+  return nextView;
+}
+
+export function localJoinRoomChat(input: { account: OnlineBattleAccount; code: string }) {
+  const store = readLocalStore();
+  const room = findLocalRoom(store, input.code);
+  if (!room) {
+    throw new Error('Room code not found.');
+  }
+  joinRoomChatState(room, input.account.playerId);
+  writeLocalStore(store);
+  const nextView = roomView(room, input.account.playerId, store.rooms);
+  if (!nextView) {
+    throw new Error('Could not refresh the room after joining chat.');
+  }
+  return nextView;
+}
+
+export function localLeaveRoomChat(input: { account: OnlineBattleAccount; code: string }) {
+  const store = readLocalStore();
+  const room = findLocalRoom(store, input.code);
+  if (!room) {
+    throw new Error('Room code not found.');
+  }
+  leaveRoomChatState(room, input.account.playerId);
+  writeLocalStore(store);
+  const nextView = roomView(room, input.account.playerId, store.rooms);
+  if (!nextView) {
+    throw new Error('Could not refresh the room after leaving chat.');
+  }
+  return nextView;
+}
+
+export function localSendRoomChatMessage(input: { account: OnlineBattleAccount; code: string; text: string; emoji?: string | null }) {
+  const store = readLocalStore();
+  const room = findLocalRoom(store, input.code);
+  if (!room) {
+    throw new Error('Room code not found.');
+  }
+  sendRoomChatMessageState(room, input.account.playerId, input.text, input.emoji ?? null);
+  writeLocalStore(store);
+  const nextView = roomView(room, input.account.playerId, store.rooms);
+  if (!nextView) {
+    throw new Error('Could not refresh the room after sending chat.');
+  }
+  return nextView;
+}
+
+export function localReportRoomPlayer(input: { account: OnlineBattleAccount; code: string; reportedPlayerId: string; reason: string }) {
+  const store = readLocalStore();
+  const room = findLocalRoom(store, input.code);
+  if (!room) {
+    throw new Error('Room code not found.');
+  }
+  reportRoomPlayerState(room, input.account.playerId, input.reportedPlayerId, input.reason);
+  writeLocalStore(store);
+  const nextView = roomView(room, input.account.playerId, store.rooms);
+  if (!nextView) {
+    throw new Error('Could not refresh the room after reporting a player.');
+  }
+  return nextView;
+}
+
+export function localVoteRoomWinner(input: { account: OnlineBattleAccount; code: string; pick: OnlineSeat | null }) {
+  const store = readLocalStore();
+  const room = findLocalRoom(store, input.code);
+  if (!room) {
+    throw new Error('Room code not found.');
+  }
+  voteRoomWinnerState(room, input.account.playerId, input.pick);
+  writeLocalStore(store);
+  const nextView = roomView(room, input.account.playerId, store.rooms);
+  if (!nextView) {
+    throw new Error('Could not refresh the room after saving your prediction.');
   }
   return nextView;
 }
@@ -916,6 +1270,51 @@ export async function forfeitOnlineRoom(input: { account: OnlineBattleAccount; c
     return remote.room;
   } catch {
     return localForfeitRoom(input);
+  }
+}
+
+export async function joinOnlineRoomChat(input: { account: OnlineBattleAccount; code: string }) {
+  try {
+    const remote = await tryRemote<{ room: OnlineBattleRoomView }>('join-room-chat', input);
+    return remote.room;
+  } catch {
+    return localJoinRoomChat(input);
+  }
+}
+
+export async function leaveOnlineRoomChat(input: { account: OnlineBattleAccount; code: string }) {
+  try {
+    const remote = await tryRemote<{ room: OnlineBattleRoomView }>('leave-room-chat', input);
+    return remote.room;
+  } catch {
+    return localLeaveRoomChat(input);
+  }
+}
+
+export async function sendOnlineRoomChatMessage(input: { account: OnlineBattleAccount; code: string; text: string; emoji?: string | null }) {
+  try {
+    const remote = await tryRemote<{ room: OnlineBattleRoomView }>('send-room-chat', input);
+    return remote.room;
+  } catch {
+    return localSendRoomChatMessage(input);
+  }
+}
+
+export async function reportOnlineRoomPlayer(input: { account: OnlineBattleAccount; code: string; reportedPlayerId: string; reason: string }) {
+  try {
+    const remote = await tryRemote<{ room: OnlineBattleRoomView }>('report-room-player', input);
+    return remote.room;
+  } catch {
+    return localReportRoomPlayer(input);
+  }
+}
+
+export async function voteOnlineRoomWinner(input: { account: OnlineBattleAccount; code: string; pick: OnlineSeat | null }) {
+  try {
+    const remote = await tryRemote<{ room: OnlineBattleRoomView }>('vote-room-winner', input);
+    return remote.room;
+  } catch {
+    return localVoteRoomWinner(input);
   }
 }
 

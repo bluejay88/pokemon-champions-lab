@@ -4,12 +4,17 @@ import {
   createRoomState,
   forfeitRoomState,
   heartbeatPresenceStore,
+  joinRoomChatState,
   joinRoomState,
+  leaveRoomChatState,
+  reportRoomPlayerState,
   roomHistoryEntry,
   roomView,
+  sendRoomChatMessageState,
   submitBringOrderState,
   submitTurnChoicesState,
   touchRoomState,
+  voteRoomWinnerState,
   type OnlineBattleRoomState,
 } from '../../src/lib/online';
 import type { SimulatorChoice } from '../../src/lib/simulator';
@@ -29,6 +34,11 @@ type ArenaPayload = {
   announcerEnabled?: boolean;
   bringOrder?: number[];
   choices?: unknown[];
+  text?: string;
+  emoji?: string | null;
+  reportedPlayerId?: string;
+  reason?: string;
+  pick?: 'host' | 'guest' | null;
 };
 
 type StoredAccount = OnlineBattleAccount & {
@@ -204,7 +214,8 @@ async function handleCreateRoom(payload: ArenaPayload) {
   }
 
   await saveRoom(room);
-  return { room: roomView(room, account.playerId) };
+  const rooms = await allRooms();
+  return { room: roomView(room, account.playerId, rooms) };
 }
 
 async function handleJoinRoom(payload: ArenaPayload) {
@@ -219,7 +230,8 @@ async function handleJoinRoom(payload: ArenaPayload) {
 
   joinRoomState(room, account, payload.team as OnlineBattleRoomState['hostTeam'], payload.musicTrackId ?? room.musicTrackId, Boolean(payload.announcerEnabled));
   await saveRoom(room);
-  return { room: roomView(room, account.playerId) };
+  const rooms = await allRooms();
+  return { room: roomView(room, account.playerId, rooms) };
 }
 
 async function handleGetRoom(payload: ArenaPayload) {
@@ -233,7 +245,8 @@ async function handleGetRoom(payload: ArenaPayload) {
   }
   touchRoomState(room);
   await saveRoom(room);
-  return { room: roomView(room, account.playerId) };
+  const rooms = await allRooms();
+  return { room: roomView(room, account.playerId, rooms) };
 }
 
 async function handleHistory(payload: ArenaPayload) {
@@ -257,7 +270,8 @@ async function handleBringOrder(payload: ArenaPayload) {
   }
   submitBringOrderState(room, account.playerId, payload.bringOrder);
   await saveRoom(room);
-  return { room: roomView(room, account.playerId) };
+  const rooms = await allRooms();
+  return { room: roomView(room, account.playerId, rooms) };
 }
 
 async function handleSubmitChoices(payload: ArenaPayload) {
@@ -271,7 +285,8 @@ async function handleSubmitChoices(payload: ArenaPayload) {
   }
   submitTurnChoicesState(room, account.playerId, payload.choices as SimulatorChoice[]);
   await saveRoom(room);
-  return { room: roomView(room, account.playerId) };
+  const rooms = await allRooms();
+  return { room: roomView(room, account.playerId, rooms) };
 }
 
 async function handleForfeit(payload: ArenaPayload) {
@@ -285,7 +300,83 @@ async function handleForfeit(payload: ArenaPayload) {
   }
   forfeitRoomState(room, account.playerId);
   await saveRoom(room);
-  return { room: roomView(room, account.playerId) };
+  const rooms = await allRooms();
+  return { room: roomView(room, account.playerId, rooms) };
+}
+
+async function handleJoinRoomChat(payload: ArenaPayload) {
+  const account = await authenticate(payload.account);
+  if (!payload.code) {
+    throw new Error('Room code is required.');
+  }
+  const room = await findRoom(payload.code);
+  if (!room) {
+    throw new Error('Room code not found.');
+  }
+  joinRoomChatState(room, account.playerId);
+  await saveRoom(room);
+  const rooms = await allRooms();
+  return { room: roomView(room, account.playerId, rooms) };
+}
+
+async function handleLeaveRoomChat(payload: ArenaPayload) {
+  const account = await authenticate(payload.account);
+  if (!payload.code) {
+    throw new Error('Room code is required.');
+  }
+  const room = await findRoom(payload.code);
+  if (!room) {
+    throw new Error('Room code not found.');
+  }
+  leaveRoomChatState(room, account.playerId);
+  await saveRoom(room);
+  const rooms = await allRooms();
+  return { room: roomView(room, account.playerId, rooms) };
+}
+
+async function handleSendRoomChat(payload: ArenaPayload) {
+  const account = await authenticate(payload.account);
+  if (!payload.code) {
+    throw new Error('Room code is required.');
+  }
+  const room = await findRoom(payload.code);
+  if (!room) {
+    throw new Error('Room code not found.');
+  }
+  sendRoomChatMessageState(room, account.playerId, payload.text ?? '', payload.emoji ?? null);
+  await saveRoom(room);
+  const rooms = await allRooms();
+  return { room: roomView(room, account.playerId, rooms) };
+}
+
+async function handleReportRoomPlayer(payload: ArenaPayload) {
+  const account = await authenticate(payload.account);
+  if (!payload.code || !payload.reportedPlayerId) {
+    throw new Error('Room code and target player are required.');
+  }
+  const room = await findRoom(payload.code);
+  if (!room) {
+    throw new Error('Room code not found.');
+  }
+  reportRoomPlayerState(room, account.playerId, payload.reportedPlayerId, payload.reason ?? '');
+  await saveRoom(room);
+  const rooms = await allRooms();
+  return { room: roomView(room, account.playerId, rooms) };
+}
+
+async function handleVoteRoomWinner(payload: ArenaPayload) {
+  const account = await authenticate(payload.account);
+  if (!payload.code) {
+    throw new Error('Room code is required.');
+  }
+  const room = await findRoom(payload.code);
+  if (!room) {
+    throw new Error('Room code not found.');
+  }
+  voteRoomWinnerState(room, account.playerId, payload.pick ?? null);
+  await saveRoom(room);
+  const rooms = await allRooms();
+  return { room: roomView(room, account.playerId, rooms) };
 }
 
 export default async function handler(request: Request) {
@@ -323,6 +414,21 @@ export default async function handler(request: Request) {
     }
     if (action === 'forfeit-room') {
       return jsonResponse(await handleForfeit(payload));
+    }
+    if (action === 'join-room-chat') {
+      return jsonResponse(await handleJoinRoomChat(payload));
+    }
+    if (action === 'leave-room-chat') {
+      return jsonResponse(await handleLeaveRoomChat(payload));
+    }
+    if (action === 'send-room-chat') {
+      return jsonResponse(await handleSendRoomChat(payload));
+    }
+    if (action === 'report-room-player') {
+      return jsonResponse(await handleReportRoomPlayer(payload));
+    }
+    if (action === 'vote-room-winner') {
+      return jsonResponse(await handleVoteRoomWinner(payload));
     }
 
     return jsonResponse({ error: 'Unsupported arena action.' }, 400);

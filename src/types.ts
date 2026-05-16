@@ -200,6 +200,42 @@ export interface OnlineBattleAccount {
   registeredAt: string;
 }
 
+export interface OnlineBattleRecordSummary {
+  matches: number;
+  wins: number;
+  losses: number;
+  draws: number;
+  winRate: number;
+}
+
+export interface OnlineBattleChatParticipant {
+  playerId: string;
+  trainerName: string;
+  seat: 'host' | 'guest';
+  joinedAt: string;
+}
+
+export interface OnlineBattleChatMessage {
+  id: string;
+  kind: 'chat' | 'system' | 'reaction' | 'announcer';
+  senderPlayerId: string | null;
+  senderName: string;
+  seat: 'host' | 'guest' | null;
+  text: string;
+  emoji: string | null;
+  createdAt: string;
+}
+
+export interface OnlineBattleReportEntry {
+  id: string;
+  reporterPlayerId: string;
+  reportedPlayerId: string;
+  reportedTrainerName: string;
+  reason: string;
+  createdAt: string;
+  status: 'open';
+}
+
 export interface OnlinePresenceStats {
   activeUsers: number;
   totalVisits: number;

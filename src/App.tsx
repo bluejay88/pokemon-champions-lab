@@ -581,6 +581,31 @@ async function forfeitOnlineRoom(...args: Parameters<OnlineRuntimeModule['forfei
   return runtime.forfeitOnlineRoom(...args);
 }
 
+async function joinOnlineRoomChat(...args: Parameters<OnlineRuntimeModule['joinOnlineRoomChat']>) {
+  const runtime = await ensureOnlineRuntime();
+  return runtime.joinOnlineRoomChat(...args);
+}
+
+async function leaveOnlineRoomChat(...args: Parameters<OnlineRuntimeModule['leaveOnlineRoomChat']>) {
+  const runtime = await ensureOnlineRuntime();
+  return runtime.leaveOnlineRoomChat(...args);
+}
+
+async function sendOnlineRoomChatMessage(...args: Parameters<OnlineRuntimeModule['sendOnlineRoomChatMessage']>) {
+  const runtime = await ensureOnlineRuntime();
+  return runtime.sendOnlineRoomChatMessage(...args);
+}
+
+async function reportOnlineRoomPlayer(...args: Parameters<OnlineRuntimeModule['reportOnlineRoomPlayer']>) {
+  const runtime = await ensureOnlineRuntime();
+  return runtime.reportOnlineRoomPlayer(...args);
+}
+
+async function voteOnlineRoomWinner(...args: Parameters<OnlineRuntimeModule['voteOnlineRoomWinner']>) {
+  const runtime = await ensureOnlineRuntime();
+  return runtime.voteOnlineRoomWinner(...args);
+}
+
 const appTabs: { id: BattleTab; label: string; short: string; description: string }[] = [
   { id: 'team-builder', label: 'Team Builder', short: 'Build', description: 'Craft, label, and save up to ten squads.' },
   { id: 'damage-lab', label: 'Damage Lab', short: 'Calc', description: 'Run both-way damage lines with items and Mega toggles.' },
@@ -2692,6 +2717,9 @@ function App() {
   const [pvpBattlefieldEvent, setPvpBattlefieldEvent] = useState<BattlefieldPlaybackEvent | null>(null);
   const [pvpRoomHistory, setPvpRoomHistory] = useState<OnlineBattleRoomHistoryEntry[]>([]);
   const [pvpHistorySearch, setPvpHistorySearch] = useState('');
+  const [pvpChatInput, setPvpChatInput] = useState('');
+  const [pvpBlockedPlayerIds, setPvpBlockedPlayerIds] = useState<string[]>([]);
+  const [pvpReportReason, setPvpReportReason] = useState('');
   const [profileMusicPreviewActive, setProfileMusicPreviewActive] = useState(false);
   const [profileMusicPreviewSession, setProfileMusicPreviewSession] = useState(0);
   const [lastSavedAt, setLastSavedAt] = useState<string | null>(null);
@@ -2746,6 +2774,24 @@ function App() {
     null;
   const simBattleResolved = Boolean(simBattle && simBattle.stage === 'finished');
   const pvpBattleResolved = Boolean(pvpRoom && pvpRoom.stage === 'finished');
+  const pvpOpponentTrainerName = pvpRoom?.seat === 'host' ? pvpRoom?.guestTrainerName ?? 'Opponent' : pvpRoom?.hostTrainerName ?? 'Opponent';
+  const pvpChatParticipants = pvpRoom?.chatParticipants ?? [];
+  const pvpVisibleChatMessages = useMemo(
+    () => (pvpRoom?.chatMessages ?? []).filter((message) => !message.senderPlayerId || !pvpBlockedPlayerIds.includes(message.senderPlayerId)),
+    [pvpBlockedPlayerIds, pvpRoom?.chatMessages],
+  );
+  const pvpChatFeedMessages = useMemo(
+    () => pvpVisibleChatMessages.filter((message) => message.kind === 'chat' || message.kind === 'reaction'),
+    [pvpVisibleChatMessages],
+  );
+  const pvpBattleFeedMessages = useMemo(
+    () => pvpVisibleChatMessages.filter((message) => message.kind === 'system' || message.kind === 'announcer'),
+    [pvpVisibleChatMessages],
+  );
+  const pvpProjectedStarPokemon = useMemo(
+    () => pvpRoom?.battle ? topBattlePerformers(pvpRoom.battle)[0]?.name ?? null : null,
+    [pvpRoom?.battle],
+  );
   const aiBattleMusicActive = activeTab === 'simulator' && simBattle?.stage === 'battle';
   const pvpBattleMusicActive = activeTab === 'pvp-battles' && pvpRoom?.stage === 'battle';
   const simDecisionPhaseKey = simBattle
@@ -4521,6 +4567,111 @@ function App() {
     }
   }
 
+  async function handleJoinPvpChat() {
+    if (!onlineAccount || !pvpRoom) {
+      setPvpMessage('Sign in and join a live room before using battle chat.');
+      return;
+    }
+    try {
+      const room = await joinOnlineRoomChat({ account: onlineAccount, code: pvpRoom.code });
+      setPvpRoom(room);
+      setPvpMessage('Battle chat joined.');
+    } catch (error) {
+      setPvpMessage(error instanceof Error ? error.message : 'Could not join battle chat.');
+    }
+  }
+
+  async function handleLeavePvpChat() {
+    if (!onlineAccount || !pvpRoom) {
+      return;
+    }
+    try {
+      const room = await leaveOnlineRoomChat({ account: onlineAccount, code: pvpRoom.code });
+      setPvpRoom(room);
+      setPvpMessage('Battle chat left.');
+    } catch (error) {
+      setPvpMessage(error instanceof Error ? error.message : 'Could not leave battle chat.');
+    }
+  }
+
+  async function handleSendPvpChat(text: string, emoji?: string | null) {
+    if (!onlineAccount || !pvpRoom) {
+      setPvpMessage('Sign in and join a live room before sending battle chat.');
+      return;
+    }
+    try {
+      const room = await sendOnlineRoomChatMessage({
+        account: onlineAccount,
+        code: pvpRoom.code,
+        text,
+        emoji: emoji ?? null,
+      });
+      setPvpRoom(room);
+      setPvpChatInput('');
+    } catch (error) {
+      setPvpMessage(error instanceof Error ? error.message : 'Could not send battle chat.');
+    }
+  }
+
+  async function handleVotePvpWinner(pick: 'host' | 'guest' | null) {
+    if (!onlineAccount || !pvpRoom) {
+      return;
+    }
+    try {
+      const room = await voteOnlineRoomWinner({ account: onlineAccount, code: pvpRoom.code, pick });
+      setPvpRoom(room);
+      setPvpMessage('Battle prediction saved.');
+    } catch (error) {
+      setPvpMessage(error instanceof Error ? error.message : 'Could not save your battle prediction.');
+    }
+  }
+
+  async function handleReportPvpPlayer() {
+    if (!onlineAccount || !pvpRoom?.opponentPlayerId) {
+      setPvpMessage('No opponent is available to report yet.');
+      return;
+    }
+    try {
+      const room = await reportOnlineRoomPlayer({
+        account: onlineAccount,
+        code: pvpRoom.code,
+        reportedPlayerId: pvpRoom.opponentPlayerId,
+        reason: pvpReportReason || 'Unsportsmanlike conduct',
+      });
+      setPvpRoom(room);
+      setPvpReportReason('');
+      setPvpMessage('Report submitted for review.');
+    } catch (error) {
+      setPvpMessage(error instanceof Error ? error.message : 'Could not report that player.');
+    }
+  }
+
+  function handleToggleBlockedPlayer(playerId: string | null) {
+    if (!playerId) {
+      return;
+    }
+    setPvpBlockedPlayerIds((current) => current.includes(playerId)
+      ? current.filter((entry) => entry !== playerId)
+      : [...current, playerId]);
+  }
+
+  function savePvpChatTranscript() {
+    if (typeof window === 'undefined' || !pvpRoom) {
+      return;
+    }
+    const transcript = pvpVisibleChatMessages
+      .map((message) => `[${new Date(message.createdAt).toLocaleString()}] ${message.senderName}: ${message.emoji ? `${message.emoji} ` : ''}${message.text}`)
+      .join('\n');
+    const blob = new Blob([transcript], { type: 'text/plain;charset=utf-8' });
+    const href = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = href;
+    anchor.download = `${pvpRoom.code}-battle-chat.txt`;
+    anchor.click();
+    URL.revokeObjectURL(href);
+    setPvpMessage('Battle chat transcript saved.');
+  }
+
   return (
     <div className={`app-shell layout-${state.profile.layoutMode.toLowerCase()}${state.profile.resizablePanels ? ' panels-resizable' : ''}`}>
       {state.profile.battleMusicEnabled && (aiBattleMusicActive || pvpBattleMusicActive) ? (
@@ -5749,6 +5900,126 @@ function App() {
                     controlDock={<div className="battlefield-control-panel">{pvpCommandDeck}</div>}
                     expansive
                   />
+                </div>
+              </div>
+            </section>
+          ) : null}
+          {pvpRoom?.battle ? (
+            <section className="battle-stage-full-width battle-social-strip-shell">
+              <div className="battle-social-grid">
+                <div className="battle-social-column battle-social-column-left">
+                  <div className="subpanel battle-social-card battle-social-card-tall">
+                    <SectionHeader title="Players In Chat" subtitle="Live battlers currently inside this room chat." compact />
+                    <div className="battle-chat-player-list">
+                      {pvpChatParticipants.length ? pvpChatParticipants.map((participant) => (
+                        <div key={participant.playerId} className="battle-chat-player-row">
+                          <div>
+                            <strong>{participant.trainerName}</strong>
+                            <span>{participant.seat === 'host' ? 'Host side' : 'Guest side'}</span>
+                          </div>
+                          <small>{new Date(participant.joinedAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</small>
+                        </div>
+                      )) : <div className="note-row">No one has joined this room chat yet.</div>}
+                    </div>
+                  </div>
+                  <div className="subpanel battle-social-card">
+                    <SectionHeader title="Chat Options" subtitle={onlineAccount ? 'Room tools for the live battle chat.' : 'Sign in first to use room chat tools.'} compact />
+                    <div className="battle-chat-options-grid">
+                      <button className="mini-button active" disabled={!onlineAccount || pvpRoom.playerChatJoined} onClick={() => { void handleJoinPvpChat(); }}>Join Chat</button>
+                      <button className="mini-button" disabled={!onlineAccount || !pvpRoom.playerChatJoined} onClick={() => { void handleLeavePvpChat(); }}>Leave Chat</button>
+                      <button
+                        className="mini-button"
+                        disabled={!pvpRoom.opponentPlayerId}
+                        onClick={() => handleToggleBlockedPlayer(pvpRoom.opponentPlayerId)}
+                      >
+                        {pvpRoom.opponentPlayerId && pvpBlockedPlayerIds.includes(pvpRoom.opponentPlayerId) ? 'Unblock Player' : 'Block Player'}
+                      </button>
+                      <button className="mini-button" disabled={!pvpRoom.opponentPlayerId} onClick={() => { void handleReportPvpPlayer(); }}>Report Player</button>
+                      <button className="mini-button" disabled={!pvpVisibleChatMessages.length} onClick={savePvpChatTranscript}>Save Chat</button>
+                    </div>
+                    <label className="field compact-field">
+                      <span>Report Reason</span>
+                      <input value={pvpReportReason} onChange={(event) => setPvpReportReason(event.target.value)} placeholder="Spam, slurs, harassment..." />
+                    </label>
+                  </div>
+                </div>
+
+                <div className="subpanel battle-social-card battle-social-card-chat">
+                  <SectionHeader title="Battle Chat" subtitle="Messenger-style room chat with timestamps, simple reactions, and live banter." compact />
+                  <div className="battle-chat-feed">
+                    {pvpChatFeedMessages.length ? pvpChatFeedMessages.map((message) => {
+                      const own = message.senderPlayerId && message.senderPlayerId === pvpRoom.playerId;
+                      return (
+                        <div key={message.id} className={own ? 'battle-chat-bubble own' : 'battle-chat-bubble'}>
+                          <div className="battle-chat-meta">
+                            <strong>{message.senderName}</strong>
+                            <span>{new Date(message.createdAt).toLocaleDateString()} · {new Date(message.createdAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</span>
+                          </div>
+                          <div className="battle-chat-text">
+                            {message.emoji ? <span className="battle-chat-emoji">{message.emoji}</span> : null}
+                            {message.text ? <span>{message.text}</span> : null}
+                          </div>
+                        </div>
+                      );
+                    }) : <div className="note-row">No player messages yet. Join chat and break the ice before the next turn locks.</div>}
+                  </div>
+                  <div className="battle-chat-reactions">
+                    {['🔥', '⚡', '👏', '😮', '💀', '😂'].map((emoji) => (
+                      <button key={emoji} className="mini-button" disabled={!onlineAccount} onClick={() => { void handleSendPvpChat('', emoji); }}>{emoji}</button>
+                    ))}
+                  </div>
+                  <div className="battle-chat-compose">
+                    <input
+                      value={pvpChatInput}
+                      onChange={(event) => setPvpChatInput(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter' && pvpChatInput.trim()) {
+                          event.preventDefault();
+                          void handleSendPvpChat(pvpChatInput);
+                        }
+                      }}
+                      placeholder={onlineAccount ? 'Type your battle chat here…' : 'Sign in to use battle chat'}
+                      disabled={!onlineAccount}
+                    />
+                    <button className="action-button primary" disabled={!onlineAccount || !pvpChatInput.trim()} onClick={() => { void handleSendPvpChat(pvpChatInput); }}>Send</button>
+                  </div>
+                </div>
+
+                <div className="subpanel battle-social-card battle-social-card-log">
+                  <SectionHeader title="Battle Log" subtitle="Room entry, exit, commentary, and turn-by-turn battle calls in one vertical feed." compact />
+                  <div className="battle-log-feed">
+                    {pvpBattleFeedMessages.length ? pvpBattleFeedMessages.map((message) => (
+                      <div key={message.id} className={`battle-log-entry battle-log-entry-${message.kind}`}>
+                        <div className="battle-log-meta">
+                          <strong>{message.kind === 'announcer' ? 'Commentary' : message.senderName}</strong>
+                          <span>{new Date(message.createdAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</span>
+                        </div>
+                        <div className="battle-log-copy">{message.emoji ? `${message.emoji} ` : ''}{message.text}</div>
+                      </div>
+                    )) : <div className="note-row">Battle log updates will appear here as the room chat and commentary begin to flow.</div>}
+                  </div>
+                </div>
+
+                <div className="subpanel battle-social-card battle-social-card-mode">
+                  <SectionHeader title="Battle Mode And Outcome" subtitle="Room mode, battler records, prediction picks, and Pokemon of the game tracking." compact />
+                  <div className="battle-mode-stack">
+                    <InfoStat label="Mode" value={pvpRoom.format} />
+                    <InfoStat label="Room" value={pvpRoom.code} />
+                    <InfoStat label="Your Record" value={`${pvpRoom.playerRecord.wins}-${pvpRoom.playerRecord.losses}-${pvpRoom.playerRecord.draws} (${pvpRoom.playerRecord.winRate}%)`} />
+                    <InfoStat label={`${pvpOpponentTrainerName} Record`} value={`${pvpRoom.opponentRecord.wins}-${pvpRoom.opponentRecord.losses}-${pvpRoom.opponentRecord.draws} (${pvpRoom.opponentRecord.winRate}%)`} />
+                    <InfoStat label="Prediction" value={pvpRoom.playerWinnerPick ? (pvpRoom.playerWinnerPick === pvpRoom.seat ? 'You to win' : `${pvpOpponentTrainerName} to win`) : 'No pick yet'} />
+                    <InfoStat label="Pokemon of the Game" value={pvpProjectedStarPokemon ?? 'Waiting for a standout'} />
+                  </div>
+                  <div className="battle-mode-vote-row">
+                    <button className="mini-button active" onClick={() => { void handleVotePvpWinner(pvpRoom.seat === 'host' ? 'host' : 'guest'); }}>Pick You</button>
+                    <button className="mini-button" onClick={() => { void handleVotePvpWinner(pvpRoom.seat === 'host' ? 'guest' : 'host'); }}>Pick {pvpOpponentTrainerName}</button>
+                    <button className="mini-button" onClick={() => { void handleVotePvpWinner(null); }}>Clear Pick</button>
+                  </div>
+                  <div className="notes-list compact-scroll battle-mode-notes">
+                    <div className="note-row">Crowd read: {pvpRoom.opponentWinnerPick ? `${pvpOpponentTrainerName} has logged a win prediction.` : `${pvpOpponentTrainerName} has not made a prediction yet.`}</div>
+                    <div className="note-row">{pvpMessage ?? pvpRoom.lastActionSummary}</div>
+                    <div className="note-row">Announcer mode: {(pvpRoom.seat === 'host' ? pvpRoom.hostAnnouncerEnabled : pvpRoom.guestAnnouncerEnabled) ? 'On' : 'Off'} | Match clock: {!pvpBattleResolved ? `${Math.floor(pvpMatchCountdown / 60)}:${`${pvpMatchCountdown % 60}`.padStart(2, '0')}` : 'Ended'}</div>
+                  </div>
                 </div>
               </div>
             </section>
