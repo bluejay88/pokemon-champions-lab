@@ -942,11 +942,12 @@ function healUnit(unit: SimUnit, amount: number) {
 function tryHealUnit(state: SimulatorBattleState, unit: SimUnit, amount: number, source: string) {
   if (unit.healingPreventedTurns > 0) {
     state.log.unshift(`${unit.pokemon.displayName} could not recover HP from ${source} because healing is blocked by Psychic Noise.`);
-    return false;
+    return 0;
   }
 
+  const startingHp = unit.currentHp;
   healUnit(unit, amount);
-  return true;
+  return Math.max(0, unit.currentHp - startingHp);
 }
 
 function triggerFlinch(state: SimulatorBattleState, target: SimUnit, move: PokemonMove, chance: number) {
@@ -1223,12 +1224,13 @@ function maybeTriggerHealingBerry(state: SimulatorBattleState, unit: SimUnit) {
   }
 
   const heal = berryValue < 1 ? healAmount(unit, berryValue) : berryValue;
-  if (!tryHealUnit(state, unit, heal, item.name)) {
+  const recovered = tryHealUnit(state, unit, heal, item.name);
+  if (!recovered) {
     return false;
   }
   unit.lastConsumedItemId = unit.heldItemId;
   unit.heldItemId = null;
-  state.log.unshift(`${unit.pokemon.displayName} restored HP with ${item.name}.`);
+  state.log.unshift(`${unit.pokemon.displayName} restored ${recovered} HP with ${item.name}.`);
   return true;
 }
 
@@ -1699,6 +1701,7 @@ function switchInUnit(state: SimulatorBattleState, sideId: SideId, unitIndex: nu
   }
 
   if (actingSide.healingWishPending) {
+    const restored = Math.max(0, unit.maxHp - unit.currentHp);
     unit.currentHp = unit.maxHp;
     unit.build.status = 'healthy';
     unit.toxicCounter = 1;
@@ -1706,7 +1709,7 @@ function switchInUnit(state: SimulatorBattleState, sideId: SideId, unitIndex: nu
     unit.sleepSource = null;
     unit.freezeTurns = 0;
     actingSide.healingWishPending = false;
-    state.log.unshift(`${unit.pokemon.displayName} was restored by Healing Wish on entry.`);
+    state.log.unshift(`${unit.pokemon.displayName} was restored by Healing Wish on entry for ${restored} HP.`);
   }
 
   applySwitchInAbility(state, sideId, unit);
@@ -2230,8 +2233,9 @@ function applyStatusMove(
           ? healAmount(actor, 0.5)
           : healAmount(actor, 0.25);
     }
-    if (tryHealUnit(state, actor, amount, move.name)) {
-      state.log.unshift(`${actor.pokemon.displayName} recovered health with ${move.name}.`);
+    const recovered = tryHealUnit(state, actor, amount, move.name);
+    if (recovered) {
+      state.log.unshift(`${actor.pokemon.displayName} recovered ${recovered} HP with ${move.name}.`);
     }
     return;
   }
@@ -2245,24 +2249,29 @@ function applyStatusMove(
       state.log.unshift(`${actor.pokemon.displayName}'s Rest failed because healing is blocked by Psychic Noise.`);
       return;
     }
+    const restored = actor.maxHp - actor.currentHp;
     actor.currentHp = actor.maxHp;
     actor.build.status = 'sleep';
     actor.sleepTurns = 0;
     actor.sleepSource = 'rest';
     actor.freezeTurns = 0;
     actor.toxicCounter = 1;
-    state.log.unshift(`${actor.pokemon.displayName} fully restored itself with Rest.`);
+    state.log.unshift(`${actor.pokemon.displayName} fully restored itself with Rest (+${restored} HP).`);
     return;
   }
 
   if (move.name === 'Life Dew') {
+    const restoredTargets: string[] = [];
     for (const activeIndex of actingSide.active) {
       const unit = actingSide.units[activeIndex];
       if (unit && !unit.fainted) {
-        tryHealUnit(state, unit, healAmount(unit, 0.25), 'Life Dew');
+        const recovered = tryHealUnit(state, unit, healAmount(unit, 0.25), 'Life Dew');
+        if (recovered) {
+          restoredTargets.push(`${unit.pokemon.displayName} +${recovered}`);
+        }
       }
     }
-    state.log.unshift(`${actor.pokemon.displayName} restored its side with Life Dew.`);
+    state.log.unshift(`${actor.pokemon.displayName} restored its side with Life Dew (${restoredTargets.join(', ') || 'no HP gained'}).`);
     return;
   }
 
@@ -2274,8 +2283,9 @@ function applyStatusMove(
       state.log.unshift(`${actor.pokemon.displayName}'s Heal Pulse failed because no ally was available.`);
       return;
     }
-    if (tryHealUnit(state, ally, healAmount(ally, 0.5), 'Heal Pulse')) {
-      state.log.unshift(`${actor.pokemon.displayName} restored ${ally.pokemon.displayName} with Heal Pulse.`);
+    const recovered = tryHealUnit(state, ally, healAmount(ally, 0.5), 'Heal Pulse');
+    if (recovered) {
+      state.log.unshift(`${actor.pokemon.displayName} restored ${ally.pokemon.displayName} with Heal Pulse for ${recovered} HP.`);
     }
     return;
   }
@@ -2755,9 +2765,9 @@ function applyStatusMove(
     if (chosenTarget) {
       const stats = effectiveStatsForUnit(chosenTarget);
       const currentAttack = Math.max(1, Math.round(stats.attack * stageMultiplier(chosenTarget.build.attackStage)));
-      tryHealUnit(state, actor, currentAttack, 'Strength Sap');
+      const recovered = tryHealUnit(state, actor, currentAttack, 'Strength Sap');
       applySingleStage(chosenTarget, 'attackStage', -1);
-      state.log.unshift(`${actor.pokemon.displayName} drained strength from ${chosenTarget.pokemon.displayName}.`);
+      state.log.unshift(`${actor.pokemon.displayName} drained strength from ${chosenTarget.pokemon.displayName}${recovered ? ` and recovered ${recovered} HP` : ''}.`);
       return;
     }
   }
@@ -3248,9 +3258,9 @@ function applyStatusMove(
       return;
     }
     const healFraction = actor.stockpileLevel >= 3 ? 1 : actor.stockpileLevel === 2 ? 0.5 : 0.25;
-    tryHealUnit(state, actor, healAmount(actor, healFraction), 'Swallow');
+    const recovered = tryHealUnit(state, actor, healAmount(actor, healFraction), 'Swallow');
     actor.stockpileLevel = 0;
-    state.log.unshift(`${actor.pokemon.displayName} restored HP with Swallow.`);
+    state.log.unshift(`${actor.pokemon.displayName} restored ${recovered} HP with Swallow.`);
     return;
   }
 
@@ -3281,7 +3291,10 @@ function applyStatusMove(
         ateAnyBerry = true;
         if (healingBerries.has(item.name)) {
           const berryValue = healingBerries.get(item.name) ?? 0.25;
-          tryHealUnit(state, unit, berryValue < 1 ? healAmount(unit, berryValue) : berryValue, `${item.name} via Teatime`);
+          const recovered = tryHealUnit(state, unit, berryValue < 1 ? healAmount(unit, berryValue) : berryValue, `${item.name} via Teatime`);
+          if (recovered) {
+            state.log.unshift(`${unit.pokemon.displayName} restored ${recovered} HP with ${item.name} via Teatime.`);
+          }
         } else if (unit.build.status !== 'healthy') {
           maybeConsumeStatusBerry(state, unit);
           continue;
@@ -3925,8 +3938,9 @@ function executeDamageMove(
 
   if (drainingMoves.has(move.name) && totalDamage > 0 && !actor.fainted) {
     const recoveredHp = Math.max(1, Math.round(totalDamage * drainFractionForMove(move.name)));
-    if (tryHealUnit(state, actor, recoveredHp, move.name)) {
-      state.log.unshift(`${actor.pokemon.displayName} drained health back.`);
+    const recovered = tryHealUnit(state, actor, recoveredHp, move.name);
+    if (recovered) {
+      state.log.unshift(`${actor.pokemon.displayName} drained ${recovered} HP back with ${move.name}.`);
     }
   }
 
@@ -4091,25 +4105,40 @@ function endTurnSideEffects(state: SimulatorBattleState, side: SimSide) {
 
     if (unit.build.status === 'burn') {
       const burnRate = ability === 'Heatproof' ? 0.03125 : 0.0625;
-      lowerUnitHp(unit, Math.max(1, Math.round(unit.maxHp * burnRate)));
+      const damage = lowerUnitHp(unit, Math.max(1, Math.round(unit.maxHp * burnRate)));
+      if (damage > 0) {
+        state.log.unshift(`${unit.pokemon.displayName} took ${damage} burn damage.`);
+      }
     }
 
     if (unit.build.status === 'poison' && ability !== 'Poison Heal') {
-      lowerUnitHp(unit, Math.max(1, Math.round(unit.maxHp * 0.125)));
+      const damage = lowerUnitHp(unit, Math.max(1, Math.round(unit.maxHp * 0.125)));
+      if (damage > 0) {
+        state.log.unshift(`${unit.pokemon.displayName} took ${damage} poison damage.`);
+      }
     }
 
     if (unit.build.status === 'toxic' && ability !== 'Poison Heal') {
-      lowerUnitHp(unit, Math.max(1, Math.round(unit.maxHp * (unit.toxicCounter / 16))));
+      const damage = lowerUnitHp(unit, Math.max(1, Math.round(unit.maxHp * (unit.toxicCounter / 16))));
+      if (damage > 0) {
+        state.log.unshift(`${unit.pokemon.displayName} took ${damage} toxic damage.`);
+      }
       unit.toxicCounter += 1;
     }
 
     if ((unit.build.status === 'poison' || unit.build.status === 'toxic') && ability === 'Poison Heal') {
-      tryHealUnit(state, unit, healAmount(unit, 0.125), 'Poison Heal');
+      const recovered = tryHealUnit(state, unit, healAmount(unit, 0.125), 'Poison Heal');
+      if (recovered) {
+        state.log.unshift(`${unit.pokemon.displayName} restored ${recovered} HP with Poison Heal.`);
+      }
     }
 
     if (unit.saltCure) {
       const saltDamageRate = types.includes('Water') || types.includes('Steel') ? 0.25 : 0.125;
-      lowerUnitHp(unit, Math.max(1, Math.round(unit.maxHp * saltDamageRate)));
+      const damage = lowerUnitHp(unit, Math.max(1, Math.round(unit.maxHp * saltDamageRate)));
+      if (damage > 0) {
+        state.log.unshift(`${unit.pokemon.displayName} took ${damage} Salt Cure damage.`);
+      }
     }
 
     if (unit.bindingTurns > 0) {
@@ -4149,14 +4178,23 @@ function endTurnSideEffects(state: SimulatorBattleState, side: SimSide) {
 
     const item = activeItemForUnit(state, unit);
     if (item?.name === 'Leftovers') {
-      tryHealUnit(state, unit, healAmount(unit, 0.0625), 'Leftovers');
+      const recovered = tryHealUnit(state, unit, healAmount(unit, 0.0625), 'Leftovers');
+      if (recovered) {
+        state.log.unshift(`${unit.pokemon.displayName} restored ${recovered} HP with Leftovers.`);
+      }
     }
 
     if (item?.name === 'Black Sludge') {
       if (types.includes('Poison')) {
-        tryHealUnit(state, unit, healAmount(unit, 0.0625), 'Black Sludge');
+        const recovered = tryHealUnit(state, unit, healAmount(unit, 0.0625), 'Black Sludge');
+        if (recovered) {
+          state.log.unshift(`${unit.pokemon.displayName} restored ${recovered} HP with Black Sludge.`);
+        }
       } else {
-        lowerUnitHp(unit, Math.max(1, Math.round(unit.maxHp * 0.125)));
+        const damage = lowerUnitHp(unit, Math.max(1, Math.round(unit.maxHp * 0.125)));
+        if (damage > 0) {
+          state.log.unshift(`${unit.pokemon.displayName} took ${damage} Black Sludge damage.`);
+        }
       }
     }
 
@@ -4168,7 +4206,10 @@ function endTurnSideEffects(state: SimulatorBattleState, side: SimSide) {
       const sandImmuneTypes = new Set(['Rock', 'Ground', 'Steel']);
       const sandImmuneAbilities = new Set(['Magic Guard', 'Overcoat', 'Sand Force', 'Sand Rush', 'Sand Veil']);
       if (!types.some((type) => sandImmuneTypes.has(type)) && !sandImmuneAbilities.has(ability ?? '')) {
-        lowerUnitHp(unit, Math.max(1, Math.round(unit.maxHp * 0.0625)));
+        const damage = lowerUnitHp(unit, Math.max(1, Math.round(unit.maxHp * 0.0625)));
+        if (damage > 0) {
+          state.log.unshift(`${unit.pokemon.displayName} took ${damage} sandstorm damage.`);
+        }
       }
     }
 
@@ -4177,24 +4218,39 @@ function endTurnSideEffects(state: SimulatorBattleState, side: SimSide) {
     }
 
     if (side.active.includes(side.units.indexOf(unit)) && state.environment.terrain === 'grassy' && unitGroundedInState(state, unit)) {
-      tryHealUnit(state, unit, healAmount(unit, 0.0625), 'Grassy Terrain');
+      const recovered = tryHealUnit(state, unit, healAmount(unit, 0.0625), 'Grassy Terrain');
+      if (recovered) {
+        state.log.unshift(`${unit.pokemon.displayName} restored ${recovered} HP with Grassy Terrain.`);
+      }
     }
 
     if (unit.aquaRing) {
-      tryHealUnit(state, unit, healAmount(unit, 0.0625), 'Aqua Ring');
+      const recovered = tryHealUnit(state, unit, healAmount(unit, 0.0625), 'Aqua Ring');
+      if (recovered) {
+        state.log.unshift(`${unit.pokemon.displayName} restored ${recovered} HP with Aqua Ring.`);
+      }
     }
 
     if (unit.ingrain) {
-      tryHealUnit(state, unit, healAmount(unit, 0.0625), 'Ingrain');
+      const recovered = tryHealUnit(state, unit, healAmount(unit, 0.0625), 'Ingrain');
+      if (recovered) {
+        state.log.unshift(`${unit.pokemon.displayName} restored ${recovered} HP with Ingrain.`);
+      }
     }
 
     if (unit.seededBySideId && !typeListForUnit(state, unit).includes('Grass')) {
       const leeched = Math.max(1, Math.round(unit.maxHp * 0.125));
-      lowerUnitHp(unit, leeched);
+      const damage = lowerUnitHp(unit, leeched);
+      if (damage > 0) {
+        state.log.unshift(`${unit.pokemon.displayName} took ${damage} Leech Seed damage.`);
+      }
       const healingSide = sideForId(state, unit.seededBySideId);
       const healingTarget = healingSide.active.map((unitIndex) => healingSide.units[unitIndex]).find((candidate) => candidate && !candidate.fainted) ?? null;
       if (healingTarget) {
-        tryHealUnit(state, healingTarget, leeched, 'Leech Seed');
+        const recovered = tryHealUnit(state, healingTarget, leeched, 'Leech Seed');
+        if (recovered) {
+          state.log.unshift(`${healingTarget.pokemon.displayName} restored ${recovered} HP with Leech Seed.`);
+        }
       }
     }
 
@@ -4251,8 +4307,9 @@ function endTurnSideEffects(state: SimulatorBattleState, side: SimSide) {
       const receiverIndex = side.active[wish.activeSlot];
       const receiver = typeof receiverIndex === 'number' ? side.units[receiverIndex] ?? null : null;
       if (receiver && !receiver.fainted) {
-        if (tryHealUnit(state, receiver, wish.healAmount, 'Wish')) {
-          state.log.unshift(`${receiver.pokemon.displayName} received a delayed Wish heal.`);
+        const recovered = tryHealUnit(state, receiver, wish.healAmount, 'Wish');
+        if (recovered) {
+          state.log.unshift(`${receiver.pokemon.displayName} received ${recovered} HP from Wish.`);
         }
       }
       return false;

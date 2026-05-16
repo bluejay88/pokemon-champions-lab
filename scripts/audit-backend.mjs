@@ -612,6 +612,14 @@ assert.equal(
   'Burn should deal one-sixteenth max HP at the end of the turn.',
 );
 assert.ok(residualBattle.opponent.units[0].currentHp > leftoversStartHp, 'Leftovers should heal its holder automatically at the end of the turn.');
+assert.ok(
+  residualBattle.log.some((entry) => /took \d+ burn damage\./.test(entry)),
+  'Burn chip should be called out in the log with the exact HP loss.',
+);
+assert.ok(
+  residualBattle.log.some((entry) => /restored \d+ HP with Leftovers\./.test(entry)),
+  'Leftovers healing should be called out in the log with the exact HP gain.',
+);
 
 let heatproofBurnBattle = buildBattle(
   'Singles',

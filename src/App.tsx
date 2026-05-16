@@ -127,6 +127,8 @@ type BattlefieldPlaybackEvent = {
   actorName?: string | null;
   targetName?: string | null;
   moveName?: string | null;
+  actorBadge?: string | null;
+  targetBadge?: string | null;
 };
 type BattlefieldSlotModel = {
   key: string;
@@ -145,6 +147,13 @@ type BattlefieldConditionSection = {
   label: string;
   tags: BattleTag[];
 };
+type BattlePlaybackStep = {
+  id: string;
+  entry: string;
+  event: BattlefieldPlaybackEvent | null;
+  announcerLine: string | null;
+  holdMs: number;
+};
 
 let battleCoreRuntimeCache: BattleCoreRuntime | null = null;
 let battleCoreRuntimePromise: Promise<BattleCoreRuntime> | null = null;
@@ -157,6 +166,10 @@ const ONLINE_SESSION_STORAGE_KEY = 'pokemon-champions-lab-online-session';
 const LOCAL_PRESENCE_STORAGE_KEY = 'pokemon-champions-lab-presence-v1';
 const ACTIVE_PRESENCE_WINDOW_MS = 90_000;
 const NETLIFY_FUNCTION_ENDPOINT = '/.netlify/functions/arena';
+const ATTACK_PLAYBACK_HOLD_MS = 8000;
+const FIELD_PLAYBACK_HOLD_MS = 2600;
+const TURN_PLAYBACK_HOLD_MS = 1800;
+const BATTLEFIELD_EVENT_PULSE_MS = 2400;
 const fallbackUsageInsight: UsageInsight = {
   label: 'UU',
   reason: 'Usage insight is still loading for this surface.',
@@ -1943,11 +1956,42 @@ function recentBattleLogEntries(currentLog: string[], previousLog: string[] | nu
   return currentLog.slice(0, Math.min(limit, fallbackDelta));
 }
 
+function playbackHoldForEntry(entry: string) {
+  if (/used .+ on .+ for \d+ damage|was knocked out by|was afflicted by|blocked .+ with|missed .+|restored \d+ HP|recovered \d+ HP|received \d+ HP|drained \d+ HP back|took \d+ .+ damage|Mega Evolved|set .* terrain|changed the weather|called in snow|twisted the dimensions|returned the dimensions to normal/i.test(entry)) {
+    return ATTACK_PLAYBACK_HOLD_MS;
+  }
+  if (/Turn \d+ ended|replacement send-outs are complete|sent out | switched out /i.test(entry)) {
+    return FIELD_PLAYBACK_HOLD_MS;
+  }
+  return TURN_PLAYBACK_HOLD_MS;
+}
+
 function battleNamePool(battle: SimulatorBattleState) {
   return [...battle.player.units, ...battle.opponent.units]
     .map((unit) => unit?.pokemon.displayName)
     .filter((name): name is string => Boolean(name))
     .sort((left, right) => right.length - left.length);
+}
+
+function battlefieldStageShortLabel(label: string) {
+  switch (label) {
+    case 'Attack':
+      return 'Atk';
+    case 'Defense':
+      return 'Def';
+    case 'Sp. Atk':
+      return 'SpA';
+    case 'Sp. Def':
+      return 'SpD';
+    case 'Speed':
+      return 'Spe';
+    case 'Accuracy':
+      return 'Acc';
+    case 'Evasion':
+      return 'Eva';
+    default:
+      return label;
+  }
 }
 
 function parseBattlefieldPlaybackEvent(entries: string[], battle: SimulatorBattleState): BattlefieldPlaybackEvent | null {
@@ -1967,6 +2011,7 @@ function parseBattlefieldPlaybackEvent(entries: string[], battle: SimulatorBattl
         message: entry,
         actorName: fallbackName(entry),
         moveName: abilityMatch[2],
+        actorBadge: 'Ability',
       };
     }
 
@@ -1978,6 +2023,7 @@ function parseBattlefieldPlaybackEvent(entries: string[], battle: SimulatorBattl
         message: entry,
         actorName: abilityKickInMatch[1],
         moveName: abilityKickInMatch[2],
+        actorBadge: abilityKickInMatch[2],
       };
     }
 
@@ -1990,6 +2036,7 @@ function parseBattlefieldPlaybackEvent(entries: string[], battle: SimulatorBattl
         actorName: koMatch[2],
         targetName: koMatch[1],
         moveName: koMatch[3],
+        targetBadge: 'KO',
       };
     }
 
@@ -2002,6 +2049,7 @@ function parseBattlefieldPlaybackEvent(entries: string[], battle: SimulatorBattl
         actorName: hitMatch[1],
         targetName: hitMatch[3],
         moveName: hitMatch[2],
+        targetBadge: `Hit -${hitMatch[4]} HP`,
       };
     }
 
@@ -2014,6 +2062,7 @@ function parseBattlefieldPlaybackEvent(entries: string[], battle: SimulatorBattl
         actorName: missMatch[1],
         targetName: missMatch[3],
         moveName: missMatch[2],
+        targetBadge: 'Miss',
       };
     }
 
@@ -2026,6 +2075,93 @@ function parseBattlefieldPlaybackEvent(entries: string[], battle: SimulatorBattl
         actorName: fallbackName(entry),
         targetName: statusMatch[1],
         moveName: statusMatch[2],
+        targetBadge: statusMatch[3].toUpperCase(),
+      };
+    }
+
+    const healMatch = entry.match(/^(.+?) (?:restored|recovered|received) (\d+) HP (?:with|from) (.+?)\.$/);
+    if (healMatch) {
+      return {
+        id: makeId('battlefield-event'),
+        tone: /Wish|Terrain|Aqua Ring|Ingrain|Leech Seed|Leftovers|Black Sludge|Berry|Poison Heal|Healing Wish/i.test(healMatch[3]) ? 'field' : 'status',
+        message: entry,
+        actorName: healMatch[1],
+        moveName: healMatch[3],
+        actorBadge: `+${healMatch[2]} HP`,
+      };
+    }
+
+    const healPulseMatch = entry.match(/^(.+?) restored (.+?) with Heal Pulse for (\d+) HP\.$/);
+    if (healPulseMatch) {
+      return {
+        id: makeId('battlefield-event'),
+        tone: 'status',
+        message: entry,
+        actorName: healPulseMatch[1],
+        targetName: healPulseMatch[2],
+        moveName: 'Heal Pulse',
+        targetBadge: `+${healPulseMatch[3]} HP`,
+      };
+    }
+
+    const drainMatch = entry.match(/^(.+?) drained (\d+) HP back with (.+?)\.$/);
+    if (drainMatch) {
+      return {
+        id: makeId('battlefield-event'),
+        tone: 'status',
+        message: entry,
+        actorName: drainMatch[1],
+        moveName: drainMatch[3],
+        actorBadge: `+${drainMatch[2]} HP`,
+      };
+    }
+
+    const residualMatch = entry.match(/^(.+?) took (\d+) (.+?) damage\.$/);
+    if (residualMatch) {
+      const source = residualMatch[3];
+      return {
+        id: makeId('battlefield-event'),
+        tone: /(burn|poison|toxic|sandstorm|salt cure|binding|leech seed)/i.test(source) ? 'status' : 'impact',
+        message: entry,
+        targetName: residualMatch[1],
+        moveName: source,
+        targetBadge: `${source} -${residualMatch[2]} HP`,
+      };
+    }
+
+    const recoilMatch = entry.match(/^(.+?) took (\d+) recoil from (.+?)\.$/);
+    if (recoilMatch) {
+      return {
+        id: makeId('battlefield-event'),
+        tone: 'impact',
+        message: entry,
+        targetName: recoilMatch[1],
+        moveName: recoilMatch[3],
+        targetBadge: `Recoil -${recoilMatch[2]} HP`,
+      };
+    }
+
+    const confusionMatch = entry.match(/^(.+?) hurt itself in confusion for (\d+) damage\.$/);
+    if (confusionMatch) {
+      return {
+        id: makeId('battlefield-event'),
+        tone: 'status',
+        message: entry,
+        targetName: confusionMatch[1],
+        moveName: 'Confusion',
+        targetBadge: `Confusion -${confusionMatch[2]} HP`,
+      };
+    }
+
+    const stageDropMatch = entry.match(/^(.+?)'s (Attack|Defense|Sp\. Atk|Sp\. Def|Speed|Accuracy|Evasion)( sharply)? fell because of (.+?)\.$/);
+    if (stageDropMatch) {
+      return {
+        id: makeId('battlefield-event'),
+        tone: 'status',
+        message: entry,
+        targetName: stageDropMatch[1],
+        moveName: stageDropMatch[4],
+        targetBadge: `${battlefieldStageShortLabel(stageDropMatch[2])} -${stageDropMatch[3] ? '2' : '1'}`,
       };
     }
 
@@ -2036,8 +2172,8 @@ function parseBattlefieldPlaybackEvent(entries: string[], battle: SimulatorBattl
         tone: 'guard',
         message: entry,
         actorName: guardMatch[1],
-        targetName: guardMatch[1],
-        moveName: guardMatch[2],
+        moveName: guardMatch[3],
+        actorBadge: 'Blocked',
       };
     }
 
@@ -2049,6 +2185,7 @@ function parseBattlefieldPlaybackEvent(entries: string[], battle: SimulatorBattl
         message: entry,
         actorName: switchMatch[1],
         targetName: switchMatch[2],
+        targetBadge: 'Switch In',
       };
     }
 
@@ -2059,6 +2196,7 @@ function parseBattlefieldPlaybackEvent(entries: string[], battle: SimulatorBattl
         tone: 'switch',
         message: entry,
         targetName: sentOutMatch[1],
+        targetBadge: 'On Field',
       };
     }
 
@@ -2077,6 +2215,114 @@ function parseBattlefieldPlaybackEvent(entries: string[], battle: SimulatorBattl
     tone: 'field',
     message: entries[0],
     actorName: fallbackName(entries[0]),
+  };
+}
+
+function announcerLineFromBattleEntry(entry: string, current: SimulatorBattleState, style: AnnouncerStyle) {
+  let line: string | null = null;
+  const switchMatch = entry.match(/sent out (.+)\.$/i);
+  const hitMatch = entry.match(/^(.+?) used (.+?) on (.+?) for (\d+) damage\.$/);
+  const superMatch = entry.match(/^It's super effective against (.+)\.$/);
+  const resistMatch = entry.match(/^(.+?) resisted the hit\.$/);
+  const missMatch = entry.match(/^(.+?)'s (.+?) missed (.+?)\.$/);
+  const statusMatch = entry.match(/^(.+?) was afflicted by (.+?) \((.+?)\)\.$/);
+  const koMatch = entry.match(/^(.+?) was knocked out by (.+?) using (.+?)\.$/);
+  const legacyKoMatch = entry.match(/^(.+?) was knocked out\.$/);
+  const abilityCueMatch = entry.match(/^(.+?) (?:set .+ with|boosted .+ with|lowered .+ with|stood firm against .+ with|ignored .+ because of) (.+?)\.$/);
+  const abilityKickInMatch = entry.match(/^(.+?)'s ability (.+?) kicks in and (.+?)\.$/);
+  const healMatch = entry.match(/^(.+?) (?:restored|recovered|received) (\d+) HP (?:with|from) (.+?)\.$/);
+  const healPulseMatch = entry.match(/^(.+?) restored (.+?) with Heal Pulse for (\d+) HP\.$/);
+  const drainMatch = entry.match(/^(.+?) drained (\d+) HP back with (.+?)\.$/);
+  const residualMatch = entry.match(/^(.+?) took (\d+) (.+?) damage\.$/);
+  const statDropMatch = entry.match(/^(.+?)'s (Attack|Defense|Sp\. Atk|Sp\. Def|Speed|Accuracy|Evasion)( sharply)? fell because of (.+?)\.$/);
+  const turnMatch = entry.match(/^Turn (\d+) ended\./);
+
+  if (hitMatch) {
+    line = fillAnnouncerLine(pickLine(announcerScripts.hit), { pokemon: hitMatch[1], move: hitMatch[2], target: hitMatch[3] });
+  } else if (superMatch) {
+    line = fillAnnouncerLine(pickLine(announcerScripts.super), { target: superMatch[1] });
+  } else if (resistMatch) {
+    line = fillAnnouncerLine(pickLine(announcerScripts.resist), { target: resistMatch[1] });
+  } else if (missMatch) {
+    line = fillAnnouncerLine(pickLine(announcerScripts.miss), { pokemon: missMatch[1], move: missMatch[2], target: missMatch[3] });
+  } else if (statusMatch) {
+    line = fillAnnouncerLine(pickLine(announcerScripts.status), { source: statusMatch[2], status: statusMatch[3], target: statusMatch[1] });
+  } else if (koMatch) {
+    line = fillAnnouncerLine(pickLine(announcerScripts.ko), { target: koMatch[1], attacker: koMatch[2], move: koMatch[3], pokemon: koMatch[2] });
+  } else if (legacyKoMatch) {
+    line = fillAnnouncerLine(pickLine(announcerScripts.ko), { target: legacyKoMatch[1], attacker: 'the attacker', move: 'the finishing move', pokemon: 'the attacker' });
+  } else if (healPulseMatch) {
+    line = `${healPulseMatch[1]} tops ${healPulseMatch[2]} back up with Heal Pulse for ${healPulseMatch[3]} HP.`;
+  } else if (healMatch) {
+    line = `${healMatch[1]} gets ${healMatch[2]} HP back with ${healMatch[3]}.`;
+  } else if (drainMatch) {
+    line = `${drainMatch[1]} siphons back ${drainMatch[2]} HP with ${drainMatch[3]}.`;
+  } else if (residualMatch) {
+    line = `${residualMatch[3]} chips ${residualMatch[1]} for ${residualMatch[2]} HP.`;
+  } else if (statDropMatch) {
+    line = `${statDropMatch[1]}'s ${statDropMatch[2]} drops from ${statDropMatch[4]}.`;
+  } else if (abilityKickInMatch) {
+    line = `${abilityKickInMatch[1]}'s ${abilityKickInMatch[2]} activates. ${abilityKickInMatch[3]}.`;
+  } else if (abilityCueMatch) {
+    line = `${abilityCueMatch[1]} triggers ${abilityCueMatch[2]}, and the board shifts around it.`;
+  } else if (switchMatch) {
+    line = fillAnnouncerLine(pickLine(announcerScripts.switch), { pokemon: switchMatch[1] });
+  } else if (/blocked .+ with|braced itself with|set Quick Guard|set Wide Guard/i.test(entry)) {
+    line = fillAnnouncerLine(pickLine(announcerScripts.protect), { pokemon: entry.split(' ')[0] });
+  } else if (/replacement send-outs are complete/i.test(entry)) {
+    line = 'Fresh replacements are on the field. The next exchange is ready.';
+  } else if (turnMatch) {
+    line = fillAnnouncerLine(pickLine(announcerScripts.turn), { turn: Number(turnMatch[1]) + 1 });
+  } else if (/Mega Evolved|set .* terrain|changed the weather|called in snow|twisted the dimensions|returned the dimensions to normal/i.test(entry)) {
+    line = entry;
+  } else if (/woke up|thawed out|is fully paralyzed|is asleep|is frozen solid/i.test(entry)) {
+    line = entry;
+  }
+
+  return line ? announcerStyleLine(style, announcerReplaceCustomNames(line, current)) : null;
+}
+
+function announcerWrapUpLines(current: SimulatorBattleState, style: AnnouncerStyle) {
+  const lines: string[] = [];
+  if (current.winner) {
+    const performers = topBattlePerformers(current);
+    lines.push(
+      announcerStyleLine(
+        style,
+        fillAnnouncerLine(pickLine(announcerScripts.finish), {
+          winner: current.winner === 'player' ? current.player.name : current.opponent.name,
+        }),
+      ),
+    );
+    if (performers[0]) {
+      lines.push(
+        announcerStyleLine(
+          style,
+          fillAnnouncerLine(pickLine(announcerScripts.star), {
+            pokemon: performers[0].name,
+          }),
+        ),
+      );
+    }
+  } else if (current.stage === 'finished') {
+    lines.push(announcerStyleLine(style, 'Time is up, and this battle ends as a draw.'));
+  }
+  return lines;
+}
+
+function playbackStepsFromBattleUpdate(previous: SimulatorBattleState | null, current: SimulatorBattleState, style: AnnouncerStyle) {
+  const previousLength = previous?.log.length ?? 0;
+  const newEntries = current.log.slice(0, Math.max(0, current.log.length - previousLength)).reverse();
+  const steps = newEntries.map((entry) => ({
+    id: makeId('battle-step'),
+    entry,
+    event: parseBattlefieldPlaybackEvent([entry], current),
+    announcerLine: announcerLineFromBattleEntry(entry, current, style),
+    holdMs: playbackHoldForEntry(entry),
+  } satisfies BattlePlaybackStep));
+  return {
+    steps,
+    wrapUp: current.stage === 'finished' ? announcerWrapUpLines(current, style) : [],
   };
 }
 
@@ -2575,81 +2821,12 @@ function announcerLinesFromBattleUpdate(previous: SimulatorBattleState | null, c
   const newEntries = current.log.slice(0, Math.max(0, current.log.length - previousLength)).reverse();
 
   for (const entry of newEntries) {
-    let line: string | null = null;
-    const switchMatch = entry.match(/sent out (.+)\.$/i);
-    const hitMatch = entry.match(/^(.+?) used (.+?) on (.+?) for (\d+) damage\.$/);
-    const superMatch = entry.match(/^It's super effective against (.+)\.$/);
-    const resistMatch = entry.match(/^(.+?) resisted the hit\.$/);
-    const missMatch = entry.match(/^(.+?)'s (.+?) missed (.+?)\.$/);
-    const statusMatch = entry.match(/^(.+?) was afflicted by (.+?) \((.+?)\)\.$/);
-    const koMatch = entry.match(/^(.+?) was knocked out by (.+?) using (.+?)\.$/);
-    const legacyKoMatch = entry.match(/^(.+?) was knocked out\.$/);
-    const abilityCueMatch = entry.match(/^(.+?) (?:set .+ with|boosted .+ with|lowered .+ with|stood firm against .+ with|ignored .+ because of) (.+?)\.$/);
-    const abilityKickInMatch = entry.match(/^(.+?)'s ability (.+?) kicks in and (.+?)\.$/);
-    const turnMatch = entry.match(/^Turn (\d+) ended\./);
-
-    if (hitMatch) {
-      line = fillAnnouncerLine(pickLine(announcerScripts.hit), { pokemon: hitMatch[1], move: hitMatch[2], target: hitMatch[3] });
-    } else if (superMatch) {
-      line = fillAnnouncerLine(pickLine(announcerScripts.super), { target: superMatch[1] });
-    } else if (resistMatch) {
-      line = fillAnnouncerLine(pickLine(announcerScripts.resist), { target: resistMatch[1] });
-    } else if (missMatch) {
-      line = fillAnnouncerLine(pickLine(announcerScripts.miss), { pokemon: missMatch[1], move: missMatch[2], target: missMatch[3] });
-    } else if (statusMatch) {
-      line = fillAnnouncerLine(pickLine(announcerScripts.status), { source: statusMatch[2], status: statusMatch[3], target: statusMatch[1] });
-    } else if (koMatch) {
-      line = fillAnnouncerLine(pickLine(announcerScripts.ko), { target: koMatch[1], attacker: koMatch[2], move: koMatch[3], pokemon: koMatch[2] });
-    } else if (legacyKoMatch) {
-      line = fillAnnouncerLine(pickLine(announcerScripts.ko), { target: legacyKoMatch[1], attacker: 'the attacker', move: 'the finishing move', pokemon: 'the attacker' });
-    } else if (abilityKickInMatch) {
-      line = `${abilityKickInMatch[1]}'s ${abilityKickInMatch[2]} just activated, and ${abilityKickInMatch[3]}.`;
-    } else if (abilityCueMatch) {
-      line = `${abilityCueMatch[1]} just triggered ${abilityCueMatch[2]}, and the board is shifting around it.`;
-    } else if (switchMatch) {
-      line = fillAnnouncerLine(pickLine(announcerScripts.switch), { pokemon: switchMatch[1] });
-    } else if (/blocked .+ with|braced itself with|set Quick Guard|set Wide Guard/i.test(entry)) {
-      line = fillAnnouncerLine(pickLine(announcerScripts.protect), { pokemon: entry.split(' ')[0] });
-    } else if (/replacement send-outs are complete/i.test(entry)) {
-      line = 'Fresh replacements are on the field now, and the next exchange is about to begin.';
-    } else if (turnMatch) {
-      line = fillAnnouncerLine(pickLine(announcerScripts.turn), { turn: Number(turnMatch[1]) + 1 });
-    } else if (/Mega Evolved|set .* terrain|changed the weather|called in snow|twisted the dimensions|returned the dimensions to normal/i.test(entry)) {
-      line = entry;
-    } else if (/woke up|thawed out|is fully paralyzed|is asleep|is frozen solid/i.test(entry)) {
-      line = entry;
-    }
-
+    const line = announcerLineFromBattleEntry(entry, current, style);
     if (line) {
-      lines.push(announcerStyleLine(style, announcerReplaceCustomNames(line, current)));
+      lines.push(line);
     }
   }
-
-  if (current.winner) {
-    const performers = topBattlePerformers(current);
-    lines.push(
-      announcerStyleLine(
-        style,
-        fillAnnouncerLine(pickLine(announcerScripts.finish), {
-          winner: current.winner === 'player' ? current.player.name : current.opponent.name,
-        }),
-      ),
-    );
-    if (performers[0]) {
-      lines.push(
-        announcerStyleLine(
-          style,
-          fillAnnouncerLine(pickLine(announcerScripts.star), {
-            pokemon: performers[0].name,
-          }),
-        ),
-      );
-    }
-  } else if (current.stage === 'finished') {
-    lines.push(announcerStyleLine(style, 'Time is up, and this battle ends as a draw.'));
-  }
-
-  return lines;
+  return [...lines, ...announcerWrapUpLines(current, style)];
 }
 
 function App() {
@@ -2695,6 +2872,7 @@ function App() {
   const [simAnnouncerRate, setSimAnnouncerRate] = useState(1);
   const [simAnnouncerFeed, setSimAnnouncerFeed] = useState<string[]>([]);
   const [simBattlefieldEvent, setSimBattlefieldEvent] = useState<BattlefieldPlaybackEvent | null>(null);
+  const [simVisibleBattleLog, setSimVisibleBattleLog] = useState<string[]>([]);
   const [simTurnReviews, setSimTurnReviews] = useState<SimulatorTurnReview[]>([]);
   const [simCountdown, setSimCountdown] = useState(0);
   const [simPreviewMessage, setSimPreviewMessage] = useState<string | null>(null);
@@ -2715,6 +2893,7 @@ function App() {
   const [pvpMessage, setPvpMessage] = useState<string | null>(null);
   const [pvpAnnouncerFeed, setPvpAnnouncerFeed] = useState<string[]>([]);
   const [pvpBattlefieldEvent, setPvpBattlefieldEvent] = useState<BattlefieldPlaybackEvent | null>(null);
+  const [pvpVisibleBattleLog, setPvpVisibleBattleLog] = useState<string[]>([]);
   const [pvpRoomHistory, setPvpRoomHistory] = useState<OnlineBattleRoomHistoryEntry[]>([]);
   const [pvpHistorySearch, setPvpHistorySearch] = useState('');
   const [pvpChatInput, setPvpChatInput] = useState('');
@@ -2736,6 +2915,8 @@ function App() {
   const previousPvpStageRef = useRef<string | null>(null);
   const recordedBattleKeyRef = useRef<string | null>(null);
   const recordedPvpBattleKeyRef = useRef<string | null>(null);
+  const simPlaybackTimersRef = useRef<number[]>([]);
+  const pvpPlaybackTimersRef = useRef<number[]>([]);
 
   const team = activeTeamFromState(state);
   const analysis = analyzeTeam(team);
@@ -3289,6 +3470,66 @@ function App() {
     </div>
   ));
 
+  function clearPlaybackTimers(timerRef: { current: number[] }) {
+    timerRef.current.forEach((handle) => window.clearTimeout(handle));
+    timerRef.current = [];
+  }
+
+  function scheduleBattlePlayback(
+    steps: BattlePlaybackStep[],
+    wrapUp: string[],
+    battle: SimulatorBattleState,
+    style: AnnouncerStyle,
+    timerRef: { current: number[] },
+    setVisibleLog: (value: string[] | ((current: string[]) => string[])) => void,
+    setEvent: (value: BattlefieldPlaybackEvent | null | ((current: BattlefieldPlaybackEvent | null) => BattlefieldPlaybackEvent | null)) => void,
+    setFeed: (value: string[] | ((current: string[]) => string[])) => void,
+    rate: number,
+    announcerEnabled = true,
+  ) {
+    clearPlaybackTimers(timerRef);
+    if (!steps.length && !wrapUp.length) {
+      return;
+    }
+
+    let offset = 0;
+    steps.forEach((step, index) => {
+      const playbackHandle = window.setTimeout(() => {
+        setVisibleLog((current) => [step.entry, ...current].slice(0, 60));
+        if (step.event) {
+          const eventWithFreshId = { ...step.event, id: `${step.id}-event` };
+          setEvent(eventWithFreshId);
+          const clearHandle = window.setTimeout(() => {
+            setEvent((current) => current?.id === eventWithFreshId.id ? null : current);
+          }, Math.min(BATTLEFIELD_EVENT_PULSE_MS, Math.max(1600, step.holdMs - 700)));
+          timerRef.current.push(clearHandle);
+        }
+        if (announcerEnabled && step.announcerLine) {
+          setFeed((current) => [step.announcerLine!, ...current].slice(0, 18));
+          speakAnnouncerLines([step.announcerLine], rate, index === 0);
+        }
+      }, offset);
+      timerRef.current.push(playbackHandle);
+      offset += step.holdMs;
+    });
+
+    if (announcerEnabled && wrapUp.length) {
+      const wrapHandle = window.setTimeout(() => {
+        setFeed((current) => [...wrapUp.slice().reverse(), ...current].slice(0, 18));
+        speakAnnouncerLines(wrapUp, rate, false);
+      }, offset + 320);
+      timerRef.current.push(wrapHandle);
+    }
+
+    const hydrationHandle = window.setTimeout(() => {
+      setVisibleLog((current) => {
+        const merged = [...battle.log].reverse();
+        return merged.slice(0, 60);
+      });
+    }, offset + 420);
+    timerRef.current.push(hydrationHandle);
+  }
+
   useEffect(() => {
     const heavyTabs: BattleTab[] = ['damage-lab', 'pokedex', 'simulator', 'pvp-battles', 'profile'];
     const shouldLoadBattleCore =
@@ -3465,28 +3706,36 @@ function App() {
 
   useEffect(() => {
     if (!simBattle) {
+      clearPlaybackTimers(simPlaybackTimersRef);
       previousBattleRef.current = null;
       recordedBattleKeyRef.current = null;
       setSimBattlefieldEvent(null);
+      setSimVisibleBattleLog([]);
       setSimTurnClock(30);
       return;
     }
 
-    if (simBattle.stage === 'battle' && !simBattle.winner) {
+    if (simBattle.stage === 'battle' && !simBattle.winner && previousBattleRef.current?.turn !== simBattle.turn) {
       pushAnnouncerLines([
         announcerStyleLine(simAnnouncerStyle, fillAnnouncerLine(pickLine(announcerScripts.turn), { turn: simBattle.turn })),
       ]);
     }
 
     const previousBattle = previousBattleRef.current;
-    const recentEntries = recentBattleLogEntries(simBattle.log, previousBattle?.log ?? null);
-    const nextBattlefieldEvent = parseBattlefieldPlaybackEvent(recentEntries, simBattle);
-    if (nextBattlefieldEvent) {
-      setSimBattlefieldEvent(nextBattlefieldEvent);
-    }
-    const commentaryLines = announcerLinesFromBattleUpdate(previousBattle, simBattle, simAnnouncerStyle);
-    if (commentaryLines.length) {
-      pushAnnouncerLines(commentaryLines, Boolean(simBattle.winner) || simBattle.stage === 'finished');
+    const { steps, wrapUp } = playbackStepsFromBattleUpdate(previousBattle, simBattle, simAnnouncerStyle);
+    if (steps.length || wrapUp.length) {
+      scheduleBattlePlayback(
+        steps,
+        wrapUp,
+        simBattle,
+        simAnnouncerStyle,
+        simPlaybackTimersRef,
+        setSimVisibleBattleLog,
+        setSimBattlefieldEvent,
+        setSimAnnouncerFeed,
+        simAnnouncerRate,
+        simAnnouncerEnabled,
+      );
     }
 
     if (simBattle.stage === 'finished') {
@@ -3518,7 +3767,7 @@ function App() {
     }
 
     previousBattleRef.current = simBattle;
-  }, [simBattle, simAnnouncerEnabled, simAnnouncerStyle, simTurnTimerEnabled, team.name]);
+  }, [simBattle, simAnnouncerEnabled, simAnnouncerRate, simAnnouncerStyle, simTurnTimerEnabled, team.name]);
 
   useEffect(() => {
     if (!simBattle || simBattle.stage !== 'battle' || simBattle.winner) {
@@ -3546,23 +3795,30 @@ function App() {
 
   useEffect(() => {
     if (!pvpRoom || !onlineAccount) {
+      clearPlaybackTimers(pvpPlaybackTimersRef);
       previousPvpBattleRef.current = null;
       recordedPvpBattleKeyRef.current = null;
       setPvpBattlefieldEvent(null);
+      setPvpVisibleBattleLog([]);
       return;
     }
 
     if (pvpRoom.battle) {
       const pvpAnnouncerEnabled = pvpRoom.seat === 'host' ? pvpRoom.hostAnnouncerEnabled : pvpRoom.guestAnnouncerEnabled;
-      const recentEntries = recentBattleLogEntries(pvpRoom.battle.log, previousPvpBattleRef.current?.log ?? null);
-      const nextBattlefieldEvent = parseBattlefieldPlaybackEvent(recentEntries, pvpRoom.battle);
-      if (nextBattlefieldEvent) {
-        setPvpBattlefieldEvent(nextBattlefieldEvent);
-      }
-      const pvpLines = announcerLinesFromBattleUpdate(previousPvpBattleRef.current, pvpRoom.battle, 'Arena');
-      if (pvpAnnouncerEnabled && pvpLines.length) {
-        setPvpAnnouncerFeed((current) => [...pvpLines.slice().reverse(), ...current].slice(0, 16));
-        speakAnnouncerLines(pvpLines, 1, Boolean(pvpRoom.battle.winner) || pvpRoom.stage === 'finished');
+      const { steps, wrapUp } = playbackStepsFromBattleUpdate(previousPvpBattleRef.current, pvpRoom.battle, 'Arena');
+      if (steps.length || wrapUp.length) {
+        scheduleBattlePlayback(
+          steps,
+          pvpAnnouncerEnabled ? wrapUp : [],
+          pvpRoom.battle,
+          'Arena',
+          pvpPlaybackTimersRef,
+          setPvpVisibleBattleLog,
+          setPvpBattlefieldEvent,
+          setPvpAnnouncerFeed,
+          1,
+          pvpAnnouncerEnabled,
+        );
       }
 
       if (pvpRoom.stage === 'finished') {
@@ -3591,11 +3847,6 @@ function App() {
             },
           }));
           setSelectedReplayId(record.id);
-          if (pvpAnnouncerEnabled && !pvpLines.length) {
-            const wrapUpLines = announcerLinesFromBattleUpdate(null, pvpRoom.battle, 'Arena');
-            setPvpAnnouncerFeed((current) => [...wrapUpLines.slice().reverse(), ...current].slice(0, 16));
-            speakAnnouncerLines(wrapUpLines, 1, true);
-          }
           recordedPvpBattleKeyRef.current = battleKey;
         }
       }
@@ -5588,7 +5839,7 @@ function App() {
                       ) : null}
                       <div className="notes-list scroll-stack sim-log">
                         <div className="sim-log-turn-banner">{simBattleResolved ? `Final Turn ${simBattle.turn}` : `Turn ${simBattle.turn} Battle Log`}</div>
-                        {[...simBattle.log].reverse().map((entry, index) => (
+                        {(simVisibleBattleLog.length ? simVisibleBattleLog : [...simBattle.log].reverse()).map((entry, index) => (
                           <div key={`${entry}-${index}`} className="note-row sim-log-entry">{entry}</div>
                         ))}
                       </div>
@@ -5839,7 +6090,7 @@ function App() {
                       </div>
                       <div className="notes-list scroll-stack sim-log">
                         <div className="sim-log-turn-banner">{pvpBattleResolved ? `Final Turn ${pvpRoom.battle.turn}` : `Turn ${pvpRoom.battle.turn} Battle Log`}</div>
-                        {[...pvpRoom.battle.log].reverse().map((entry, index) => (
+                        {(pvpVisibleBattleLog.length ? pvpVisibleBattleLog : [...pvpRoom.battle.log].reverse()).map((entry, index) => (
                           <div key={`${entry}-${index}`} className="note-row sim-log-entry">{entry}</div>
                         ))}
                       </div>
@@ -6672,6 +6923,13 @@ function BattlefieldArena({
   const renderBattlefieldSlot = (slot: BattlefieldSlotModel, orientation: 'top' | 'bottom') => {
     const actor = battlefieldSlotMatches(slot, event?.actorName);
     const target = battlefieldSlotMatches(slot, event?.targetName);
+    const eventBadge = actor && target
+      ? [event?.actorBadge, event?.targetBadge].filter(Boolean).join(' | ')
+      : actor
+        ? event?.actorBadge ?? null
+        : target
+          ? event?.targetBadge ?? null
+          : null;
     const className = [
       'battlefield-card',
       orientation === 'top' ? 'battlefield-card-top' : 'battlefield-card-bottom',
@@ -6685,6 +6943,7 @@ function BattlefieldArena({
       <div key={slot.key} className={className}>
         <div className="battlefield-card-stage">
           {slot.hidden ? <HiddenBenchFrame size="standard" /> : <PokemonSpriteFrame pokemon={slot.pokemon} size="standard" />}
+          {eventBadge ? <div className={`battlefield-float-badge battlefield-float-badge-${event?.tone ?? 'field'}`}>{eventBadge}</div> : null}
         </div>
         <div className="battlefield-card-copy">
           <div className="battlefield-card-heading">
