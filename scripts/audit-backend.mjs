@@ -285,7 +285,9 @@ const defender = {
   itemId: 'leftovers',
 };
 const earthquake = garchomp.movePool.find((move) => move.id === 'earthquake');
+const dragonClaw = garchomp.movePool.find((move) => move.name === 'Dragon Claw');
 assert(earthquake, 'Garchomp should have Earthquake in its move pool.');
+assert(dragonClaw, 'Garchomp should have Dragon Claw in its move pool for AI comparison checks.');
 const damageResult = calculateDamage(attacker, defender, earthquake, champions.defaultEnvironment);
 assert(damageResult, 'Damage calculation should return a result for damaging moves.');
 assert.ok(damageResult.maxDamage > damageResult.minDamage || damageResult.maxDamage > 0, 'Damage result should contain positive damage output.');
@@ -298,6 +300,11 @@ const spreadDamageResult = calculateDamage(attacker, defender, earthquake, {
   ...champions.defaultEnvironment,
   battleFormat: 'Doubles',
   spreadTargetsHit: 2,
+});
+const grassyEarthquakeDamageResult = calculateDamage(attacker, defender, earthquake, {
+  ...champions.defaultEnvironment,
+  terrain: 'grassy',
+  terrainTurns: 5,
 });
 const auroraVeilDamageResult = calculateDamage(attacker, defender, earthquake, {
   ...champions.defaultEnvironment,
@@ -319,6 +326,7 @@ const wonderRoomDamageResult = calculateDamage(attacker, defender, earthquake, {
 });
 assert(spreadDamageResult && auroraVeilDamageResult && helpingHandDamageResult && magicRoomDamageResult && wonderRoomDamageResult, 'Damage calculation should support spread, room, and support-field contexts.');
 assert.ok(spreadDamageResult.averageDamage < damageResult.averageDamage, 'Spread-target damage should be reduced in Doubles.');
+assert.ok(grassyEarthquakeDamageResult && grassyEarthquakeDamageResult.averageDamage < damageResult.averageDamage, 'Grassy Terrain should reduce Earthquake damage against grounded targets.');
 assert.ok(auroraVeilDamageResult.averageDamage < spreadDamageResult.averageDamage, 'Aurora Veil should reduce incoming damage beyond the base spread reduction.');
 assert.ok(helpingHandDamageResult.averageDamage > damageResult.averageDamage, 'Helping Hand should boost outgoing damage.');
 assert.ok(magicRoomDamageResult.averageDamage < damageResult.averageDamage, 'Magic Room should suppress held-item damage boosts.');
@@ -393,6 +401,9 @@ const protectUser = findPokemonWithMoves(['Protect'], ['Amoonguss', 'Umbreon', '
 const groundedProtectUser = findPokemonWithMoves(['Protect'], ['Umbreon', 'Clefable', 'Snorlax']);
 const earthquakeUser = findPokemonWithMoves(['Earthquake'], ['Garchomp']);
 const slowEarthquakeUser = findPokemonWithMoves(['Earthquake'], ['Steelix', 'Ting-Lu', 'Rhyperior', 'Garchomp']);
+const flyingEarthquakeTarget = dataset.pokemon.find((pokemon) => pokemon.types.includes('Flying') && pokemon.movePool.length > 0) ?? null;
+const levitateEarthquakeTarget = dataset.pokemon.find((pokemon) => pokemon.abilities.some((ability) => ability.name === 'Levitate') && pokemon.movePool.length > 0) ?? null;
+const wideGuardUser = findPokemonWithMoves(['Wide Guard'], ['Aegislash', 'Aerodactyl', 'Armarouge']);
 const thunderUser = findPokemonWithMoves(['Thunder'], ['Zapdos', 'Jolteon']);
 const snarlUser = findPokemonWithMoves(['Snarl'], ['Incineroar', 'Arcanine']);
 const shadowBallUser = findPokemonWithMoves(['Shadow Ball'], ['Froslass', 'Gengar', 'Alakazam']);
@@ -527,6 +538,7 @@ assert(
 
 const protectChoiceId = moveIdFor(protectUser, 'Protect');
 const earthquakeChoiceId = moveIdFor(earthquakeUser, 'Earthquake');
+const dragonClawChoiceId = moveIdFor(earthquakeUser, 'Dragon Claw');
 const slowEarthquakeChoiceId = moveIdFor(slowEarthquakeUser, 'Earthquake');
 const thunderChoiceId = moveIdFor(thunderUser, 'Thunder');
 const snarlChoiceId = moveIdFor(snarlUser, 'Snarl');
@@ -592,6 +604,7 @@ const meganiumiteId = itemIdByName('Meganiumite');
 assert(
     protectChoiceId &&
     earthquakeChoiceId &&
+    dragonClawChoiceId &&
     slowEarthquakeChoiceId &&
     thunderChoiceId &&
     snarlChoiceId &&
@@ -1043,6 +1056,121 @@ earthquakeBattle = withMockRandom([0.1, 0.1, 0.1, 0.1, 0.1, 0.1], () => resolveT
 assert.ok(earthquakeBattle.player.units[1].currentHp < earthquakeBattle.player.units[1].maxHp, 'All-adjacent moves should hit the user\'s ally when appropriate.');
 assert.ok(earthquakeBattle.opponent.units[0].currentHp < earthquakeBattle.opponent.units[0].maxHp, 'Earthquake should damage the first opposing target.');
 assert.ok(earthquakeBattle.opponent.units[1].currentHp < earthquakeBattle.opponent.units[1].maxHp, 'Earthquake should damage the second opposing target.');
+
+assert(flyingEarthquakeTarget && levitateEarthquakeTarget && wideGuardUser, 'Expected Flying, Levitate, and Wide Guard audit Pokemon to exist.');
+
+let earthquakeImmunityBattle = buildBattle(
+  'Doubles',
+  [
+    buildSlot('eq-immune-user', earthquakeUser, ['Earthquake'], { natureId: 'jolly', evs: { ...blankStats(), attack: 32, speed: 32, hp: 2 } }),
+    buildSlot('eq-immune-ally', wishUser, ['Wish'], { evs: { ...blankStats(), hp: 24, defense: 20, specialDefense: 22 } }),
+  ],
+  [
+    buildSlot('eq-flying-target', flyingEarthquakeTarget, [flyingEarthquakeTarget.movePool[0].name], { evs: { ...blankStats(), hp: 24, defense: 18, specialDefense: 24 } }),
+    buildSlot('eq-levitate-target', levitateEarthquakeTarget, [levitateEarthquakeTarget.movePool[0].name], { abilityName: 'Levitate', evs: { ...blankStats(), hp: 24, defense: 18, specialDefense: 24 } }),
+  ],
+);
+const flyingTargetStartHp = earthquakeImmunityBattle.opponent.units[0].currentHp;
+const levitateTargetStartHp = earthquakeImmunityBattle.opponent.units[1].currentHp;
+const allyCollateralStartHp = earthquakeImmunityBattle.player.units[1].currentHp;
+earthquakeImmunityBattle = withMockRandom([0.1, 0.1, 0.1, 0.1], () => resolveTurn(earthquakeImmunityBattle, [
+  { type: 'move', actor: 0, moveId: earthquakeChoiceId, target: 0 },
+  { type: 'move', actor: 1, moveId: wishChoiceId, target: 0 },
+]));
+assert.equal(earthquakeImmunityBattle.opponent.units[0].currentHp, flyingTargetStartHp, 'Earthquake should not damage Flying-type targets that remain airborne.');
+assert.equal(earthquakeImmunityBattle.opponent.units[1].currentHp, levitateTargetStartHp, 'Earthquake should not damage Levitate targets.');
+assert.ok(earthquakeImmunityBattle.player.units[1].currentHp < allyCollateralStartHp, 'Earthquake should still damage a grounded ally even when both foes are immune.');
+assert.ok(earthquakeImmunityBattle.log.some((entry) => entry.includes("ability Levitate kicks in")), 'Levitate immunity should be called out in the battle log.');
+
+let earthquakeProtectBattle = buildBattle(
+  'Doubles',
+  [
+    buildSlot('eq-protect-user', earthquakeUser, ['Earthquake'], { natureId: 'jolly', evs: { ...blankStats(), attack: 32, speed: 32, hp: 2 } }),
+    buildSlot('eq-protect-ally', protectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } }),
+  ],
+  [
+    buildSlot('eq-protect-foe-a', protectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } }),
+    buildSlot('eq-protect-foe-b', specialTargetB, [specialTargetB.movePool[0].name], { evs: { ...blankStats(), hp: 20, defense: 20, specialDefense: 26 } }),
+  ],
+);
+const protectedAllyStartHp = earthquakeProtectBattle.player.units[1].currentHp;
+const protectedFoeStartHp = earthquakeProtectBattle.opponent.units[0].currentHp;
+const exposedFoeStartHp = earthquakeProtectBattle.opponent.units[1].currentHp;
+earthquakeProtectBattle = withMockRandom([0.1, 0.1, 0.1, 0.1, 0.1], () =>
+  resolveTurnWithChoices(
+    earthquakeProtectBattle,
+    [
+      { type: 'move', actor: 0, moveId: earthquakeChoiceId, target: 0 },
+      { type: 'move', actor: 1, moveId: protectChoiceId, target: 0 },
+    ],
+    [
+      { type: 'move', actor: 0, moveId: protectChoiceId, target: 0 },
+      { type: 'move', actor: 1, moveId: specialTargetB.movePool[0].id, target: 0 },
+    ],
+  ));
+assert.equal(earthquakeProtectBattle.player.units[1].currentHp, protectedAllyStartHp, 'Protect should shield an ally from Earthquake.');
+assert.equal(earthquakeProtectBattle.opponent.units[0].currentHp, protectedFoeStartHp, 'Protect should shield the defending target from Earthquake.');
+assert.ok(earthquakeProtectBattle.opponent.units[1].currentHp < exposedFoeStartHp, 'Earthquake should still damage unprotected adjacent foes.');
+
+let earthquakeWideGuardBattle = buildBattle(
+  'Doubles',
+  [
+    buildSlot('eq-wide-user', earthquakeUser, ['Earthquake'], { natureId: 'jolly', evs: { ...blankStats(), attack: 32, speed: 32, hp: 2 } }),
+    buildSlot('eq-wide-ally', wishUser, ['Wish'], { evs: { ...blankStats(), hp: 24, defense: 20, specialDefense: 22 } }),
+  ],
+  [
+    buildSlot('eq-wide-guard', wideGuardUser, ['Wide Guard'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } }),
+    buildSlot('eq-wide-foe', specialTargetB, [specialTargetB.movePool[0].name], { evs: { ...blankStats(), hp: 20, defense: 20, specialDefense: 26 } }),
+  ],
+);
+const wideGuardFoeAStartHp = earthquakeWideGuardBattle.opponent.units[0].currentHp;
+const wideGuardFoeBStartHp = earthquakeWideGuardBattle.opponent.units[1].currentHp;
+const wideGuardAllyStartHp = earthquakeWideGuardBattle.player.units[1].currentHp;
+const wideGuardChoiceId = moveIdFor(wideGuardUser, 'Wide Guard');
+assert(wideGuardChoiceId, 'Wide Guard choice should exist for the audit user.');
+earthquakeWideGuardBattle = withMockRandom([0.1, 0.1, 0.1, 0.1, 0.1], () =>
+  resolveTurnWithChoices(
+    earthquakeWideGuardBattle,
+    [
+      { type: 'move', actor: 0, moveId: earthquakeChoiceId, target: 0 },
+      { type: 'move', actor: 1, moveId: wishChoiceId, target: 0 },
+    ],
+    [
+      { type: 'move', actor: 0, moveId: wideGuardChoiceId, target: 0 },
+      { type: 'move', actor: 1, moveId: specialTargetB.movePool[0].id, target: 0 },
+    ],
+  ));
+assert.equal(earthquakeWideGuardBattle.opponent.units[0].currentHp, wideGuardFoeAStartHp, 'Wide Guard should shield the first defending Pokemon from Earthquake.');
+assert.equal(earthquakeWideGuardBattle.opponent.units[1].currentHp, wideGuardFoeBStartHp, 'Wide Guard should shield the second defending Pokemon from Earthquake.');
+assert.ok(earthquakeWideGuardBattle.player.units[1].currentHp < wideGuardAllyStartHp, 'Wide Guard should not stop Earthquake from striking the user\'s grounded ally.');
+
+const aiEarthquakeFavoredBattle = buildBattle(
+  'Doubles',
+  [
+    buildSlot('ai-eq-user', earthquakeUser, ['Earthquake', 'Dragon Claw'], { natureId: 'jolly', evs: { ...blankStats(), attack: 32, speed: 32, hp: 2 } }),
+    buildSlot('ai-flying-ally', flyingEarthquakeTarget, [flyingEarthquakeTarget.movePool[0].name], { evs: { ...blankStats(), hp: 24, defense: 18, specialDefense: 24 } }),
+  ],
+  [
+    buildSlot('ai-grounded-foe-a', groundedProtectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } }),
+    buildSlot('ai-grounded-foe-b', specialTargetB, [specialTargetB.movePool[0].name], { evs: { ...blankStats(), hp: 20, defense: 20, specialDefense: 26 } }),
+  ],
+);
+const aiEarthquakeFavoredChoice = generateAiChoices(aiEarthquakeFavoredBattle, 'player').find((choice) => choice.actor === 0);
+assert.equal(aiEarthquakeFavoredChoice?.moveId, earthquakeChoiceId, 'AI should prefer Earthquake when its ally is immune and both foes are grounded.');
+
+const aiEarthquakeAvoidBattle = buildBattle(
+  'Doubles',
+  [
+    buildSlot('ai-eq-avoid-user', earthquakeUser, ['Earthquake', 'Dragon Claw'], { natureId: 'jolly', evs: { ...blankStats(), attack: 32, speed: 32, hp: 2 } }),
+    buildSlot('ai-grounded-ally', groundedProtectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } }),
+  ],
+  [
+    buildSlot('ai-flying-foe', flyingEarthquakeTarget, [flyingEarthquakeTarget.movePool[0].name], { evs: { ...blankStats(), hp: 24, defense: 18, specialDefense: 24 } }),
+    buildSlot('ai-levitate-foe', levitateEarthquakeTarget, [levitateEarthquakeTarget.movePool[0].name], { abilityName: 'Levitate', evs: { ...blankStats(), hp: 24, defense: 18, specialDefense: 24 } }),
+  ],
+);
+const aiEarthquakeAvoidChoice = generateAiChoices(aiEarthquakeAvoidBattle, 'player').find((choice) => choice.actor === 0);
+assert.notEqual(aiEarthquakeAvoidChoice?.moveId, earthquakeChoiceId, 'AI should avoid Earthquake when both foes are immune and a grounded ally would eat the collateral.');
 
 let parabolicChargeBattle = buildBattle(
   'Doubles',
@@ -1870,15 +1998,15 @@ assert.equal(fairyLockBattle.opponent.active[0], fairyLockedIndex, 'Fairy Lock s
 
 let sleepTalkBattle = buildBattle(
   'Singles',
-  [buildSlot('sleep-talk-user', sleepTalkUser, ['Sleep Talk', 'Snore'], { status: 'sleep', evs: { ...blankStats(), specialAttack: 24, speed: 22, hp: 20 } })],
-  [buildSlot('sleep-talk-foe', specialTargetA, [specialTargetA.movePool.find((move) => move.id === specialTargetAAttackId)?.name ?? specialTargetA.movePool[0].name], { evs: { ...blankStats(), hp: 20, defense: 20, specialDefense: 26 } })],
+  [buildSlot('sleep-talk-user', sleepTalkUser, ['Sleep Talk', 'Snore'], { status: 'sleep', evs: { ...blankStats(), specialAttack: 24, speed: 32, hp: 10 } })],
+  [buildSlot('sleep-talk-foe', specialTargetB, [specialTargetB.movePool.find((move) => move.id === specialTargetBAttackId)?.name ?? specialTargetB.movePool[0].name], { natureId: 'brave', evs: { ...blankStats(), hp: 20, defense: 20, specialDefense: 26, speed: 0 } })],
 );
 const sleepTalkStartHp = sleepTalkBattle.opponent.units[0].currentHp;
 sleepTalkBattle = withMockRandom([0.1, 0.1, 0.1], () =>
   resolveTurnWithChoices(
     sleepTalkBattle,
     [{ type: 'move', actor: 0, moveId: sleepTalkChoiceId, target: 0 }],
-    [{ type: 'move', actor: 0, moveId: specialTargetAAttackId, target: 0 }],
+    [{ type: 'move', actor: 0, moveId: specialTargetBAttackId, target: 0 }],
   ));
 assert.ok(sleepTalkBattle.opponent.units[0].currentHp < sleepTalkStartHp, 'Sleep Talk should call Snore and damage the target while the user is asleep.');
 
@@ -2207,7 +2335,7 @@ const summary = [
   `Verified item clause sanitization for manual teams and AI-generated teams.`,
   `Verified move-parity registry coverage at ${paritySummary.coveredPercent}% across ${paritySummary.total} Champions moves, with ${paritySummary.explicit} explicit hooks tagged in the report.`,
   `Verified damage engine produces live damage output under the Champions EV model, including Doubles spread reduction, Aurora Veil, Helping Hand, Magic Room, and Wonder Room checks.`,
-  `Verified simulator rules for chained Protect odds, burn end-turn chip, burn physical damage cuts, paralysis fail-rate and speed penalty, Hydration / Shed Skin / Healer / Natural Cure cures, Limber / Insomnia / Sweet Veil / Water Bubble status immunities, same-turn Soak into later status application, Leftovers healing, Sitrus auto-consumption, confusion/trap timers, Trick and Recycle item flow, Substitute and Healing Wish handling, Lock-On accuracy, ally-target support hooks, rain-locked Thunder accuracy, Snarl spread debuffs, Earthquake ally collateral, Parabolic Charge spread healing, Draining Kiss and Bitter Blade drain ratios, Matcha Gotcha spread recovery, Pain Split averaging, Sparkling Aria burn cures, Sticky Web and Toxic Spikes switch-in hooks, forced-thaw freeze timing, Rest sleep timing, Disable and Torment move locks, weather field timers, opponent reveal state, Calm Mind and Nasty Plot boosts, Trick Room toggling, recharge turns, charge-turn attacks, mid-turn doubles retargeting, Struggle locks, Dark-type immunity to opposing Prankster status moves, and Mega weather ordering.`,
+  `Verified simulator rules for chained Protect odds, burn end-turn chip, burn physical damage cuts, paralysis fail-rate and speed penalty, Hydration / Shed Skin / Healer / Natural Cure cures, Limber / Insomnia / Sweet Veil / Water Bubble status immunities, same-turn Soak into later status application, Leftovers healing, Sitrus auto-consumption, confusion/trap timers, Trick and Recycle item flow, Substitute and Healing Wish handling, Lock-On accuracy, ally-target support hooks, rain-locked Thunder accuracy, Snarl spread debuffs, Earthquake spread parity across ally collateral, Flying immunity, Levitate immunity, Protect, Wide Guard, and Grassy Terrain, Parabolic Charge spread healing, Draining Kiss and Bitter Blade drain ratios, Matcha Gotcha spread recovery, Pain Split averaging, Sparkling Aria burn cures, Sticky Web and Toxic Spikes switch-in hooks, forced-thaw freeze timing, Rest sleep timing, Disable and Torment move locks, weather field timers, opponent reveal state, Calm Mind and Nasty Plot boosts, Trick Room toggling, recharge turns, charge-turn attacks, mid-turn doubles retargeting, Struggle locks, Dark-type immunity to opposing Prankster status moves, and Mega weather ordering.`,
   `Verified 50 fully automated simulator battle sweeps across Singles and Doubles (${simulatorBattlePlayerWins} player-side wins / ${simulatorBattleOpponentWins} opponent-side wins).`,
   `Verified shared PvP room logic, including bring-four lock-in, full roster integrity, immediate dual-lock resolution, deadline-based turn resolution, overall match-timer draws, forfeit handling, and 50 automated room-code battle simulations (${onlineBattleHostWins} host wins / ${onlineBattleGuestWins} guest wins / ${onlineBattleDraws} draws).`,
   warnings.length ? `Source-data warnings: ${warnings.length} HP floor rows on the scraped form pages disagree with fixed 31 IV policy, so the app keeps the fixed-IV result intentionally.` : 'Source-data warnings: none.',

@@ -1353,8 +1353,9 @@ function resolveTargetRefs(
 
   return [
     ...actingSide.active
-      .filter((unitIndex) => unitIndex !== actorUnitIndex)
-      .map((unitIndex, activeSlot) => ({ sideId, side: actingSide, unit: actingSide.units[unitIndex], activeSlot, unitIndex, ally: true }))
+      .map((unitIndex, activeSlot) => ({ unitIndex, activeSlot }))
+      .filter((entry) => entry.unitIndex !== actorUnitIndex)
+      .map((entry) => ({ sideId, side: actingSide, unit: actingSide.units[entry.unitIndex], activeSlot: entry.activeSlot, unitIndex: entry.unitIndex, ally: true }))
       .filter((entry): entry is TargetRef => Boolean(entry.unit && !entry.unit.fainted)),
     ...defendingSide.active
       .map((unitIndex, activeSlot) => ({ sideId: opposingSideId, side: defendingSide, unit: defendingSide.units[unitIndex], activeSlot, unitIndex, ally: false }))
@@ -4507,6 +4508,23 @@ function aiAverageCombatSpeed(state: SimulatorBattleState, side: SimSide) {
   return liveUnits.reduce((sum, entry) => sum + combatSpeed(entry.unit, side.tailwindTurns, state.trickRoomTurns), 0) / liveUnits.length;
 }
 
+function aiGroundSpreadMove(move: PokemonMove) {
+  return move.type === 'Ground' && moveScope(move) === 'all-adjacent';
+}
+
+function aiGroundSpreadTargetImmune(state: SimulatorBattleState, unit: SimUnit, move: PokemonMove) {
+  if (!aiGroundSpreadMove(move)) {
+    return false;
+  }
+
+  if (!unitGroundedInState(state, unit)) {
+    return true;
+  }
+
+  const ability = abilityNameForUnit(unit);
+  return ability === 'Earth Eater';
+}
+
 function aiStatusMoveCount(unit: SimUnit) {
   return moveIdsForUnit(unit)
     .map((moveId) => findMove(unit, moveId))
@@ -4561,6 +4579,9 @@ function aiOffensiveChoiceScore(
     for (const otherTargetRef of otherTargets) {
       const otherProjection = aiProjectedDamage(state, actingSide, defendingSide, unit, otherTargetRef.unit, move);
       if (!otherProjection) {
+        if (aiGroundSpreadTargetImmune(state, otherTargetRef.unit, move)) {
+          score -= 26;
+        }
         continue;
       }
       score += otherProjection.averageDamage / Math.max(1, otherTargetRef.unit.currentHp) * 42 * aiAccuracyFactor(state, unit, otherTargetRef.unit, move);
@@ -4574,6 +4595,9 @@ function aiOffensiveChoiceScore(
     for (const allyRef of livingActiveTargets(actingSide).filter((entry) => entry.activeSlot !== actorSlot)) {
       const collateralProjection = aiProjectedDamage(state, actingSide, actingSide, unit, allyRef.unit, move);
       if (!collateralProjection) {
+        if (aiGroundSpreadTargetImmune(state, allyRef.unit, move)) {
+          score += 18;
+        }
         continue;
       }
       score -= collateralProjection.averageDamage / Math.max(1, allyRef.unit.currentHp) * 68;
@@ -4581,6 +4605,10 @@ function aiOffensiveChoiceScore(
         score -= 120;
       }
     }
+  }
+
+  if (aiGroundSpreadMove(move) && state.environment.terrain === 'grassy') {
+    score -= 18;
   }
 
   if ((move.name === 'Icy Wind' || move.name === 'Electroweb' || move.name === 'Bulldoze' || move.name === 'Mud Shot' || move.name === 'Low Sweep' || move.name === 'Rock Tomb') && state.format === 'Doubles') {

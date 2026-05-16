@@ -1201,6 +1201,39 @@ export function calculateDamage(
   const defenderSpeed = overrides?.defenderSpeed ?? speedStat(defenderBuild, defender, environment, defenderAbility);
   const effectiveness = isStruggle ? 1 : moveTypeEffectiveness(move, moveType, defenderTypes, attackerAbility);
 
+  if (!isStruggle && effectiveness <= 0) {
+    return {
+      move,
+      appliedType: moveType,
+      minDamage: 0,
+      maxDamage: 0,
+      averageDamage: 0,
+      minPercent: 0,
+      maxPercent: 0,
+      averagePercent: 0,
+      attackStat: 0,
+      defenseStat: 0,
+      stab: 0,
+      effectiveness: 0,
+      hitSummary: 'No damage',
+      koSummary: 'Immune',
+      rollRange: [0],
+      hitCount: '1 hit',
+      koChances: {
+        oneHit: 0,
+        twoHit: 0,
+        threeHit: 0,
+      },
+      notes: ['Type immunity prevents damage on this line.'],
+      modifierSummary: [
+        `Resolved power ${move.power}`,
+        'STAB 0.00x',
+        'Effectiveness 0.00x',
+      ],
+      distribution: new Map([[0, 1]]),
+    };
+  }
+
   if (!isStruggle && immunityFromAbility(defenderAbility, move, moveType, effectiveness)) {
     return {
       move,
