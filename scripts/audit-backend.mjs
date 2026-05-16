@@ -289,6 +289,11 @@ assert(earthquake, 'Garchomp should have Earthquake in its move pool.');
 const damageResult = calculateDamage(attacker, defender, earthquake, champions.defaultEnvironment);
 assert(damageResult, 'Damage calculation should return a result for damaging moves.');
 assert.ok(damageResult.maxDamage > damageResult.minDamage || damageResult.maxDamage > 0, 'Damage result should contain positive damage output.');
+const burnedDamageResult = calculateDamage({ ...attacker, status: 'burn' }, defender, earthquake, champions.defaultEnvironment);
+assert(burnedDamageResult, 'Burned damage calculation should still resolve for physical attacks.');
+assert.ok(burnedDamageResult.averageDamage < damageResult.averageDamage, 'Burn should reduce physical attack damage output.');
+const burnedDamageRatio = burnedDamageResult.averageDamage / Math.max(1, damageResult.averageDamage);
+assert.ok(burnedDamageRatio > 0.45 && burnedDamageRatio < 0.55, `Burned physical damage should land near half power, received ratio ${burnedDamageRatio.toFixed(3)}.`);
 const spreadDamageResult = calculateDamage(attacker, defender, earthquake, {
   ...champions.defaultEnvironment,
   battleFormat: 'Doubles',
@@ -335,6 +340,18 @@ const iceSpinnerUser = findPokemonWithMoves(['Ice Spinner'], ['Sneasler', 'Weavi
 const leechSeedUser = findPokemonWithMoves(['Leech Seed'], ['Venusaur', 'Abomasnow', 'Ferrothorn']);
 const restUser = findPokemonWithMoves(['Rest'], ['Snorlax', 'Suicune', 'Milotic']);
 const disableUser = findPokemonWithMoves(['Disable', 'Protect'], ['Gengar', 'Sableye', 'Mismagius']);
+const willOWispUser = findPokemonWithMoves(['Will-O-Wisp'], ['Sableye', 'Rotom', 'Mismagius']);
+const thunderWaveUser = findPokemonWithMoves(['Thunder Wave'], ['Jolteon', 'Zapdos', 'Meowstic']);
+const sporeUser = findPokemonWithMoves(['Hypnosis'], ['Aromatisse', 'Chimecho', 'Gardevoir']);
+const scaldUser = findPokemonWithMoves(['Scald'], ['Suicune', 'Milotic', 'Vaporeon']);
+const heatproofUser = dataset.pokemon.find((pokemon) => pokemon.displayName === 'Sinistcha' && pokemon.abilities.some((ability) => ability.name === 'Heatproof')) ?? null;
+const hydrationUser = dataset.pokemon.find((pokemon) => pokemon.displayName === 'Vaporeon' && pokemon.abilities.some((ability) => ability.name === 'Hydration')) ?? null;
+const shedSkinUser = dataset.pokemon.find((pokemon) => pokemon.displayName === 'Arbok' && pokemon.abilities.some((ability) => ability.name === 'Shed Skin')) ?? null;
+const naturalCureUser = dataset.pokemon.find((pokemon) => pokemon.displayName === 'Starmie' && pokemon.abilities.some((ability) => ability.name === 'Natural Cure')) ?? null;
+const limberTarget = dataset.pokemon.find((pokemon) => pokemon.displayName === 'Liepard' && pokemon.abilities.some((ability) => ability.name === 'Limber')) ?? null;
+const insomniaTarget = dataset.pokemon.find((pokemon) => pokemon.displayName === 'Banette' && pokemon.abilities.some((ability) => ability.name === 'Insomnia')) ?? null;
+const sweetVeilSupport = dataset.pokemon.find((pokemon) => pokemon.displayName === 'Alcremie' && pokemon.abilities.some((ability) => ability.name === 'Sweet Veil')) ?? null;
+const waterBubbleTarget = dataset.pokemon.find((pokemon) => pokemon.displayName === 'Araquanid' && pokemon.abilities.some((ability) => ability.name === 'Water Bubble')) ?? null;
 const aromaVeilTarget = dataset.pokemon.find((pokemon) => pokemon.displayName === 'Aromatisse' && pokemon.abilities.some((ability) => ability.name === 'Aroma Veil')) ?? null;
 const trickRoomUser = findPokemonWithMoves(['Trick Room', 'Shadow Ball'], ['Mimikyu', 'Bronzong', 'Flutter Mane']);
 const calmMindUser = findPokemonWithMoves(['Calm Mind'], ['Alakazam', 'Suicune', 'Clefable']);
@@ -387,6 +404,18 @@ assert(
     leechSeedUser &&
     restUser &&
     disableUser &&
+    willOWispUser &&
+    thunderWaveUser &&
+    sporeUser &&
+    scaldUser &&
+    heatproofUser &&
+    hydrationUser &&
+    shedSkinUser &&
+    naturalCureUser &&
+    limberTarget &&
+    insomniaTarget &&
+    sweetVeilSupport &&
+    waterBubbleTarget &&
     aromaVeilTarget &&
     trickRoomUser &&
     calmMindUser &&
@@ -442,6 +471,14 @@ const leechSeedChoiceId = moveIdFor(leechSeedUser, 'Leech Seed');
 const restChoiceId = moveIdFor(restUser, 'Rest');
 const restFollowUpChoiceId = restUser.movePool.find((move) => move.id !== restChoiceId)?.id ?? null;
 const disableChoiceId = moveIdFor(disableUser, 'Disable');
+const willOWispChoiceId = moveIdFor(willOWispUser, 'Will-O-Wisp');
+const thunderWaveChoiceId = moveIdFor(thunderWaveUser, 'Thunder Wave');
+const sporeChoiceId = moveIdFor(sporeUser, 'Hypnosis');
+const scaldChoiceId = moveIdFor(scaldUser, 'Scald');
+const heatproofChoiceId = moveIdFor(heatproofUser, 'Endure');
+const hydrationChoiceId = moveIdFor(hydrationUser, 'Aqua Ring');
+const shedSkinChoiceId = moveIdFor(shedSkinUser, 'Coil');
+const sweetVeilSupportChoiceId = moveIdFor(sweetVeilSupport, 'Calm Mind');
 const aromaVeilProtectChoiceId = moveIdFor(aromaVeilTarget, 'Protect') ?? moveIdFor(aromaVeilTarget, 'Wish') ?? aromaVeilTarget.movePool[0]?.id ?? null;
 const trickRoomChoiceId = moveIdFor(trickRoomUser, 'Trick Room');
 const calmMindChoiceId = moveIdFor(calmMindUser, 'Calm Mind');
@@ -474,6 +511,7 @@ const contraryLeafStormChoiceId = moveIdFor(contraryUser, 'Leaf Storm');
 const sheerForceSnarlChoiceId = moveIdFor(sheerForceSnarlUser, 'Snarl');
 const megaCharizardMoveId = moveIdFor(charizardBase, 'Flamethrower') ?? moveIdFor(charizardBase, 'Heat Wave') ?? charizardBase.movePool[0]?.id ?? null;
 const megaAbomasnowMoveId = moveIdFor(abomasnowBase, 'Blizzard') ?? moveIdFor(abomasnowBase, 'Ice Shard') ?? abomasnowBase.movePool[0]?.id ?? null;
+const charizardThawMoveName = charizardBase.movePool.find((move) => move.id === megaCharizardMoveId)?.name ?? charizardBase.movePool[0]?.name ?? 'Flamethrower';
 const charizarditeYId = itemIdByName('Charizardite Y');
 const abomasiteId = itemIdByName('Abomasite');
 const meganiumiteId = itemIdByName('Meganiumite');
@@ -495,6 +533,14 @@ assert(
     restChoiceId &&
     restFollowUpChoiceId &&
     disableChoiceId &&
+    willOWispChoiceId &&
+    thunderWaveChoiceId &&
+    sporeChoiceId &&
+    scaldChoiceId &&
+    heatproofChoiceId &&
+    hydrationChoiceId &&
+    shedSkinChoiceId &&
+    sweetVeilSupportChoiceId &&
     aromaVeilProtectChoiceId &&
     trickRoomChoiceId &&
     calmMindChoiceId &&
@@ -566,6 +612,176 @@ assert.equal(
   'Burn should deal one-sixteenth max HP at the end of the turn.',
 );
 assert.ok(residualBattle.opponent.units[0].currentHp > leftoversStartHp, 'Leftovers should heal its holder automatically at the end of the turn.');
+
+let heatproofBurnBattle = buildBattle(
+  'Singles',
+  [buildSlot('heatproof-burned-user', heatproofUser, ['Endure'], { status: 'burn', abilityName: 'Heatproof', evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } })],
+  [buildSlot('heatproof-foe', protectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } })],
+);
+const heatproofStartHp = heatproofBurnBattle.player.units[0].currentHp;
+heatproofBurnBattle = withMockRandom([0.1, 0.1, 0.1], () =>
+  resolveTurnWithChoices(
+    heatproofBurnBattle,
+    [{ type: 'move', actor: 0, moveId: heatproofChoiceId, target: 0 }],
+    [{ type: 'move', actor: 0, moveId: protectChoiceId, target: 0 }],
+  ));
+assert.equal(
+  heatproofBurnBattle.player.units[0].currentHp,
+  heatproofStartHp - Math.max(1, Math.round(heatproofBurnBattle.player.units[0].maxHp * 0.03125)),
+  'Heatproof should halve burn chip damage.',
+);
+
+let hydrationBattle = buildBattle(
+  'Singles',
+  [buildSlot('hydration-user', hydrationUser, ['Aqua Ring'], { status: 'burn', abilityName: 'Hydration', evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } })],
+  [buildSlot('hydration-foe', groundedProtectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } })],
+);
+hydrationBattle.environment.weather = 'rain';
+hydrationBattle = withMockRandom([0.1, 0.1, 0.1], () =>
+  resolveTurnWithChoices(
+    hydrationBattle,
+    [{ type: 'move', actor: 0, moveId: hydrationChoiceId, target: 0 }],
+    [{ type: 'move', actor: 0, moveId: protectChoiceId, target: 0 }],
+  ));
+assert.equal(hydrationBattle.player.units[0].build.status, 'healthy', 'Hydration should cure status conditions at end of turn in rain.');
+
+let shedSkinBattle = buildBattle(
+  'Singles',
+  [buildSlot('shed-skin-user', shedSkinUser, ['Coil'], { status: 'poison', abilityName: 'Shed Skin', evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } })],
+  [buildSlot('shed-skin-foe', groundedProtectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } })],
+);
+shedSkinBattle = withMockRandom([0.1, 0.1, 0.1, 0.1], () =>
+  resolveTurnWithChoices(
+    shedSkinBattle,
+    [{ type: 'move', actor: 0, moveId: shedSkinChoiceId, target: 0 }],
+    [{ type: 'move', actor: 0, moveId: protectChoiceId, target: 0 }],
+  ));
+assert.equal(shedSkinBattle.player.units[0].build.status, 'healthy', 'Shed Skin should have a chance to clear status at end of turn.');
+
+let healerBattle = buildBattle(
+  'Doubles',
+  [
+    buildSlot('healer-user', healPulseUser, ['Heal Pulse'], { abilityName: 'Healer', evs: { ...blankStats(), hp: 32, specialDefense: 20, defense: 14 } }),
+    buildSlot('healer-ally', protectUser, ['Protect'], { status: 'burn', evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } }),
+  ],
+  [
+    buildSlot('healer-foe-a', groundedProtectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } }),
+    buildSlot('healer-foe-b', darkTarget, [darkTarget.movePool.find((move) => move.id === darkTargetAttackId)?.name ?? darkTarget.movePool[0].name], { evs: { ...blankStats(), hp: 20, defense: 20, specialDefense: 26 } }),
+  ],
+);
+healerBattle = withMockRandom([0.1, 0.1, 0.1, 0.1, 0.1, 0.1], () =>
+  resolveTurnWithChoices(
+    healerBattle,
+    [
+      { type: 'move', actor: 0, moveId: healPulseChoiceId, target: 0 },
+      { type: 'move', actor: 1, moveId: protectChoiceId, target: 0 },
+    ],
+    [
+      { type: 'move', actor: 0, moveId: protectChoiceId, target: 0 },
+      { type: 'move', actor: 1, moveId: darkTargetAttackId, target: 0 },
+    ],
+  ));
+assert.equal(healerBattle.player.units[1].build.status, 'healthy', 'Healer should be able to cure allied status conditions at end of turn.');
+
+let limberBattle = buildBattle(
+  'Singles',
+  [buildSlot('paralysis-user', thunderWaveUser, ['Thunder Wave'], { natureId: 'timid', evs: { ...blankStats(), speed: 32, hp: 20, specialDefense: 14 } })],
+  [buildSlot('limber-target', limberTarget, ['Attract'], { abilityName: 'Limber', evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } })],
+);
+limberBattle = withMockRandom([0.1, 0.1, 0.1], () => resolveTurn(limberBattle, [{ type: 'move', actor: 0, moveId: thunderWaveChoiceId, target: 0 }]));
+assert.equal(limberBattle.opponent.units[0].build.status, 'healthy', 'Limber should block paralysis.');
+
+let waterBubbleBattle = buildBattle(
+  'Singles',
+  [buildSlot('burn-user', willOWispUser, ['Will-O-Wisp'], { evs: { ...blankStats(), speed: 32, hp: 20, specialDefense: 14 } })],
+  [buildSlot('water-bubble-target', waterBubbleTarget, ['Aqua Ring'], { abilityName: 'Water Bubble', evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } })],
+);
+waterBubbleBattle = withMockRandom([0.1, 0.1, 0.1], () => resolveTurn(waterBubbleBattle, [{ type: 'move', actor: 0, moveId: willOWispChoiceId, target: 0 }]));
+assert.equal(waterBubbleBattle.opponent.units[0].build.status, 'healthy', 'Water Bubble should block burn.');
+
+let insomniaBattle = buildBattle(
+  'Singles',
+  [buildSlot('sleep-user', sporeUser, ['Hypnosis'], { evs: { ...blankStats(), hp: 20, specialDefense: 20, speed: 26 } })],
+  [buildSlot('insomnia-target', insomniaTarget, ['Confuse Ray'], { abilityName: 'Insomnia', evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } })],
+);
+insomniaBattle = withMockRandom([0.1, 0.1, 0.1], () => resolveTurn(insomniaBattle, [{ type: 'move', actor: 0, moveId: sporeChoiceId, target: 0 }]));
+assert.equal(insomniaBattle.opponent.units[0].build.status, 'healthy', 'Insomnia should block sleep.');
+
+let sweetVeilBattle = buildBattle(
+  'Doubles',
+  [
+    buildSlot('sweet-veil-spore-user', sporeUser, ['Hypnosis'], { evs: { ...blankStats(), hp: 20, specialDefense: 20, speed: 26 } }),
+    buildSlot('sweet-veil-ally', protectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } }),
+  ],
+  [
+    buildSlot('sweet-veil-target', groundedProtectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } }),
+    buildSlot('sweet-veil-support', sweetVeilSupport, ['Calm Mind'], { abilityName: 'Sweet Veil', evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } }),
+  ],
+);
+sweetVeilBattle = withMockRandom([0.1, 0.1, 0.1, 0.1], () =>
+  resolveTurnWithChoices(
+    sweetVeilBattle,
+    [
+      { type: 'move', actor: 0, moveId: sporeChoiceId, target: 0 },
+      { type: 'move', actor: 1, moveId: protectChoiceId, target: 0 },
+    ],
+    [
+      { type: 'move', actor: 0, moveId: protectChoiceId, target: 0 },
+      { type: 'move', actor: 1, moveId: sweetVeilSupportChoiceId, target: 0 },
+    ],
+  ));
+assert.equal(sweetVeilBattle.opponent.units[0].build.status, 'healthy', 'Sweet Veil should block allied sleep.');
+
+let naturalCureBattle = buildBattle(
+  'Singles',
+  [
+    buildSlot('natural-cure-user', naturalCureUser, ['Agility'], { status: 'burn', abilityName: 'Natural Cure', evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } }),
+    buildSlot('natural-cure-bench', groundedProtectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } }),
+  ],
+  [buildSlot('natural-cure-foe', darkTarget, [darkTarget.movePool.find((move) => move.id === darkTargetAttackId)?.name ?? darkTarget.movePool[0].name], { evs: { ...blankStats(), hp: 20, defense: 20, specialDefense: 26 } })],
+);
+naturalCureBattle = withMockRandom([0.1, 0.1, 0.1], () =>
+  resolveTurnWithChoices(
+    naturalCureBattle,
+    [{ type: 'switch', actor: 0, target: 1 }],
+    [{ type: 'move', actor: 0, moveId: darkTargetAttackId, target: 0 }],
+  ));
+assert.equal(naturalCureBattle.player.units[0].build.status, 'healthy', 'Natural Cure should clear status when the Pokemon switches out.');
+
+let thawTargetBattle = buildBattle(
+  'Singles',
+  [buildSlot('thaw-fire-user', charizardBase, [charizardThawMoveName], { natureId: 'modest', evs: { ...blankStats(), specialAttack: 32, speed: 32, hp: 2 } })],
+  [buildSlot('thaw-fire-target', groundedProtectUser, ['Protect'], { status: 'freeze', evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } })],
+);
+thawTargetBattle = withMockRandom([0.1, 0.1, 0.1], () => resolveTurn(thawTargetBattle, [{ type: 'move', actor: 0, moveId: megaCharizardMoveId, target: 0 }]));
+assert.equal(thawTargetBattle.opponent.units[0].build.status, 'healthy', 'Fire-type attacks should thaw frozen targets.');
+
+let thawSelfBattle = buildBattle(
+  'Singles',
+  [buildSlot('thaw-self-user', scaldUser, ['Scald'], { status: 'freeze', evs: { ...blankStats(), specialAttack: 24, speed: 24, hp: 18 } })],
+  [buildSlot('thaw-self-target', groundedProtectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } })],
+);
+thawSelfBattle = withMockRandom([0.1, 0.1, 0.1], () => resolveTurn(thawSelfBattle, [{ type: 'move', actor: 0, moveId: scaldChoiceId, target: 0 }]));
+assert.equal(thawSelfBattle.player.units[0].build.status, 'healthy', 'Scald should thaw a frozen user before it attacks.');
+
+let fullParaBattle = buildBattle(
+  'Singles',
+  [buildSlot('full-para-user', shadowBallUser, ['Shadow Ball'], { status: 'paralysis', evs: { ...blankStats(), specialAttack: 24, speed: 24, hp: 18 } })],
+  [buildSlot('full-para-target', groundedProtectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } })],
+);
+const fullParaStartHp = fullParaBattle.opponent.units[0].currentHp;
+fullParaBattle = withMockRandom([0.1, 0.1, 0.1], () => resolveTurn(fullParaBattle, [{ type: 'move', actor: 0, moveId: shadowBallChoiceId, target: 0 }]));
+assert.equal(fullParaBattle.opponent.units[0].currentHp, fullParaStartHp, 'A 0.1 paralysis roll should fully paralyze the user in Champions.');
+assert.ok(fullParaBattle.log.some((entry) => entry.includes('fully paralyzed')), 'Full paralysis should be called out in the battle log.');
+
+let partialParaBattle = buildBattle(
+  'Singles',
+  [buildSlot('partial-para-user', shadowBallUser, ['Shadow Ball'], { status: 'paralysis', evs: { ...blankStats(), specialAttack: 24, speed: 24, hp: 18 } })],
+  [buildSlot('partial-para-target', groundedProtectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } })],
+);
+const partialParaStartHp = partialParaBattle.opponent.units[0].currentHp;
+partialParaBattle = withMockRandom([0.2, 0.1, 0.1], () => resolveTurn(partialParaBattle, [{ type: 'move', actor: 0, moveId: shadowBallChoiceId, target: 0 }]));
+assert.ok(partialParaBattle.opponent.units[0].currentHp < partialParaStartHp, 'A 0.2 paralysis roll should let the move execute under Champions rules.');
 
 let sitrusBattle = buildBattle(
   'Singles',
@@ -1803,7 +2019,7 @@ const summary = [
   `Verified item clause sanitization for manual teams and AI-generated teams.`,
   `Verified move-parity registry coverage at ${paritySummary.coveredPercent}% across ${paritySummary.total} Champions moves, with ${paritySummary.explicit} explicit hooks tagged in the report.`,
   `Verified damage engine produces live damage output under the Champions EV model, including Doubles spread reduction, Aurora Veil, Helping Hand, Magic Room, and Wonder Room checks.`,
-  `Verified simulator rules for chained Protect odds, burn end-turn chip, Leftovers healing, Sitrus auto-consumption, confusion/trap timers, Trick and Recycle item flow, Substitute and Healing Wish handling, Lock-On accuracy, ally-target support hooks, rain-locked Thunder accuracy, Snarl spread debuffs, Earthquake ally collateral, Parabolic Charge spread healing, Draining Kiss and Bitter Blade drain ratios, Matcha Gotcha spread recovery, Pain Split averaging, Sparkling Aria burn cures, Sticky Web and Toxic Spikes switch-in hooks, forced-thaw freeze timing, Rest sleep timing, Disable and Torment move locks, weather field timers, opponent reveal state, Calm Mind and Nasty Plot boosts, Trick Room toggling, recharge turns, charge-turn attacks, mid-turn doubles retargeting, Struggle locks, Dark-type immunity to opposing Prankster status moves, and Mega weather ordering.`,
+  `Verified simulator rules for chained Protect odds, burn end-turn chip, burn physical damage cuts, paralysis fail-rate and speed penalty, Hydration / Shed Skin / Healer / Natural Cure cures, Limber / Insomnia / Sweet Veil / Water Bubble status immunities, Leftovers healing, Sitrus auto-consumption, confusion/trap timers, Trick and Recycle item flow, Substitute and Healing Wish handling, Lock-On accuracy, ally-target support hooks, rain-locked Thunder accuracy, Snarl spread debuffs, Earthquake ally collateral, Parabolic Charge spread healing, Draining Kiss and Bitter Blade drain ratios, Matcha Gotcha spread recovery, Pain Split averaging, Sparkling Aria burn cures, Sticky Web and Toxic Spikes switch-in hooks, forced-thaw freeze timing, Rest sleep timing, Disable and Torment move locks, weather field timers, opponent reveal state, Calm Mind and Nasty Plot boosts, Trick Room toggling, recharge turns, charge-turn attacks, mid-turn doubles retargeting, Struggle locks, Dark-type immunity to opposing Prankster status moves, and Mega weather ordering.`,
   `Verified 50 fully automated simulator battle sweeps across Singles and Doubles (${simulatorBattlePlayerWins} player-side wins / ${simulatorBattleOpponentWins} opponent-side wins).`,
   `Verified shared PvP room logic, including bring-four lock-in, full roster integrity, immediate dual-lock resolution, deadline-based turn resolution, overall match-timer draws, forfeit handling, and 50 automated room-code battle simulations (${onlineBattleHostWins} host wins / ${onlineBattleGuestWins} guest wins / ${onlineBattleDraws} draws).`,
   warnings.length ? `Source-data warnings: ${warnings.length} HP floor rows on the scraped form pages disagree with fixed 31 IV policy, so the app keeps the fixed-IV result intentionally.` : 'Source-data warnings: none.',

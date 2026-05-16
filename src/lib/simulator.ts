@@ -230,6 +230,7 @@ const selfDestructMoves = new Set(['Explosion', 'Self-Destruct', 'Misty Explosio
 const itemStealMoves = new Set(['Covet', 'Thief']);
 const sleepTalkBlockedMoves = new Set(['Assist', 'Bide', 'Chatter', 'Copycat', 'Focus Punch', 'Me First', 'Metronome', 'Mimic', 'Mirror Move', 'Nature Power', 'Sketch', 'Sleep Talk', 'Struggle', 'Uproar']);
 const aromaVeilProtectedMoves = new Set(['Attract', 'Disable', 'Encore', 'Psychic Noise', 'Taunt', 'Torment']);
+const thawingMoves = new Set(['Matcha Gotcha', 'Scald', 'Scorching Sands']);
 const directStatusMoves = new Map<string, PokemonBuild['status']>([
   ['Glare', 'paralysis'],
   ['Hypnosis', 'sleep'],
@@ -1172,7 +1173,7 @@ function autoPivotToBench(state: SimulatorBattleState, sideId: SideId, actor: Si
     return false;
   }
 
-  switchOutUnit(side, currentIndex);
+  switchOutUnit(side, currentIndex, state);
   side.active[activeSlot] = replacement;
   side.bench = [...side.bench.filter((entry) => entry !== replacement), currentIndex];
   side.units[replacement].turnsActive = 0;
@@ -1199,12 +1200,7 @@ function maybeConsumeStatusBerry(state: SimulatorBattleState, unit: SimUnit) {
     return false;
   }
 
-  const clearedStatus = unit.build.status;
-  unit.build.status = 'healthy';
-  unit.toxicCounter = 1;
-  unit.sleepTurns = 0;
-  unit.sleepSource = null;
-  unit.freezeTurns = 0;
+  const clearedStatus = clearMajorStatus(unit);
   unit.lastConsumedItemId = unit.heldItemId;
   unit.heldItemId = null;
   state.log.unshift(`${unit.pokemon.displayName} cured its ${clearedStatus} with ${item.name}.`);
@@ -1236,6 +1232,27 @@ function maybeTriggerHealingBerry(state: SimulatorBattleState, unit: SimUnit) {
   return true;
 }
 
+function clearMajorStatus(unit: SimUnit) {
+  const clearedStatus = unit.build.status;
+  unit.build.status = 'healthy';
+  unit.toxicCounter = 1;
+  unit.sleepTurns = 0;
+  unit.sleepSource = null;
+  unit.freezeTurns = 0;
+  return clearedStatus;
+}
+
+function sideHasActiveAbility(side: SimSide, abilityName: string) {
+  return side.active.some((unitIndex) => {
+    const unit = side.units[unitIndex];
+    return Boolean(unit && !unit.fainted && abilityNameForUnit(unit) === abilityName);
+  });
+}
+
+function moveThawsFrozenPokemon(move: PokemonMove | null) {
+  return Boolean(move && (move.type === 'Fire' || thawingMoves.has(move.name)));
+}
+
 function statusImmunityReason(state: SimulatorBattleState, source: SimUnit | null, target: SimUnit, status: PokemonBuild['status']) {
   if (target.build.status !== 'healthy') {
     return 'already statused';
@@ -1255,12 +1272,26 @@ function statusImmunityReason(state: SimulatorBattleState, source: SimUnit | nul
     return 'Misty Terrain';
   }
 
+  if (targetAbility === 'Leaf Guard' && state.environment.weather === 'sun') {
+    return 'Leaf Guard';
+  }
+
   if (status === 'sleep' && state.environment.terrain === 'electric' && groundedTarget) {
     return 'Electric Terrain';
   }
 
+  if (status === 'sleep') {
+    if (targetAbility === 'Insomnia' || targetAbility === 'Vital Spirit') {
+      return 'sleep immunity';
+    }
+
+    if (sideHasActiveAbility(targetSide, 'Sweet Veil')) {
+      return 'Sweet Veil';
+    }
+  }
+
   if (status === 'burn') {
-    if (targetTypes.includes('Fire') || targetAbility === 'Water Veil') {
+    if (targetTypes.includes('Fire') || targetAbility === 'Water Veil' || targetAbility === 'Water Bubble') {
       return 'burn immunity';
     }
   }
@@ -1269,7 +1300,7 @@ function statusImmunityReason(state: SimulatorBattleState, source: SimUnit | nul
     return 'freeze immunity';
   }
 
-  if (status === 'paralysis' && targetTypes.includes('Electric')) {
+  if (status === 'paralysis' && (targetTypes.includes('Electric') || targetAbility === 'Limber')) {
     return 'paralysis immunity';
   }
 
@@ -1475,7 +1506,7 @@ function screenAwareEnvironment(state: SimulatorBattleState, defendingSide: SimS
   };
 }
 
-function switchOutUnit(side: SimSide, unitIndex: number) {
+function switchOutUnit(side: SimSide, unitIndex: number, state?: SimulatorBattleState) {
   const unit = side.units[unitIndex];
   if (!unit) {
     return;
@@ -1489,6 +1520,12 @@ function switchOutUnit(side: SimSide, unitIndex: number) {
   const ability = abilityNameForUnit(unit);
   if (ability === 'Regenerator' && !unit.fainted) {
     healUnit(unit, Math.max(1, Math.round(unit.maxHp / 3)));
+  }
+  if (ability === 'Natural Cure' && unit.build.status !== 'healthy') {
+    const clearedStatus = clearMajorStatus(unit);
+    if (state) {
+      state.log.unshift(`${unit.pokemon.displayName} cured its ${clearedStatus} by switching out with Natural Cure.`);
+    }
   }
 
   unit.protectStreak = 0;
@@ -1673,7 +1710,7 @@ function forceSwitchTarget(state: SimulatorBattleState, targetRef: TargetRef, re
     return false;
   }
 
-  switchOutUnit(targetRef.side, targetRef.unitIndex);
+  switchOutUnit(targetRef.side, targetRef.unitIndex, state);
   targetRef.side.active[targetRef.activeSlot] = replacement;
   targetRef.side.bench = [...targetRef.side.bench.filter((entry) => entry !== replacement), targetRef.unitIndex];
   targetRef.side.units[replacement].turnsActive = 0;
@@ -3115,7 +3152,7 @@ function applyStatusMove(
     }
     lowerUnitHp(actor, hpCost);
     const substituteHp = Math.max(1, Math.floor(actor.maxHp / 4));
-    switchOutUnit(actingSide, currentIndex);
+    switchOutUnit(actingSide, currentIndex, state);
     actingSide.active[activeSlot] = replacement;
     actingSide.bench = [...actingSide.bench.filter((entry) => entry !== replacement), currentIndex];
     actingSide.units[replacement].turnsActive = 0;
@@ -3830,6 +3867,10 @@ function executeDamageMove(
         state.log.unshift(`${actor.pokemon.displayName} was taken down by Destiny Bond.`);
       }
     }
+    if (!targetRef.unit.fainted && targetRef.unit.build.status === 'freeze' && moveThawsFrozenPokemon(activeMove)) {
+      clearMajorStatus(targetRef.unit);
+      state.log.unshift(`${targetRef.unit.pokemon.displayName} thawed out from ${move.name}.`);
+    }
     maybeTriggerHealingBerry(state, targetRef.unit);
     applyProtectionContactRebound(state, targetRef.unit, actor, move);
 
@@ -3917,9 +3958,9 @@ function executeDamageMove(
   actor.helpingHand = false;
 }
 
-function processPreMoveStatus(state: SimulatorBattleState, actor: SimUnit, selectedMoveName: string | null = null) {
+function processPreMoveStatus(state: SimulatorBattleState, actor: SimUnit, selectedMove: PokemonMove | null = null) {
   maybeConsumeStatusBerry(state, actor);
-  const sleepUsableMove = selectedMoveName === 'Sleep Talk' || selectedMoveName === 'Snore';
+  const sleepUsableMove = selectedMove?.name === 'Sleep Talk' || selectedMove?.name === 'Snore';
 
   if (actor.infatuatedBySideId && actor.infatuatedByUnitIndex !== null) {
     const sourceSide = sideForId(state, actor.infatuatedBySideId);
@@ -3986,14 +4027,18 @@ function processPreMoveStatus(state: SimulatorBattleState, actor: SimUnit, selec
   }
 
   if (actor.build.status === 'freeze') {
-    actor.freezeTurns += 1;
-    if (actor.freezeTurns >= 3 || Math.random() < 0.25) {
-      actor.build.status = 'healthy';
-      actor.freezeTurns = 0;
-      state.log.unshift(`${actor.pokemon.displayName} thawed out.`);
+    if (moveThawsFrozenPokemon(selectedMove)) {
+      clearMajorStatus(actor);
+      state.log.unshift(`${actor.pokemon.displayName} thawed out by using ${selectedMove?.name}.`);
     } else {
-      state.log.unshift(`${actor.pokemon.displayName} is frozen solid.`);
-      return false;
+      actor.freezeTurns += 1;
+      if (actor.freezeTurns >= 3 || Math.random() < 0.25) {
+        clearMajorStatus(actor);
+        state.log.unshift(`${actor.pokemon.displayName} thawed out.`);
+      } else {
+        state.log.unshift(`${actor.pokemon.displayName} is frozen solid.`);
+        return false;
+      }
     }
   }
 
@@ -4036,7 +4081,8 @@ function endTurnSideEffects(state: SimulatorBattleState, side: SimSide) {
     }
 
     if (unit.build.status === 'burn') {
-      lowerUnitHp(unit, Math.max(1, Math.round(unit.maxHp * 0.0625)));
+      const burnRate = ability === 'Heatproof' ? 0.03125 : 0.0625;
+      lowerUnitHp(unit, Math.max(1, Math.round(unit.maxHp * burnRate)));
     }
 
     if (unit.build.status === 'poison' && ability !== 'Poison Heal') {
@@ -4144,6 +4190,29 @@ function endTurnSideEffects(state: SimulatorBattleState, side: SimSide) {
     }
 
     maybeTriggerHealingBerry(state, unit);
+
+    if (unit.build.status !== 'healthy') {
+      if (ability === 'Hydration' && state.environment.weather === 'rain') {
+        const clearedStatus = clearMajorStatus(unit);
+        state.log.unshift(`${unit.pokemon.displayName} cured its ${clearedStatus} with Hydration.`);
+      } else if (ability === 'Shed Skin' && Math.random() < 0.3) {
+        const clearedStatus = clearMajorStatus(unit);
+        state.log.unshift(`${unit.pokemon.displayName} shed its ${clearedStatus}.`);
+      }
+    }
+
+    if (!unit.fainted && ability === 'Healer') {
+      for (const allyIndex of side.active) {
+        const ally = side.units[allyIndex];
+        if (!ally || ally === unit || ally.fainted || ally.build.status === 'healthy') {
+          continue;
+        }
+        if (Math.random() < 0.5) {
+          const clearedStatus = clearMajorStatus(ally);
+          state.log.unshift(`${unit.pokemon.displayName} cured ${ally.pokemon.displayName}'s ${clearedStatus} with Healer.`);
+        }
+      }
+    }
 
     unit.tauntTurns = Math.max(0, unit.tauntTurns - 1);
     unit.encoreTurns = Math.max(0, unit.encoreTurns - 1);
@@ -5094,7 +5163,7 @@ export function resolveTurnWithChoices(
         continue;
       }
 
-      switchOutUnit(actingSide, currentIndex);
+      switchOutUnit(actingSide, currentIndex, next);
       actingSide.active[queuedAction.choice.actor] = targetIndex;
       actingSide.bench = [...actingSide.bench.filter((entry) => entry !== targetIndex), currentIndex];
       actingSide.units[targetIndex].turnsActive = 0;
@@ -5121,7 +5190,7 @@ export function resolveTurnWithChoices(
     }
 
     const movePreview = findMove(actor, (queuedAction.choice as Extract<SimulatorChoice, { type: 'move' | 'mega' }>).moveId);
-    if (!processPreMoveStatus(next, actor, movePreview?.name ?? null)) {
+    if (!processPreMoveStatus(next, actor, movePreview ?? null)) {
       if (actor.chargingTurns > 0 && actor.chargingMoveName) {
         next.log.unshift(`${actor.pokemon.displayName} lost its ${actor.chargingMoveName} charge.`);
         clearChargeState(actor);
