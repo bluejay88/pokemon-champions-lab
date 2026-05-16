@@ -173,6 +173,18 @@ type QueuedTurnSubmission = {
   roomCode?: string;
 };
 
+type SimSideId = 'player' | 'opponent';
+
+const battleStageFields = {
+  Attack: 'attackStage',
+  Defense: 'defenseStage',
+  'Sp. Atk': 'specialAttackStage',
+  'Sp. Def': 'specialDefenseStage',
+  Speed: 'speedStage',
+  Accuracy: 'accuracyStage',
+  Evasion: 'evasionStage',
+} as const;
+
 let battleCoreRuntimeCache: BattleCoreRuntime | null = null;
 let battleCoreRuntimePromise: Promise<BattleCoreRuntime> | null = null;
 let teamIntelRuntimeCache: TeamIntelRuntime | null = null;
@@ -2117,6 +2129,436 @@ function battleNamePool(battle: SimulatorBattleState) {
     .sort((left, right) => right.length - left.length);
 }
 
+function cloneBattleState(battle: SimulatorBattleState | null) {
+  return battle ? structuredClone(battle) as SimulatorBattleState : null;
+}
+
+function battleSideForId(state: SimulatorBattleState, sideId: SimSideId) {
+  return sideId === 'player' ? state.player : state.opponent;
+}
+
+function oppositeBattleSideId(sideId: SimSideId): SimSideId {
+  return sideId === 'player' ? 'opponent' : 'player';
+}
+
+function orderedBattleUnitIndices(side: SimSide) {
+  const seen = new Set<number>();
+  const ordered: number[] = [];
+  const append = (unitIndex: number) => {
+    if (unitIndex < 0 || seen.has(unitIndex)) {
+      return;
+    }
+    seen.add(unitIndex);
+    ordered.push(unitIndex);
+  };
+
+  side.active.forEach(append);
+  side.bench.forEach(append);
+  side.units.forEach((_, unitIndex) => append(unitIndex));
+  return ordered;
+}
+
+function unitNameMatches(unit: SimUnit, unitName: string) {
+  return [
+    battleUnitDisplayName(unit),
+    unit.pokemon.displayName,
+    unit.basePokemon.displayName,
+    unit.megaPokemon?.displayName ?? null,
+  ].some((candidate) => candidate === unitName);
+}
+
+function findBattleUnitReference(state: SimulatorBattleState, unitName: string, preferredSideId?: SimSideId) {
+  const sides = preferredSideId ? [preferredSideId, oppositeBattleSideId(preferredSideId)] : ['player', 'opponent'] satisfies SimSideId[];
+  for (const sideId of sides) {
+    const side = battleSideForId(state, sideId);
+    for (const unitIndex of orderedBattleUnitIndices(side)) {
+      const unit = side.units[unitIndex];
+      if (!unit || !unitNameMatches(unit, unitName)) {
+        continue;
+      }
+      return {
+        sideId,
+        side,
+        unit,
+        unitIndex,
+        activeSlot: side.active.indexOf(unitIndex),
+        benchSlot: side.bench.indexOf(unitIndex),
+      };
+    }
+  }
+
+  return null;
+}
+
+function clampBattleHp(unit: SimUnit, nextHp: number) {
+  unit.currentHp = Math.max(0, Math.min(unit.maxHp, Math.round(nextHp)));
+  unit.fainted = unit.currentHp <= 0;
+}
+
+function statusFromPlaybackToken(token: string): PokemonBuild['status'] | null {
+  const normalized = token.trim().toLowerCase();
+  switch (normalized) {
+    case 'brn':
+    case 'burn':
+    case 'burned':
+      return 'burn';
+    case 'frz':
+    case 'freeze':
+    case 'frozen':
+      return 'freeze';
+    case 'par':
+    case 'paralysis':
+    case 'paralyzed':
+      return 'paralysis';
+    case 'psn':
+    case 'poison':
+    case 'poisoned':
+      return 'poison';
+    case 'tox':
+    case 'toxic':
+      return 'toxic';
+    case 'slp':
+    case 'sleep':
+    case 'asleep':
+      return 'sleep';
+    default:
+      return null;
+  }
+}
+
+function setPresentationStatus(unit: SimUnit, token: string) {
+  const status = statusFromPlaybackToken(token);
+  if (!status) {
+    return;
+  }
+
+  unit.build.status = status;
+  if (status === 'toxic' && unit.toxicCounter < 1) {
+    unit.toxicCounter = 1;
+  }
+  if (status === 'sleep' && unit.sleepTurns < 1) {
+    unit.sleepTurns = 1;
+  }
+  if (status === 'freeze' && unit.freezeTurns < 1) {
+    unit.freezeTurns = 1;
+  }
+}
+
+function updatePresentationStage(unit: SimUnit, label: keyof typeof battleStageFields, amount: number) {
+  const field = battleStageFields[label];
+  unit.build[field] = Math.max(-6, Math.min(6, unit.build[field] + amount));
+}
+
+function applyPresentationSwitch(
+  displayBattle: SimulatorBattleState,
+  currentBattle: SimulatorBattleState,
+  actorName: string,
+  replacementName: string,
+) {
+  const actorRef = findBattleUnitReference(displayBattle, actorName);
+  const replacementRef = findBattleUnitReference(currentBattle, replacementName, actorRef?.sideId);
+  if (!actorRef || !replacementRef) {
+    return;
+  }
+
+  const displaySide = battleSideForId(displayBattle, actorRef.sideId);
+  const outgoingIndex = actorRef.unitIndex;
+  const incomingIndex = replacementRef.unitIndex;
+  const laneIndex = actorRef.activeSlot >= 0 ? actorRef.activeSlot : 0;
+
+  displaySide.active[laneIndex] = incomingIndex;
+  displaySide.bench = displaySide.bench.filter((unitIndex) => unitIndex !== incomingIndex);
+  if (!displaySide.bench.includes(outgoingIndex)) {
+    displaySide.bench.push(outgoingIndex);
+  }
+  displaySide.units[incomingIndex] = structuredClone(replacementRef.unit) as SimUnit;
+  displaySide.units[incomingIndex].revealed = true;
+}
+
+function applyPresentationSendOut(
+  displayBattle: SimulatorBattleState,
+  currentBattle: SimulatorBattleState,
+  sideName: string,
+  unitName: string,
+) {
+  const sideId =
+    sideName === currentBattle.player.name
+      ? 'player'
+      : sideName === currentBattle.opponent.name
+        ? 'opponent'
+        : null;
+  if (!sideId) {
+    return;
+  }
+
+  const currentRef = findBattleUnitReference(currentBattle, unitName, sideId);
+  if (!currentRef) {
+    return;
+  }
+
+  const displaySide = battleSideForId(displayBattle, sideId);
+  displaySide.units[currentRef.unitIndex] = structuredClone(currentRef.unit) as SimUnit;
+  displaySide.units[currentRef.unitIndex].revealed = true;
+  if (!displaySide.active.includes(currentRef.unitIndex)) {
+    const openLane = displaySide.active.findIndex((unitIndex) => {
+      const laneUnit = displaySide.units[unitIndex];
+      return unitIndex < 0 || !laneUnit || laneUnit.fainted;
+    });
+    if (openLane >= 0) {
+      displaySide.active[openLane] = currentRef.unitIndex;
+    }
+  }
+  displaySide.bench = displaySide.bench.filter((unitIndex) => unitIndex !== currentRef.unitIndex);
+}
+
+function applyPresentationMegaEvolution(displayBattle: SimulatorBattleState, currentBattle: SimulatorBattleState, baseName: string, megaName: string) {
+  const displayRef = findBattleUnitReference(displayBattle, baseName) ?? findBattleUnitReference(displayBattle, megaName);
+  if (!displayRef) {
+    return;
+  }
+
+  displayRef.unit.megaEvolved = true;
+  displayRef.unit.build.useMega = true;
+  if (displayRef.unit.megaPokemon) {
+    displayRef.unit.pokemon = displayRef.unit.megaPokemon;
+  }
+  const currentRef = findBattleUnitReference(currentBattle, megaName, displayRef.sideId);
+  if (currentRef) {
+    displayRef.unit.megaPokemon = currentRef.unit.megaPokemon;
+    displayRef.unit.pokemon = currentRef.unit.pokemon;
+  }
+  battleSideForId(displayBattle, displayRef.sideId).megaUsed = true;
+}
+
+function applyPresentationBattleEntry(
+  currentBattle: SimulatorBattleState,
+  displayBattle: SimulatorBattleState,
+  entry: string,
+) {
+  const hitMatch = entry.match(/^(.+?) used (.+?) on (.+?) for (\d+) damage\.$/);
+  if (hitMatch) {
+    const targetRef = findBattleUnitReference(displayBattle, hitMatch[3]);
+    if (targetRef) {
+      clampBattleHp(targetRef.unit, targetRef.unit.currentHp - Number(hitMatch[4]));
+    }
+    return displayBattle;
+  }
+
+  const healMatch = entry.match(/^(.+?) (?:restored|recovered|received) (\d+) HP (?:with|from) (.+?)\.$/);
+  if (healMatch) {
+    const actorRef = findBattleUnitReference(displayBattle, healMatch[1]);
+    if (actorRef) {
+      clampBattleHp(actorRef.unit, actorRef.unit.currentHp + Number(healMatch[2]));
+    }
+    return displayBattle;
+  }
+
+  const healPulseMatch = entry.match(/^(.+?) restored (.+?) with Heal Pulse for (\d+) HP\.$/);
+  if (healPulseMatch) {
+    const targetRef = findBattleUnitReference(displayBattle, healPulseMatch[2]);
+    if (targetRef) {
+      clampBattleHp(targetRef.unit, targetRef.unit.currentHp + Number(healPulseMatch[3]));
+    }
+    return displayBattle;
+  }
+
+  const healingWishEntryMatch = entry.match(/^(.+?) was restored by Healing Wish on entry for (\d+) HP\.$/);
+  if (healingWishEntryMatch) {
+    const targetRef = findBattleUnitReference(displayBattle, healingWishEntryMatch[1]);
+    if (targetRef) {
+      clampBattleHp(targetRef.unit, targetRef.unit.currentHp + Number(healingWishEntryMatch[2]));
+      targetRef.unit.build.status = 'healthy';
+    }
+    return displayBattle;
+  }
+
+  const drainMatch = entry.match(/^(.+?) drained (\d+) HP back with (.+?)\.$/);
+  if (drainMatch) {
+    const actorRef = findBattleUnitReference(displayBattle, drainMatch[1]);
+    if (actorRef) {
+      clampBattleHp(actorRef.unit, actorRef.unit.currentHp + Number(drainMatch[2]));
+    }
+    return displayBattle;
+  }
+
+  const residualMatch = entry.match(/^(.+?) took (\d+) (.+?) damage\.$/);
+  if (residualMatch) {
+    const targetRef = findBattleUnitReference(displayBattle, residualMatch[1]);
+    if (targetRef) {
+      clampBattleHp(targetRef.unit, targetRef.unit.currentHp - Number(residualMatch[2]));
+    }
+    return displayBattle;
+  }
+
+  const recoilMatch = entry.match(/^(.+?) took (\d+) recoil from (.+?)\.$/);
+  if (recoilMatch) {
+    const targetRef = findBattleUnitReference(displayBattle, recoilMatch[1]);
+    if (targetRef) {
+      clampBattleHp(targetRef.unit, targetRef.unit.currentHp - Number(recoilMatch[2]));
+    }
+    return displayBattle;
+  }
+
+  const confusionMatch = entry.match(/^(.+?) hurt itself in confusion for (\d+) damage\.$/);
+  if (confusionMatch) {
+    const targetRef = findBattleUnitReference(displayBattle, confusionMatch[1]);
+    if (targetRef) {
+      clampBattleHp(targetRef.unit, targetRef.unit.currentHp - Number(confusionMatch[2]));
+    }
+    return displayBattle;
+  }
+
+  const koMatch = entry.match(/^(.+?) was knocked out by (.+?) using (.+?)\.$/);
+  if (koMatch) {
+    const targetRef = findBattleUnitReference(displayBattle, koMatch[1]);
+    if (targetRef) {
+      clampBattleHp(targetRef.unit, 0);
+      targetRef.unit.fainted = true;
+    }
+    return displayBattle;
+  }
+
+  const faintedOnEntryMatch = entry.match(/^(.+?) fainted on entry\.$/);
+  if (faintedOnEntryMatch) {
+    const targetRef = findBattleUnitReference(displayBattle, faintedOnEntryMatch[1]);
+    if (targetRef) {
+      clampBattleHp(targetRef.unit, 0);
+      targetRef.unit.fainted = true;
+    }
+    return displayBattle;
+  }
+
+  const statusMatch = entry.match(/^(.+?) was afflicted by (.+?) \((.+?)\)\.$/);
+  if (statusMatch) {
+    const targetRef = findBattleUnitReference(displayBattle, statusMatch[1]);
+    if (targetRef) {
+      setPresentationStatus(targetRef.unit, statusMatch[3]);
+    }
+    return displayBattle;
+  }
+
+  const stageDropMatch = entry.match(/^(.+?)'s (Attack|Defense|Sp\. Atk|Sp\. Def|Speed|Accuracy|Evasion)( sharply)? fell because of (.+?)\.$/);
+  if (stageDropMatch) {
+    const targetRef = findBattleUnitReference(displayBattle, stageDropMatch[1]);
+    if (targetRef) {
+      updatePresentationStage(targetRef.unit, stageDropMatch[2] as keyof typeof battleStageFields, stageDropMatch[3] ? -2 : -1);
+    }
+    return displayBattle;
+  }
+
+  const stageBoostMatch = entry.match(/^(.+?) boosted its (Attack|Defense|Sp\. Atk|Sp\. Def|Speed|Accuracy|Evasion) with (.+?)\.$/);
+  if (stageBoostMatch) {
+    const actorRef = findBattleUnitReference(displayBattle, stageBoostMatch[1]);
+    if (actorRef) {
+      updatePresentationStage(actorRef.unit, stageBoostMatch[2] as keyof typeof battleStageFields, 1);
+    }
+    return displayBattle;
+  }
+
+  const switchMatch = entry.match(/^(.+?) switched out for (.+?)\.$/);
+  if (switchMatch) {
+    applyPresentationSwitch(displayBattle, currentBattle, switchMatch[1], switchMatch[2]);
+    return displayBattle;
+  }
+
+  const pivotMatch = entry.match(/^(.+?) pivoted out with (.+?) for (.+?)\.$/);
+  if (pivotMatch) {
+    applyPresentationSwitch(displayBattle, currentBattle, pivotMatch[1], pivotMatch[3]);
+    return displayBattle;
+  }
+
+  const sentOutMatch = entry.match(/^(.+?) sent out (.+)\.$/);
+  if (sentOutMatch) {
+    applyPresentationSendOut(displayBattle, currentBattle, sentOutMatch[1], sentOutMatch[2]);
+    return displayBattle;
+  }
+
+  const megaMatch = entry.match(/^(.+?) Mega Evolved into (.+?)\.$/);
+  if (megaMatch) {
+    applyPresentationMegaEvolution(displayBattle, currentBattle, megaMatch[1], megaMatch[2]);
+    return displayBattle;
+  }
+
+  return displayBattle;
+}
+
+function buildPlaybackBattleSnapshots(
+  initialBattle: SimulatorBattleState | null,
+  currentBattle: SimulatorBattleState,
+  steps: BattlePlaybackStep[],
+) {
+  const displayBattle = cloneBattleState(initialBattle ?? currentBattle);
+  if (!displayBattle) {
+    return [] as SimulatorBattleState[];
+  }
+
+  return steps.map((step) => {
+    applyPresentationBattleEntry(currentBattle, displayBattle, step.entry);
+    return cloneBattleState(displayBattle) ?? currentBattle;
+  });
+}
+
+function playerUnitCanMegaEvolve(side: SimSide, unit: SimUnit) {
+  if (side.megaUsed || unit.megaEvolved || !unit.megaPokemon) {
+    return false;
+  }
+
+  return getItemById(unit.heldItemId)?.category === 'mega-stone';
+}
+
+function sanitizedChoiceDraftsForBattle(battle: SimulatorBattleState, drafts: Record<number, ChoiceDraft>) {
+  const next: Record<number, ChoiceDraft> = {};
+  const validMegaActors: number[] = [];
+
+  battle.player.active.forEach((unitIndex, actor) => {
+    const unit = battle.player.units[unitIndex];
+    if (!unit || unit.fainted) {
+      return;
+    }
+
+    const draft = drafts[actor];
+    const legalMoves = legalMovesForUnit(unit);
+    const fallbackMoveId = legalMoves[0]?.id ?? unit.build.moveIds[0] ?? '';
+    const liveTargets = livingTargetSlots(battle.opponent);
+    const fallbackTarget = liveTargets[0]?.targetIndex ?? 0;
+    const switchTargets = battle.player.bench.filter((benchIndex) => !battle.player.units[benchIndex]?.fainted);
+    const fallbackSwitchTarget = switchTargets[0] ?? 0;
+
+    const safeDraft: ChoiceDraft = {
+      type: draft?.type ?? 'move',
+      moveId: legalMoves.some((move) => move.id === draft?.moveId) ? draft!.moveId : fallbackMoveId,
+      target: liveTargets.some((entry) => entry.targetIndex === draft?.target) ? draft!.target : fallbackTarget,
+      switchTarget: typeof draft?.switchTarget === 'number' && switchTargets.includes(draft.switchTarget) ? draft.switchTarget : fallbackSwitchTarget,
+    };
+
+    if (safeDraft.type === 'switch' && !switchTargets.length) {
+      safeDraft.type = 'move';
+    }
+
+    if (safeDraft.type === 'mega') {
+      if (!playerUnitCanMegaEvolve(battle.player, unit)) {
+        safeDraft.type = 'move';
+      } else {
+        validMegaActors.push(actor);
+      }
+    }
+
+    next[actor] = safeDraft;
+  });
+
+  const reservedMegaActor = validMegaActors[0] ?? null;
+  if (reservedMegaActor !== null) {
+    for (const actor of validMegaActors.slice(1)) {
+      next[actor] = {
+        ...next[actor],
+        type: 'move',
+      };
+    }
+  }
+
+  return next;
+}
+
 function battlefieldStageShortLabel(label: string) {
   switch (label) {
     case 'Attack':
@@ -2248,6 +2690,18 @@ function parseBattlefieldPlaybackEvent(entries: string[], battle: SimulatorBattl
       };
     }
 
+    const healingWishEntryMatch = entry.match(/^(.+?) was restored by Healing Wish on entry for (\d+) HP\.$/);
+    if (healingWishEntryMatch) {
+      return {
+        id: makeId('battlefield-event'),
+        tone: 'status',
+        message: entry,
+        actorName: healingWishEntryMatch[1],
+        moveName: 'Healing Wish',
+        actorBadge: `+${healingWishEntryMatch[2]} HP`,
+      };
+    }
+
     const drainMatch = entry.match(/^(.+?) drained (\d+) HP back with (.+?)\.$/);
     if (drainMatch) {
       return {
@@ -2321,6 +2775,19 @@ function parseBattlefieldPlaybackEvent(entries: string[], battle: SimulatorBattl
       };
     }
 
+    const pivotMatch = entry.match(/^(.+?) pivoted out with (.+?) for (.+?)\.$/);
+    if (pivotMatch) {
+      return {
+        id: makeId('battlefield-event'),
+        tone: 'switch',
+        message: entry,
+        actorName: pivotMatch[1],
+        moveName: pivotMatch[2],
+        targetName: pivotMatch[3],
+        targetBadge: 'Switch In',
+      };
+    }
+
     const switchMatch = entry.match(/^(.+?) switched out for (.+?)\.$/);
     if (switchMatch) {
       return {
@@ -2341,6 +2808,17 @@ function parseBattlefieldPlaybackEvent(entries: string[], battle: SimulatorBattl
         message: entry,
         targetName: sentOutMatch[1],
         targetBadge: 'On Field',
+      };
+    }
+
+    const faintedOnEntryMatch = entry.match(/^(.+?) fainted on entry\.$/);
+    if (faintedOnEntryMatch) {
+      return {
+        id: makeId('battlefield-event'),
+        tone: 'ko',
+        message: entry,
+        targetName: faintedOnEntryMatch[1],
+        targetBadge: 'KO',
       };
     }
 
@@ -3066,6 +3544,7 @@ function App() {
   const [simPreview, setSimPreview] = useState<SimulatorPreviewState | null>(null);
   const [simBringOrder, setSimBringOrder] = useState<number[]>([]);
   const [simBattle, setSimBattle] = useState<SimulatorBattleState | null>(null);
+  const [simDisplayedBattle, setSimDisplayedBattle] = useState<SimulatorBattleState | null>(null);
   const [simBattlefieldSeed, setSimBattlefieldSeed] = useState<string>(() => `sim-idle-${activeTeamFromState(initialState).format}`);
   const [simBattleMusicSeed, setSimBattleMusicSeed] = useState(0);
   const [simChoiceDrafts, setSimChoiceDrafts] = useState<Record<number, ChoiceDraft>>({});
@@ -3095,6 +3574,7 @@ function App() {
   const [onlineStatusMessage, setOnlineStatusMessage] = useState<string | null>(null);
   const [pvpRoomCodeInput, setPvpRoomCodeInput] = useState('');
   const [pvpRoom, setPvpRoom] = useState<OnlineBattleRoomView | null>(null);
+  const [pvpDisplayedBattle, setPvpDisplayedBattle] = useState<SimulatorBattleState | null>(null);
   const [pvpBattleMusicSeed, setPvpBattleMusicSeed] = useState(0);
   const [pvpBringOrder, setPvpBringOrder] = useState<number[]>([]);
   const [pvpChoiceDrafts, setPvpChoiceDrafts] = useState<Record<number, ChoiceDraft>>({});
@@ -3132,6 +3612,8 @@ function App() {
 
   const team = activeTeamFromState(state);
   const analysis = analyzeTeam(team);
+  const simPresentationBattle = simDisplayedBattle ?? simBattle;
+  const pvpPresentationBattle = pvpDisplayedBattle ?? pvpRoom?.battle ?? null;
   const onlineAccount = state.profile.onlineAccount;
   const selectedTeamSlot = team.slots[selectedSlotIndex] ?? team.slots[0];
   const deferredDexSearch = useDeferredValue(pokedexSearch);
@@ -3241,36 +3723,36 @@ function App() {
     [pvpRoom?.opponentTeam],
   );
   const simFieldSections = useMemo<BattlefieldConditionSection[]>(
-    () => simBattle ? [
+    () => simPresentationBattle ? [
       {
         label: 'Turn Flow',
         tags: [
-          { key: 'sim-turn', label: `Turn ${simBattle.turn}`, tone: 'positive', title: 'The current live simulator turn.' },
-          { key: 'sim-clock', label: simTurnTimerEnabled && !simBattle.winner ? `${simTurnClock}s clock` : 'Clock Off', tone: simTurnTimerEnabled && simTurnClock <= 10 ? 'warning' : 'neutral', title: 'The live move clock for the current turn.' },
+          { key: 'sim-turn', label: `Turn ${simPresentationBattle.turn}`, tone: 'positive', title: 'The current live simulator turn.' },
+          { key: 'sim-clock', label: simTurnTimerEnabled && !simPresentationBattle.winner ? `${simTurnClock}s clock` : 'Clock Off', tone: simTurnTimerEnabled && simTurnClock <= 10 ? 'warning' : 'neutral', title: 'The live move clock for the current turn.' },
           { key: 'sim-match-clock', label: `${matchClockLabel(simMatchClock)} match`, tone: simMatchClock <= 30 ? 'negative' : simMatchClock <= 60 ? 'warning' : 'neutral', title: 'The live overall match timer for this simulator battle.' },
         ],
       },
-      { label: 'Global Field', tags: simulatorGlobalFieldTags(simBattle) },
-      { label: 'Your Side', tags: simulatorSideConditionTags(simBattle.player) },
-      { label: 'AI Side', tags: simulatorSideConditionTags(simBattle.opponent) },
+      { label: 'Global Field', tags: simulatorGlobalFieldTags(simPresentationBattle) },
+      { label: 'Your Side', tags: simulatorSideConditionTags(simPresentationBattle.player) },
+      { label: 'AI Side', tags: simulatorSideConditionTags(simPresentationBattle.opponent) },
     ] : [],
-    [simBattle, simTurnClock, simTurnTimerEnabled, simMatchClock],
+    [simPresentationBattle, simTurnClock, simTurnTimerEnabled, simMatchClock],
   );
   const pvpFieldSections = useMemo<BattlefieldConditionSection[]>(
-    () => pvpRoom?.battle ? [
+    () => pvpPresentationBattle ? [
       {
         label: 'Turn Flow',
         tags: [
-          { key: 'pvp-turn', label: `Turn ${pvpRoom.battle.turn}`, tone: 'positive', title: 'The current live PvP turn.' },
-          { key: 'pvp-clock', label: pvpRoom.playerChoicesLocked ? 'You locked' : `${pvpCountdown}s clock`, tone: pvpRoom.playerChoicesLocked ? 'positive' : pvpCountdown <= 10 ? 'warning' : 'neutral', title: pvpRoom.playerChoicesLocked ? 'Your turn submission is locked, so your personal move clock is effectively stopped while the room waits on the opponent.' : 'The mandatory room timer for the current turn.' },
+          { key: 'pvp-turn', label: `Turn ${pvpPresentationBattle.turn}`, tone: 'positive', title: 'The current live PvP turn.' },
+          { key: 'pvp-clock', label: pvpRoom?.playerChoicesLocked ? 'You locked' : `${pvpCountdown}s clock`, tone: pvpRoom?.playerChoicesLocked ? 'positive' : pvpCountdown <= 10 ? 'warning' : 'neutral', title: pvpRoom?.playerChoicesLocked ? 'Your turn submission is locked, so your personal move clock is effectively stopped while the room waits on the opponent.' : 'The mandatory room timer for the current turn.' },
           { key: 'pvp-match-clock', label: `${matchClockLabel(pvpMatchCountdown)} match`, tone: pvpMatchCountdown <= 30 ? 'negative' : pvpMatchCountdown <= 60 ? 'warning' : 'neutral', title: 'The live overall match timer for this PvP room.' },
         ],
       },
-      { label: 'Global Field', tags: simulatorGlobalFieldTags(pvpRoom.battle) },
-      { label: 'Your Side', tags: simulatorSideConditionTags(pvpRoom.battle.player) },
-      { label: 'Opponent Side', tags: simulatorSideConditionTags(pvpRoom.battle.opponent) },
+      { label: 'Global Field', tags: simulatorGlobalFieldTags(pvpPresentationBattle) },
+      { label: 'Your Side', tags: simulatorSideConditionTags(pvpPresentationBattle.player) },
+      { label: 'Opponent Side', tags: simulatorSideConditionTags(pvpPresentationBattle.opponent) },
     ] : [],
-    [pvpRoom?.battle, pvpCountdown, pvpMatchCountdown],
+    [pvpPresentationBattle, pvpRoom?.playerChoicesLocked, pvpCountdown, pvpMatchCountdown],
   );
   const simPreviewFieldSections = useMemo<BattlefieldConditionSection[]>(
     () => simPreview ? [
@@ -3745,17 +4227,31 @@ function App() {
     rate: number,
     announcerEnabled = true,
     setPlaybackLocked?: (locked: boolean) => void,
+    setDisplayedBattle?: (value: SimulatorBattleState | null) => void,
+    initialDisplayBattle?: SimulatorBattleState | null,
   ) {
     clearPlaybackTimers(timerRef);
     if (!steps.length && !wrapUp.length) {
+      if (setDisplayedBattle) {
+        setDisplayedBattle(cloneBattleState(battle));
+      }
       setPlaybackLocked?.(false);
       return;
     }
     setPlaybackLocked?.(true);
+    const displaySnapshots = setDisplayedBattle
+      ? buildPlaybackBattleSnapshots(initialDisplayBattle ?? battle, battle, steps)
+      : [];
+    if (setDisplayedBattle) {
+      setDisplayedBattle(cloneBattleState(initialDisplayBattle ?? battle));
+    }
 
     let offset = 0;
     steps.forEach((step, index) => {
       const playbackHandle = window.setTimeout(() => {
+        if (setDisplayedBattle) {
+          setDisplayedBattle(displaySnapshots[index] ?? cloneBattleState(battle));
+        }
         setVisibleLog((current) => [step.entry, ...current].slice(0, 60));
         if (step.event) {
           const eventWithFreshId = { ...step.event, id: `${step.id}-event` };
@@ -3783,6 +4279,9 @@ function App() {
     }
 
     const hydrationHandle = window.setTimeout(() => {
+      if (setDisplayedBattle) {
+        setDisplayedBattle(cloneBattleState(battle));
+      }
       setVisibleLog((current) => mergeBattlePlaybackLog(current, battle));
     }, offset + 420);
     timerRef.current.push(hydrationHandle);
@@ -3940,6 +4439,28 @@ function App() {
   }, [simChoiceDrafts]);
 
   useEffect(() => {
+    if (!simBattle) {
+      return;
+    }
+
+    setSimChoiceDrafts((current) => {
+      const next = sanitizedChoiceDraftsForBattle(simBattle, current);
+      return JSON.stringify(next) === JSON.stringify(current) ? current : next;
+    });
+  }, [simBattle]);
+
+  useEffect(() => {
+    if (!pvpRoom?.battle) {
+      return;
+    }
+
+    setPvpChoiceDrafts((current) => {
+      const next = sanitizedChoiceDraftsForBattle(pvpRoom.battle!, current);
+      return JSON.stringify(next) === JSON.stringify(current) ? current : next;
+    });
+  }, [pvpRoom?.battle]);
+
+  useEffect(() => {
     simTurnReviewsRef.current = simTurnReviews;
   }, [simTurnReviews]);
 
@@ -3972,6 +4493,7 @@ function App() {
       clearPlaybackTimers(simPlaybackTimersRef);
       previousBattleRef.current = null;
       recordedBattleKeyRef.current = null;
+      setSimDisplayedBattle(null);
       setSimBattlefieldEvent(null);
       setSimVisibleBattleLog([]);
       setSimPlaybackLocked(false);
@@ -4001,7 +4523,11 @@ function App() {
         simAnnouncerRate,
         simAnnouncerEnabled,
         setSimPlaybackLocked,
+        setSimDisplayedBattle,
+        previousBattle?.stage === 'battle' ? previousBattle : simBattle,
       );
+    } else {
+      setSimDisplayedBattle(cloneBattleState(simBattle));
     }
 
     if (simBattle.stage === 'finished') {
@@ -4086,6 +4612,7 @@ function App() {
       clearPlaybackTimers(pvpPlaybackTimersRef);
       previousPvpBattleRef.current = null;
       recordedPvpBattleKeyRef.current = null;
+      setPvpDisplayedBattle(null);
       setPvpBattlefieldEvent(null);
       setPvpVisibleBattleLog([]);
       setPvpPlaybackLocked(false);
@@ -4109,7 +4636,11 @@ function App() {
           1,
           pvpAnnouncerEnabled,
           setPvpPlaybackLocked,
+          setPvpDisplayedBattle,
+          previousPvpBattleRef.current?.stage === 'battle' ? previousPvpBattleRef.current : pvpRoom.battle,
         );
+      } else {
+        setPvpDisplayedBattle(cloneBattleState(pvpRoom.battle));
       }
 
       if (pvpRoom.stage === 'finished') {
@@ -6202,11 +6733,11 @@ function App() {
                       <div className="subpanel sim-field-panel">
                         <SectionHeader title="Board State" subtitle="Live field, screen, and hazard conditions pulled from the simulator state." compact />
                         <div className="sim-field-stack">
-                          {simulatorGlobalFieldTags(simBattle).length ? (
+                          {simulatorGlobalFieldTags(simPresentationBattle ?? simBattle).length ? (
                             <div className="sim-field-section">
                               <strong>Global Field</strong>
                               <div className="battle-tag-row">
-                                {simulatorGlobalFieldTags(simBattle).map((tag) => (
+                                {simulatorGlobalFieldTags(simPresentationBattle ?? simBattle).map((tag) => (
                                   <span key={tag.key} className={`battle-tag battle-tag-${tag.tone}`} title={tag.title}>
                                     {tag.label}
                                   </span>
@@ -6215,8 +6746,8 @@ function App() {
                             </div>
                           ) : null}
                           {[
-                            { label: 'Your Side', side: simBattle.player },
-                            { label: 'AI Side', side: simBattle.opponent },
+                            { label: 'Your Side', side: (simPresentationBattle ?? simBattle).player },
+                            { label: 'AI Side', side: (simPresentationBattle ?? simBattle).opponent },
                           ].map(({ label, side }) => {
                             const sideTags = simulatorSideConditionTags(side);
                             return sideTags.length ? (
@@ -6288,16 +6819,16 @@ function App() {
                     title="Live Battle Stage"
                     subtitle="This dedicated battle stage now stays in its own full-width section so the command deck can dock on the left while the battlefield keeps its full readable map width."
                     backdrop={simBackdrop}
-                    weather={simBattle.environment.weather}
-                    terrain={simBattle.environment.terrain}
-                    weatherTurns={simBattle.weatherTurns}
-                    terrainTurns={simBattle.terrainTurns}
-                    topLabel={simBattle.opponent.name}
-                    bottomLabel={simBattle.player.name}
-                    topSlots={battlefieldActiveSlotsFromSide(simBattle.opponent, simBattle.format)}
-                    bottomSlots={battlefieldActiveSlotsFromSide(simBattle.player, simBattle.format, true)}
-                    topBench={battlefieldBenchSlotsFromSide(simBattle.opponent)}
-                    bottomBench={battlefieldBenchSlotsFromSide(simBattle.player, true)}
+                    weather={(simPresentationBattle ?? simBattle).environment.weather}
+                    terrain={(simPresentationBattle ?? simBattle).environment.terrain}
+                    weatherTurns={(simPresentationBattle ?? simBattle).weatherTurns}
+                    terrainTurns={(simPresentationBattle ?? simBattle).terrainTurns}
+                    topLabel={(simPresentationBattle ?? simBattle).opponent.name}
+                    bottomLabel={(simPresentationBattle ?? simBattle).player.name}
+                    topSlots={battlefieldActiveSlotsFromSide((simPresentationBattle ?? simBattle).opponent, (simPresentationBattle ?? simBattle).format)}
+                    bottomSlots={battlefieldActiveSlotsFromSide((simPresentationBattle ?? simBattle).player, (simPresentationBattle ?? simBattle).format, true)}
+                    topBench={battlefieldBenchSlotsFromSide((simPresentationBattle ?? simBattle).opponent)}
+                    bottomBench={battlefieldBenchSlotsFromSide((simPresentationBattle ?? simBattle).player, true)}
                     event={simBattlefieldEvent}
                     conditionSections={simFieldSections}
                     controlDock={<div className="battlefield-control-panel">{simCommandDeck}</div>}
@@ -6464,11 +6995,11 @@ function App() {
                       <div className="subpanel sim-field-panel">
                         <SectionHeader title="Active Effects" subtitle="Weather, terrain, rooms, screens, hazards, and live turn counters." compact />
                         <div className="sim-field-stack">
-                          {simulatorGlobalFieldTags(pvpRoom.battle).length ? (
+                          {simulatorGlobalFieldTags(pvpPresentationBattle ?? pvpRoom.battle).length ? (
                             <div className="sim-field-section">
                               <strong>Global Field</strong>
                               <div className="battle-tag-row">
-                                {simulatorGlobalFieldTags(pvpRoom.battle).map((tag) => (
+                                {simulatorGlobalFieldTags(pvpPresentationBattle ?? pvpRoom.battle).map((tag) => (
                                   <span key={tag.key} className={`battle-tag battle-tag-${tag.tone}`} title={tag.title}>
                                     {tag.label}
                                   </span>
@@ -6476,7 +7007,7 @@ function App() {
                               </div>
                             </div>
                           ) : null}
-                          {[{ label: 'Your Side', side: pvpRoom.battle.player }, { label: 'Opponent Side', side: pvpRoom.battle.opponent }].map(({ label, side }) => {
+                          {[{ label: 'Your Side', side: (pvpPresentationBattle ?? pvpRoom.battle).player }, { label: 'Opponent Side', side: (pvpPresentationBattle ?? pvpRoom.battle).opponent }].map(({ label, side }) => {
                             const sideTags = simulatorSideConditionTags(side);
                             return sideTags.length ? (
                               <div key={label} className="sim-field-section">
@@ -6541,16 +7072,16 @@ function App() {
                     title="Live PvP Stage"
                     subtitle="This full-width broadcast field stays locked to one map for the whole room, with larger active lanes, clearer backline reveal space, and a left-docked command deck that does not squeeze the battlefield."
                     backdrop={pvpBackdrop}
-                    weather={pvpRoom.battle.environment.weather}
-                    terrain={pvpRoom.battle.environment.terrain}
-                    weatherTurns={pvpRoom.battle.weatherTurns}
-                    terrainTurns={pvpRoom.battle.terrainTurns}
-                    topLabel={pvpRoom.battle.opponent.name}
-                    bottomLabel={pvpRoom.battle.player.name}
-                    topSlots={battlefieldActiveSlotsFromSide(pvpRoom.battle.opponent, pvpRoom.battle.format)}
-                    bottomSlots={battlefieldActiveSlotsFromSide(pvpRoom.battle.player, pvpRoom.battle.format, true)}
-                    topBench={battlefieldBenchSlotsFromSide(pvpRoom.battle.opponent)}
-                    bottomBench={battlefieldBenchSlotsFromSide(pvpRoom.battle.player, true)}
+                    weather={(pvpPresentationBattle ?? pvpRoom.battle).environment.weather}
+                    terrain={(pvpPresentationBattle ?? pvpRoom.battle).environment.terrain}
+                    weatherTurns={(pvpPresentationBattle ?? pvpRoom.battle).weatherTurns}
+                    terrainTurns={(pvpPresentationBattle ?? pvpRoom.battle).terrainTurns}
+                    topLabel={(pvpPresentationBattle ?? pvpRoom.battle).opponent.name}
+                    bottomLabel={(pvpPresentationBattle ?? pvpRoom.battle).player.name}
+                    topSlots={battlefieldActiveSlotsFromSide((pvpPresentationBattle ?? pvpRoom.battle).opponent, (pvpPresentationBattle ?? pvpRoom.battle).format)}
+                    bottomSlots={battlefieldActiveSlotsFromSide((pvpPresentationBattle ?? pvpRoom.battle).player, (pvpPresentationBattle ?? pvpRoom.battle).format, true)}
+                    topBench={battlefieldBenchSlotsFromSide((pvpPresentationBattle ?? pvpRoom.battle).opponent)}
+                    bottomBench={battlefieldBenchSlotsFromSide((pvpPresentationBattle ?? pvpRoom.battle).player, true)}
                     event={pvpBattlefieldEvent}
                     conditionSections={pvpFieldSections}
                     controlDock={<div className="battlefield-control-panel">{pvpCommandDeck}</div>}
