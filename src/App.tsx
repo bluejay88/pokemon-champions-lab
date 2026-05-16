@@ -5278,7 +5278,8 @@ function App() {
         )}
 
         {activeTab === 'simulator' && (
-          <section className="page-grid">
+          <>
+          <section className="page-grid battle-top-grid">
             <div className="panel tall">
               <SectionHeader title="Battle Setup" subtitle="Pick the battle type, roll an AI opponent, study the one-minute preview, and lock your four." />
               <label className="field">
@@ -5374,21 +5375,6 @@ function App() {
                     <button className="action-button" onClick={() => setSimPreview(null)}>Cancel Preview</button>
                   </div>
 
-                  <div className="battlefield-showcase-row">
-                    <BattlefieldArena
-                      title="Preview Battle Camera"
-                      subtitle="This larger battle stage now sits in its own dedicated section so you can read the map, sprite spacing, and projected opening lanes more clearly before the match starts."
-                      backdrop={simBackdrop}
-                      topLabel="Opponent Preview"
-                      bottomLabel="Your Locked Order"
-                      topSlots={previewBattlefieldSlots(simPreview.opponentTeam, simPreview.format, simPreviewOpponentOrder, 'Species shown, full set still hidden.')}
-                      bottomSlots={previewBattlefieldSlots(team, simPreview.format, simPreviewPlayerOrder, 'Projected lead lane from your current bring order.')}
-                      topBench={previewBattlefieldBench(simPreview.opponentTeam, simPreview.format, simPreviewOpponentOrder, 'Preview species still hidden in battle order.')}
-                      bottomBench={previewBattlefieldBench(team, simPreview.format, simPreviewPlayerOrder, 'Backline order from your current lock.')}
-                      conditionSections={simPreviewFieldSections}
-                      expansive
-                    />
-                  </div>
                 </>
               ) : simBattle ? (
                 <>
@@ -5459,29 +5445,6 @@ function App() {
                     <BattleSideView side={simBattle.player} format={simBattle.format} friendly />
                   </div>
 
-                  <div className="battlefield-live-combat-row">
-                    <div className="battlefield-showcase-row battlefield-showcase-row-live">
-                      <BattlefieldArena
-                        title="Live Battle Stage"
-                        subtitle="This dedicated lower stage stays locked to one battle map for the full match, with larger sprite lanes, clearer HP reads, and room for hit, KO, and ability cues to breathe."
-                        backdrop={simBackdrop}
-                        weather={simBattle.environment.weather}
-                        terrain={simBattle.environment.terrain}
-                        weatherTurns={simBattle.weatherTurns}
-                        terrainTurns={simBattle.terrainTurns}
-                        topLabel={simBattle.opponent.name}
-                        bottomLabel={simBattle.player.name}
-                        topSlots={battlefieldActiveSlotsFromSide(simBattle.opponent, simBattle.format)}
-                        bottomSlots={battlefieldActiveSlotsFromSide(simBattle.player, simBattle.format, true)}
-                        topBench={battlefieldBenchSlotsFromSide(simBattle.opponent)}
-                        bottomBench={battlefieldBenchSlotsFromSide(simBattle.player, true)}
-                        event={simBattlefieldEvent}
-                        conditionSections={simFieldSections}
-                        controlDock={<div className="battlefield-control-panel">{simCommandDeck}</div>}
-                        expansive
-                      />
-                    </div>
-                  </div>
                 </>
               ) : (
                 <div className="empty-state">
@@ -5491,10 +5454,58 @@ function App() {
               )}
             </div>
           </section>
+          {simPreview ? (
+            <section className="battle-stage-full-width">
+              <div className="battlefield-showcase-row">
+                <BattlefieldArena
+                  title="Preview Battle Camera"
+                  subtitle="This larger battle stage now sits in its own dedicated section so you can read the map, sprite spacing, and projected opening lanes more clearly before the match starts."
+                  backdrop={simBackdrop}
+                  topLabel="Opponent Preview"
+                  bottomLabel="Your Locked Order"
+                  topSlots={previewBattlefieldSlots(simPreview.opponentTeam, simPreview.format, simPreviewOpponentOrder, 'Species shown, full set still hidden.')}
+                  bottomSlots={previewBattlefieldSlots(team, simPreview.format, simPreviewPlayerOrder, 'Projected lead lane from your current bring order.')}
+                  topBench={previewBattlefieldBench(simPreview.opponentTeam, simPreview.format, simPreviewOpponentOrder, 'Preview species still hidden in battle order.')}
+                  bottomBench={previewBattlefieldBench(team, simPreview.format, simPreviewPlayerOrder, 'Backline order from your current lock.')}
+                  conditionSections={simPreviewFieldSections}
+                  expansive
+                />
+              </div>
+            </section>
+          ) : null}
+          {simBattle ? (
+            <section className="battle-stage-full-width">
+              <div className="battlefield-live-combat-row">
+                <div className="battlefield-showcase-row battlefield-showcase-row-live">
+                  <BattlefieldArena
+                    title="Live Battle Stage"
+                    subtitle="This dedicated battle stage now stays in its own full-width section so the command deck can dock on the left while the battlefield keeps its full readable map width."
+                    backdrop={simBackdrop}
+                    weather={simBattle.environment.weather}
+                    terrain={simBattle.environment.terrain}
+                    weatherTurns={simBattle.weatherTurns}
+                    terrainTurns={simBattle.terrainTurns}
+                    topLabel={simBattle.opponent.name}
+                    bottomLabel={simBattle.player.name}
+                    topSlots={battlefieldActiveSlotsFromSide(simBattle.opponent, simBattle.format)}
+                    bottomSlots={battlefieldActiveSlotsFromSide(simBattle.player, simBattle.format, true)}
+                    topBench={battlefieldBenchSlotsFromSide(simBattle.opponent)}
+                    bottomBench={battlefieldBenchSlotsFromSide(simBattle.player, true)}
+                    event={simBattlefieldEvent}
+                    conditionSections={simFieldSections}
+                    controlDock={<div className="battlefield-control-panel">{simCommandDeck}</div>}
+                    expansive
+                  />
+                </div>
+              </div>
+            </section>
+          ) : null}
+          </>
         )}
 
         {activeTab === 'pvp-battles' && (
-          <section className="page-grid">
+          <>
+          <section className="page-grid battle-top-grid">
             <div className="panel tall">
               <SectionHeader title="Player vs Player" subtitle="Register, lock a saved team, and use a 6-digit room code to battle another live player." />
               <div className="notes-list compact-scroll">
@@ -5629,21 +5640,6 @@ function App() {
                     <button className="action-button primary" onClick={() => { void submitPvpBringOrderSelection(); }}>Submit Bring Order</button>
                     <button className="action-button" onClick={() => setPvpBringOrder([])}>Clear Picks</button>
                   </div>
-                  <div className="battlefield-showcase-row">
-                    <BattlefieldArena
-                      title="PvP Preview Camera"
-                      subtitle="The room preview now keeps a larger dedicated battlefield section reserved below the preview lists so the lead lanes and reveal rules are easier to read."
-                      backdrop={pvpBackdrop}
-                      topLabel="Opponent Preview"
-                      bottomLabel="Your Locked Order"
-                      topSlots={previewBattlefieldSlots(pvpRoom.opponentTeam ?? createTeam('Empty'), pvpRoom.format, pvpPreviewOpponentOrder, 'Preview species only, battle order unrevealed.')}
-                      bottomSlots={previewBattlefieldSlots(team, pvpRoom.format, pvpPreviewPlayerOrder, 'Projected lead lane from your current bring order.')}
-                      topBench={previewBattlefieldBench(pvpRoom.opponentTeam ?? createTeam('Empty'), pvpRoom.format, pvpPreviewOpponentOrder, 'Preview species only until live reveal.')}
-                      bottomBench={previewBattlefieldBench(team, pvpRoom.format, pvpPreviewPlayerOrder, 'Backline order from your current lock.')}
-                      conditionSections={pvpPreviewFieldSections}
-                      expansive
-                    />
-                  </div>
                 </>
               ) : pvpRoom.battle ? (
                 <>
@@ -5707,33 +5703,57 @@ function App() {
                     <BattleSideView side={pvpRoom.battle.player} format={pvpRoom.battle.format} friendly />
                   </div>
 
-                  <div className="battlefield-live-combat-row">
-                    <div className="battlefield-showcase-row battlefield-showcase-row-live">
-                      <BattlefieldArena
-                        title="Live PvP Stage"
-                        subtitle="This full-width broadcast field stays locked to one map for the whole room, with larger active lanes, clearer backline reveal space, and more readable battle flow."
-                        backdrop={pvpBackdrop}
-                        weather={pvpRoom.battle.environment.weather}
-                        terrain={pvpRoom.battle.environment.terrain}
-                        weatherTurns={pvpRoom.battle.weatherTurns}
-                        terrainTurns={pvpRoom.battle.terrainTurns}
-                        topLabel={pvpRoom.battle.opponent.name}
-                        bottomLabel={pvpRoom.battle.player.name}
-                        topSlots={battlefieldActiveSlotsFromSide(pvpRoom.battle.opponent, pvpRoom.battle.format)}
-                        bottomSlots={battlefieldActiveSlotsFromSide(pvpRoom.battle.player, pvpRoom.battle.format, true)}
-                        topBench={battlefieldBenchSlotsFromSide(pvpRoom.battle.opponent)}
-                        bottomBench={battlefieldBenchSlotsFromSide(pvpRoom.battle.player, true)}
-                        event={pvpBattlefieldEvent}
-                        conditionSections={pvpFieldSections}
-                        controlDock={<div className="battlefield-control-panel">{pvpCommandDeck}</div>}
-                        expansive
-                      />
-                    </div>
-                  </div>
                 </>
               ) : null}
             </div>
           </section>
+          {pvpRoom?.stage === 'preview' ? (
+            <section className="battle-stage-full-width">
+              <div className="battlefield-showcase-row">
+                <BattlefieldArena
+                  title="PvP Preview Camera"
+                  subtitle="The room preview now keeps a larger dedicated battlefield section reserved below the preview lists so the lead lanes and reveal rules are easier to read."
+                  backdrop={pvpBackdrop}
+                  topLabel="Opponent Preview"
+                  bottomLabel="Your Locked Order"
+                  topSlots={previewBattlefieldSlots(pvpRoom.opponentTeam ?? createTeam('Empty'), pvpRoom.format, pvpPreviewOpponentOrder, 'Preview species only, battle order unrevealed.')}
+                  bottomSlots={previewBattlefieldSlots(team, pvpRoom.format, pvpPreviewPlayerOrder, 'Projected lead lane from your current bring order.')}
+                  topBench={previewBattlefieldBench(pvpRoom.opponentTeam ?? createTeam('Empty'), pvpRoom.format, pvpPreviewOpponentOrder, 'Preview species only until live reveal.')}
+                  bottomBench={previewBattlefieldBench(team, pvpRoom.format, pvpPreviewPlayerOrder, 'Backline order from your current lock.')}
+                  conditionSections={pvpPreviewFieldSections}
+                  expansive
+                />
+              </div>
+            </section>
+          ) : null}
+          {pvpRoom?.battle ? (
+            <section className="battle-stage-full-width">
+              <div className="battlefield-live-combat-row">
+                <div className="battlefield-showcase-row battlefield-showcase-row-live">
+                  <BattlefieldArena
+                    title="Live PvP Stage"
+                    subtitle="This full-width broadcast field stays locked to one map for the whole room, with larger active lanes, clearer backline reveal space, and a left-docked command deck that does not squeeze the battlefield."
+                    backdrop={pvpBackdrop}
+                    weather={pvpRoom.battle.environment.weather}
+                    terrain={pvpRoom.battle.environment.terrain}
+                    weatherTurns={pvpRoom.battle.weatherTurns}
+                    terrainTurns={pvpRoom.battle.terrainTurns}
+                    topLabel={pvpRoom.battle.opponent.name}
+                    bottomLabel={pvpRoom.battle.player.name}
+                    topSlots={battlefieldActiveSlotsFromSide(pvpRoom.battle.opponent, pvpRoom.battle.format)}
+                    bottomSlots={battlefieldActiveSlotsFromSide(pvpRoom.battle.player, pvpRoom.battle.format, true)}
+                    topBench={battlefieldBenchSlotsFromSide(pvpRoom.battle.opponent)}
+                    bottomBench={battlefieldBenchSlotsFromSide(pvpRoom.battle.player, true)}
+                    event={pvpBattlefieldEvent}
+                    conditionSections={pvpFieldSections}
+                    controlDock={<div className="battlefield-control-panel">{pvpCommandDeck}</div>}
+                    expansive
+                  />
+                </div>
+              </div>
+            </section>
+          ) : null}
+          </>
         )}
 
         {activeTab === 'profile' && (
