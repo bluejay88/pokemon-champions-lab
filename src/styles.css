@@ -1666,7 +1666,7 @@ button {
 
 .battlefield-layout-with-controls,
 .battlefield-live-combat-row {
-  grid-template-columns: clamp(360px, 24vw, 430px) minmax(0, 1fr);
+  grid-template-columns: minmax(320px, 360px) minmax(780px, 1fr);
   gap: 18px;
   align-items: start;
 }
@@ -1692,7 +1692,7 @@ button {
   align-self: start;
   grid-template-columns: minmax(0, 1fr);
   width: 100%;
-  max-width: 430px;
+  max-width: 360px;
 }
 
 .battlefield-control-panel {
@@ -1705,6 +1705,10 @@ button {
 
 .battlefield-stage-shell {
   min-width: 0;
+}
+
+.battlefield-layout-with-controls .battlefield-main-stack {
+  min-width: 780px;
 }
 
 .battlefield-stage {
@@ -2856,7 +2860,7 @@ button {
 
   .battlefield-layout-with-controls,
   .battlefield-panel-expansive .battlefield-layout-with-controls {
-    grid-template-columns: minmax(400px, 430px) minmax(0, 1fr);
+    grid-template-columns: minmax(320px, 360px) minmax(900px, 1fr);
   }
 
   .battlefield-dock-row {
@@ -2907,7 +2911,7 @@ button {
 
   .battlefield-layout-with-controls,
   .battlefield-panel-expansive .battlefield-layout-with-controls {
-    grid-template-columns: minmax(350px, 400px) minmax(0, 1fr);
+    grid-template-columns: minmax(300px, 340px) minmax(820px, 1fr);
   }
 
   .battlefield-panel-expansive .battlefield-stage {
