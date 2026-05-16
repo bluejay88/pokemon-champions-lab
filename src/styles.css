@@ -1558,6 +1558,14 @@ button {
   margin-top: -2px;
 }
 
+.action-matchup-row {
+  margin-top: -2px;
+}
+
+.action-matchup-row .battle-tag {
+  font-size: 0.72rem;
+}
+
 .battle-tag {
   display: inline-flex;
   align-items: center;

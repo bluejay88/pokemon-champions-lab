@@ -324,6 +324,71 @@ assert.ok(helpingHandDamageResult.averageDamage > damageResult.averageDamage, 'H
 assert.ok(magicRoomDamageResult.averageDamage < damageResult.averageDamage, 'Magic Room should suppress held-item damage boosts.');
 assert.ok(wonderRoomDamageResult.averageDamage > damageResult.averageDamage, 'Wonder Room should swap the defender into its lower special-wall stat when appropriate.');
 
+const freezeDryUser = findPokemonWithMoves(['Freeze-Dry'], ['Glaceon', 'Aurorus', 'Vanilluxe']);
+const hawlucha = dataset.pokemon.find((pokemon) => pokemon.displayName === 'Hawlucha') ?? null;
+const kangaskhan = dataset.pokemon.find((pokemon) => pokemon.displayName === 'Kangaskhan') ?? null;
+const milotic = dataset.pokemon.find((pokemon) => pokemon.displayName === 'Milotic') ?? null;
+const chesnaught = dataset.pokemon.find((pokemon) => pokemon.displayName === 'Chesnaught') ?? null;
+const gengar = dataset.pokemon.find((pokemon) => pokemon.displayName === 'Gengar') ?? null;
+assert(freezeDryUser && hawlucha && kangaskhan && milotic && chesnaught && gengar, 'Expected Freeze-Dry, Flying Press, and Scrappy audit Pokemon to exist.');
+const freezeDryMove = freezeDryUser.movePool.find((move) => move.name === 'Freeze-Dry');
+const flyingPressMove = hawlucha.movePool.find((move) => move.name === 'Flying Press');
+const hammerArmMove = kangaskhan.movePool.find((move) => move.name === 'Hammer Arm');
+assert(freezeDryMove && flyingPressMove && hammerArmMove, 'Expected audit move hooks to exist for Freeze-Dry, Flying Press, and Hammer Arm.');
+const freezeDryResult = calculateDamage(
+  {
+    ...makeEmptyBuild('audit-freeze-dry-user'),
+    pokemonId: freezeDryUser.id,
+    abilityName: freezeDryUser.abilities[0]?.name ?? null,
+    moveIds: [freezeDryMove.id],
+    evs: { ...blankStats(), specialAttack: 32, speed: 24, hp: 10 },
+  },
+  {
+    ...makeEmptyBuild('audit-freeze-dry-target'),
+    pokemonId: milotic.id,
+    moveIds: ['recover'],
+    evs: { ...blankStats(), hp: 32, specialDefense: 20, defense: 14 },
+  },
+  freezeDryMove,
+  champions.defaultEnvironment,
+);
+assert.equal(freezeDryResult?.effectiveness, 2, `Freeze-Dry should register as super effective into Water targets, received ${freezeDryResult?.effectiveness}.`);
+const flyingPressResult = calculateDamage(
+  {
+    ...makeEmptyBuild('audit-flying-press-user'),
+    pokemonId: hawlucha.id,
+    moveIds: [flyingPressMove.id],
+    evs: { ...blankStats(), attack: 32, speed: 24, hp: 10 },
+  },
+  {
+    ...makeEmptyBuild('audit-flying-press-target'),
+    pokemonId: chesnaught.id,
+    moveIds: ['spiky-shield'],
+    evs: { ...blankStats(), hp: 32, defense: 18, specialDefense: 16 },
+  },
+  flyingPressMove,
+  champions.defaultEnvironment,
+);
+assert.equal(flyingPressResult?.effectiveness, 4, `Flying Press should combine Fighting and Flying coverage, received ${flyingPressResult?.effectiveness}.`);
+const scrappyResult = calculateDamage(
+  {
+    ...makeEmptyBuild('audit-scrappy-user'),
+    pokemonId: kangaskhan.id,
+    abilityName: 'Scrappy',
+    moveIds: [hammerArmMove.id],
+    evs: { ...blankStats(), attack: 32, speed: 24, hp: 10 },
+  },
+  {
+    ...makeEmptyBuild('audit-scrappy-target'),
+    pokemonId: gengar.id,
+    moveIds: ['shadow-ball'],
+    evs: { ...blankStats(), hp: 24, defense: 10, specialDefense: 24 },
+  },
+  hammerArmMove,
+  champions.defaultEnvironment,
+);
+assert.equal(scrappyResult?.effectiveness, 0.5, `Scrappy should bypass Ghost immunity while still respecting the target's secondary type, received ${scrappyResult?.effectiveness}.`);
+
 const protectUser = findPokemonWithMoves(['Protect'], ['Amoonguss', 'Umbreon', 'Clefable']);
 const groundedProtectUser = findPokemonWithMoves(['Protect'], ['Umbreon', 'Clefable', 'Snorlax']);
 const earthquakeUser = findPokemonWithMoves(['Earthquake'], ['Garchomp']);

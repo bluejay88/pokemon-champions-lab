@@ -10,6 +10,7 @@ import {
   dataset,
   defaultEnvironment,
   displaySpriteForPokemon,
+  effectiveTypes,
   fillEffortSpreadRemainder,
   findMegaForm,
   findMegaStoneItem,
@@ -25,6 +26,7 @@ import {
   normalizeEffortSpread,
   normalizeMoveSelection,
   remainingEffortPoints,
+  resolveAbility,
   resolvePokemonForm,
   sanitizeTeamForChampions,
   selectedPokemon,
@@ -33,6 +35,7 @@ import {
   statOrder,
   statusOptions,
   terrainOptions,
+  typeEffectiveness,
   totalEffortBudget,
   totalEffortPoints,
   usesMegaSpriteFallback,
@@ -129,6 +132,13 @@ type BattlefieldPlaybackEvent = {
   moveName?: string | null;
   actorBadge?: string | null;
   targetBadge?: string | null;
+};
+type MoveEffectivenessRead = {
+  targetIndex: number;
+  targetName: string;
+  multiplier: number;
+  label: 'no effect' | 'ineffective' | 'mostly ineffective' | 'neutral' | 'super effective' | 'extremely effective';
+  tone: BattleTag['tone'];
 };
 type BattlefieldSlotModel = {
   key: string;
@@ -1796,6 +1806,130 @@ function simulatorTargetNote(move: PokemonMove | null, format: BattleFormat, all
   return null;
 }
 
+function battlePreviewPokemonForUnit(unit: SimUnit, previewMega: boolean) {
+  return previewMega && unit.megaPokemon ? unit.megaPokemon : unit.pokemon;
+}
+
+function battleTypesForUnitPreview(unit: SimUnit, battle: SimulatorBattleState, previewMega = false) {
+  const previewPokemon = battlePreviewPokemonForUnit(unit, previewMega);
+  const currentTypes = unit.typeOverride?.length ? [...unit.typeOverride] : [...effectiveTypes(previewPokemon, unit.build, battle.environment.weather)];
+  for (const addedType of unit.addedTypes) {
+    if (!currentTypes.includes(addedType)) {
+      currentTypes.push(addedType);
+    }
+  }
+  return currentTypes;
+}
+
+function battleAbilityNameForUnitPreview(unit: SimUnit, previewPokemon: PokemonEntry) {
+  if (unit.abilitySuppressed) {
+    return null;
+  }
+
+  if (!unit.megaEvolved && unit.megaPokemon && previewPokemon.id === unit.megaPokemon.id) {
+    return previewPokemon.abilities[0]?.name ?? resolveAbility(unit.build, previewPokemon)?.name ?? null;
+  }
+
+  return unit.abilityOverrideName ?? resolveAbility(unit.build, previewPokemon)?.name ?? null;
+}
+
+function battleItemNameForUnit(unit: SimUnit) {
+  return unit.heldItemId ? getItemById(unit.heldItemId)?.name ?? null : null;
+}
+
+function effectivenessLabelForMultiplier(multiplier: number): MoveEffectivenessRead['label'] {
+  if (multiplier <= 0) {
+    return 'no effect';
+  }
+  if (multiplier <= 0.25) {
+    return 'ineffective';
+  }
+  if (multiplier < 1) {
+    return 'mostly ineffective';
+  }
+  if (multiplier >= 4) {
+    return 'extremely effective';
+  }
+  if (multiplier > 1) {
+    return 'super effective';
+  }
+  return 'neutral';
+}
+
+function effectivenessToneForMultiplier(multiplier: number): MoveEffectivenessRead['tone'] {
+  if (multiplier <= 0) {
+    return 'negative';
+  }
+  if (multiplier < 1) {
+    return 'warning';
+  }
+  if (multiplier > 1) {
+    return 'positive';
+  }
+  return 'neutral';
+}
+
+function moveEffectivenessReadsForBattleTargets(
+  battle: SimulatorBattleState,
+  attacker: SimUnit,
+  targets: Array<{ unit: SimUnit; targetIndex: number }>,
+  move: PokemonMove | null,
+  previewMega = false,
+) {
+  if (!move || move.category === 'Status' || !move.power || !targets.length) {
+    return [] as MoveEffectivenessRead[];
+  }
+
+  const previewPokemon = battlePreviewPokemonForUnit(attacker, previewMega);
+  const attackerTypes = battleTypesForUnitPreview(attacker, battle, previewMega);
+  const attackerAbility = battleAbilityNameForUnitPreview(attacker, previewPokemon);
+  const attackerItemName = battleItemNameForUnit(attacker);
+
+  return targets.map(({ unit: targetUnit, targetIndex }) => {
+    const defenderPokemon = targetUnit.pokemon;
+    const defenderTypes = battleTypesForUnitPreview(targetUnit, battle);
+    const defenderAbility = battleAbilityNameForUnitPreview(targetUnit, defenderPokemon);
+    const defenderItemName = battleItemNameForUnit(targetUnit);
+    const result = battleCoreRuntimeCache?.damage.calculateDamageWithOverrides(
+      attacker.build,
+      targetUnit.build,
+      move,
+      battle.environment,
+      {
+        attackerPokemon: previewPokemon,
+        defenderPokemon,
+        attackerTypes,
+        defenderTypes,
+        attackerAbility,
+        defenderAbility,
+        attackerItemName,
+        defenderItemName,
+      },
+    );
+    const multiplier = result?.effectiveness ?? typeEffectiveness(move.type, defenderTypes);
+    return {
+      targetIndex,
+      targetName: battleUnitDisplayName(targetUnit),
+      multiplier,
+      label: effectivenessLabelForMultiplier(multiplier),
+      tone: effectivenessToneForMultiplier(multiplier),
+    } satisfies MoveEffectivenessRead;
+  });
+}
+
+function moveLabelWithEffectiveness(
+  move: PokemonMove,
+  reads: MoveEffectivenessRead[],
+  selectedTarget: number,
+) {
+  if (!reads.length || move.category === 'Status' || !move.power) {
+    return move.name;
+  }
+
+  const focusRead = reads.find((read) => read.targetIndex === selectedTarget) ?? reads[0];
+  return `${move.name} - ${focusRead.label}`;
+}
+
 function pickPreferredMaleVoice() {
   if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
     return null;
@@ -3185,6 +3319,8 @@ function App() {
             const targetMode = simulatorTargetMode(selectedMove, simBattle.format);
             const targetNote = simulatorTargetNote(selectedMove, simBattle.format, allyUnit?.pokemon.displayName ?? null);
             const restrictionNotes = simulatorRestrictionNotes(unit);
+            const previewMega = effectiveDraftType === 'mega';
+            const selectedMoveReads = moveEffectivenessReadsForBattleTargets(simBattle, unit, liveEnemyTargets, selectedMove, previewMega);
 
             return (
               <div key={`${unit.pokemon.id}-${actor}`} className="subpanel sim-action-card">
@@ -3220,10 +3356,24 @@ function App() {
                       <span>{effectiveDraftType === 'mega' ? 'Move After Mega' : 'Move'}</span>
                       <select value={selectedMoveId} onChange={(event) => updateChoiceDraft(actor, { moveId: event.target.value })} disabled={!legalMoves.length}>
                         {legalMoves.map((move) => {
-                          return <option key={move.id} value={move.id}>{move.name}</option>;
+                          const moveReads = moveEffectivenessReadsForBattleTargets(simBattle, unit, liveEnemyTargets, move, previewMega);
+                          return <option key={move.id} value={move.id}>{moveLabelWithEffectiveness(move, moveReads, selectedTarget)}</option>;
                         })}
                       </select>
                     </label>
+                    {selectedMoveReads.length ? (
+                      <div className="battle-tag-row action-matchup-row">
+                        {selectedMoveReads.map((read) => (
+                          <span
+                            key={`${unit.pokemon.id}-${selectedMoveId}-${read.targetIndex}`}
+                            className={`battle-tag battle-tag-${read.tone}`}
+                            title={`${selectedMove?.name ?? 'Move'} into ${read.targetName}: ${read.multiplier.toFixed(2)}x`}
+                          >
+                            {read.targetName}: {read.label}
+                          </span>
+                        ))}
+                      </div>
+                    ) : null}
                     {targetMode === 'foe' ? (
                       <label className="field">
                         <span>Target</span>
@@ -3373,6 +3523,8 @@ function App() {
             const targetMode = simulatorTargetMode(selectedMove, pvpRoom.battle!.format);
             const targetNote = simulatorTargetNote(selectedMove, pvpRoom.battle!.format, allyUnit?.pokemon.displayName ?? null);
             const restrictionNotes = simulatorRestrictionNotes(unit);
+            const previewMega = effectiveDraftType === 'mega';
+            const selectedMoveReads = moveEffectivenessReadsForBattleTargets(pvpRoom.battle!, unit, liveEnemyTargets, selectedMove, previewMega);
 
             return (
               <div key={`${unit.pokemon.id}-${actor}`} className="subpanel sim-action-card">
@@ -3404,9 +3556,25 @@ function App() {
                     <label className="field">
                       <span>{effectiveDraftType === 'mega' ? 'Move After Mega' : 'Move'}</span>
                       <select value={selectedMoveId} onChange={(event) => updatePvpChoiceDraft(actor, { moveId: event.target.value })} disabled={!legalMoves.length}>
-                        {legalMoves.map((move) => <option key={move.id} value={move.id}>{move.name}</option>)}
+                        {legalMoves.map((move) => {
+                          const moveReads = moveEffectivenessReadsForBattleTargets(pvpRoom.battle!, unit, liveEnemyTargets, move, previewMega);
+                          return <option key={move.id} value={move.id}>{moveLabelWithEffectiveness(move, moveReads, selectedTarget)}</option>;
+                        })}
                       </select>
                     </label>
+                    {selectedMoveReads.length ? (
+                      <div className="battle-tag-row action-matchup-row">
+                        {selectedMoveReads.map((read) => (
+                          <span
+                            key={`${unit.pokemon.id}-${selectedMoveId}-${read.targetIndex}`}
+                            className={`battle-tag battle-tag-${read.tone}`}
+                            title={`${selectedMove?.name ?? 'Move'} into ${read.targetName}: ${read.multiplier.toFixed(2)}x`}
+                          >
+                            {read.targetName}: {read.label}
+                          </span>
+                        ))}
+                      </div>
+                    ) : null}
                     {targetMode === 'foe' ? (
                       <label className="field">
                         <span>Target</span>

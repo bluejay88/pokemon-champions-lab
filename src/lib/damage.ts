@@ -797,6 +797,35 @@ function defensiveAbilityModifier(
   return 1;
 }
 
+function moveTypeEffectiveness(
+  move: PokemonMove,
+  moveType: string,
+  defenderTypes: string[],
+  attackerAbilityName: string | null,
+) {
+  const ignoresGhostImmunity = ['Scrappy', "Mind's Eye"].includes(attackerAbilityName ?? '') && ['Normal', 'Fighting'].includes(moveType);
+  const sanitizedTypes = ignoresGhostImmunity
+    ? defenderTypes.filter((defenderType) => defenderType !== 'Ghost')
+    : defenderTypes;
+
+  if (move.name === 'Flying Press') {
+    const fightingSide = typeEffectiveness('Fighting', sanitizedTypes);
+    const flyingSide = typeEffectiveness('Flying', sanitizedTypes);
+    return fightingSide * flyingSide;
+  }
+
+  if (move.name === 'Thousand Arrows' && sanitizedTypes.includes('Flying')) {
+    return typeEffectiveness(moveType, sanitizedTypes.filter((defenderType) => defenderType !== 'Flying'));
+  }
+
+  let multiplier = typeEffectiveness(moveType, sanitizedTypes);
+  if (move.name === 'Freeze-Dry' && sanitizedTypes.includes('Water')) {
+    multiplier *= 4;
+  }
+
+  return multiplier;
+}
+
 function immunityFromAbility(defenderAbilityName: string | null, move: PokemonMove, moveType: string, effectiveness: number) {
   if (!defenderAbilityName || !highPriorityImmunityAbilities.has(defenderAbilityName)) {
     return false;
@@ -815,6 +844,10 @@ function immunityFromAbility(defenderAbilityName: string | null, move: PokemonMo
     'Water Absorb': ['Water'],
     'Well-Baked Body': ['Fire'],
   };
+
+  if (defenderAbilityName === 'Levitate' && move.name === 'Thousand Arrows') {
+    return false;
+  }
 
   if ((map[defenderAbilityName] ?? []).includes(moveType)) {
     return true;
@@ -1166,7 +1199,7 @@ export function calculateDamage(
   const defenderTypes = overrides?.defenderTypes ?? effectiveTypes(defender, defenderBuild, environment.weather);
   const attackerSpeed = overrides?.attackerSpeed ?? speedStat(attackerBuild, attacker, environment, attackerAbility);
   const defenderSpeed = overrides?.defenderSpeed ?? speedStat(defenderBuild, defender, environment, defenderAbility);
-  const effectiveness = isStruggle ? 1 : typeEffectiveness(moveType, defenderTypes);
+  const effectiveness = isStruggle ? 1 : moveTypeEffectiveness(move, moveType, defenderTypes, attackerAbility);
 
   if (!isStruggle && immunityFromAbility(defenderAbility, move, moveType, effectiveness)) {
     return {
