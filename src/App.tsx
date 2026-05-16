@@ -164,6 +164,14 @@ type BattlePlaybackStep = {
   announcerLine: string | null;
   holdMs: number;
 };
+type QueuedTurnSubmission = {
+  choices: SimulatorChoice[];
+  notices: string[];
+  reviews?: SimulatorTurnReview[];
+  turn: number;
+  replacementPhase: boolean;
+  roomCode?: string;
+};
 
 let battleCoreRuntimeCache: BattleCoreRuntime | null = null;
 let battleCoreRuntimePromise: Promise<BattleCoreRuntime> | null = null;
@@ -2450,10 +2458,14 @@ function introBattleSendOutPlaybackSteps(current: SimulatorBattleState, style: A
   const steps: BattlePlaybackStep[] = [];
   const appendSide = (side: SimSide) => {
     side.active
-      .map((unitIndex) => side.units[unitIndex] ?? null)
-      .filter((unit): unit is SimUnit => Boolean(unit && !unit.fainted))
+      .map((unitIndex, activeSlot) => ({ unit: side.units[unitIndex] ?? null, activeSlot }))
+      .filter((entry): entry is { unit: SimUnit; activeSlot: number } => Boolean(entry.unit && !entry.unit.fainted))
+      .sort((left, right) => {
+        const speedGap = announcerApproxSpeed(right.unit, side, current) - announcerApproxSpeed(left.unit, side, current);
+        return speedGap === 0 ? left.activeSlot - right.activeSlot : speedGap;
+      })
       .forEach((unit) => {
-        const entry = `${side.name} sent out ${battleUnitDisplayName(unit)}.`;
+        const entry = `${side.name} sent out ${battleUnitDisplayName(unit.unit)}.`;
         steps.push({
           id: makeId('battle-step'),
           entry,
@@ -2461,11 +2473,11 @@ function introBattleSendOutPlaybackSteps(current: SimulatorBattleState, style: A
             id: makeId('battlefield-event'),
             tone: 'switch',
             message: entry,
-            targetName: battleUnitDisplayName(unit),
+            targetName: battleUnitDisplayName(unit.unit),
             targetBadge: 'On Field',
           },
-          announcerLine: announcerStyleLine(style, fillAnnouncerLine(pickLine(announcerScripts.switch), { pokemon: battleUnitDisplayName(unit) })),
-          holdMs: BATTLEFIELD_SENDOUT_ANIMATION_MS + 260,
+          announcerLine: announcerStyleLine(style, fillAnnouncerLine(pickLine(announcerScripts.switch), { pokemon: battleUnitDisplayName(unit.unit) })),
+          holdMs: BATTLEFIELD_SENDOUT_ANIMATION_MS + 420,
         });
       });
   };
@@ -3070,6 +3082,7 @@ function App() {
   const [simBattlefieldEvent, setSimBattlefieldEvent] = useState<BattlefieldPlaybackEvent | null>(null);
   const [simVisibleBattleLog, setSimVisibleBattleLog] = useState<string[]>([]);
   const [simPlaybackLocked, setSimPlaybackLocked] = useState(false);
+  const [simQueuedTurn, setSimQueuedTurn] = useState<QueuedTurnSubmission | null>(null);
   const [simTurnReviews, setSimTurnReviews] = useState<SimulatorTurnReview[]>([]);
   const [simCountdown, setSimCountdown] = useState(0);
   const [simPreviewMessage, setSimPreviewMessage] = useState<string | null>(null);
@@ -3092,6 +3105,7 @@ function App() {
   const [pvpBattlefieldEvent, setPvpBattlefieldEvent] = useState<BattlefieldPlaybackEvent | null>(null);
   const [pvpVisibleBattleLog, setPvpVisibleBattleLog] = useState<string[]>([]);
   const [pvpPlaybackLocked, setPvpPlaybackLocked] = useState(false);
+  const [pvpQueuedTurn, setPvpQueuedTurn] = useState<QueuedTurnSubmission | null>(null);
   const [pvpRoomHistory, setPvpRoomHistory] = useState<OnlineBattleRoomHistoryEntry[]>([]);
   const [pvpHistorySearch, setPvpHistorySearch] = useState('');
   const [pvpChatInput, setPvpChatInput] = useState('');
@@ -3336,7 +3350,7 @@ function App() {
                 <div className="note-row compact-note">The KOed slot stays empty for the rest of the resolved turn. Your replacement will not enter until the new turn begins.</div>
                 <label className="field">
                   <span>Send In</span>
-                  <select value={draft.switchTarget} onChange={(event) => updateChoiceDraft(actor, { type: 'switch', switchTarget: Number(event.target.value) })} disabled={simPlaybackLocked}>
+                  <select value={draft.switchTarget} onChange={(event) => updateChoiceDraft(actor, { type: 'switch', switchTarget: Number(event.target.value) })} disabled={Boolean(simQueuedTurn)}>
                     {availableBench.map((benchIndex) => (
                       <option key={benchIndex} value={benchIndex}>{simBattle.player.units[benchIndex]?.pokemon.displayName}</option>
                     ))}
@@ -3385,7 +3399,7 @@ function App() {
             const restrictionNotes = simulatorRestrictionNotes(unit);
             const previewMega = effectiveDraftType === 'mega';
             const selectedMoveReads = moveEffectivenessReadsForBattleTargets(simBattle, unit, liveEnemyTargets, selectedMove, previewMega);
-            const actionLocked = simPlaybackLocked || unit.rechargeTurns > 0 || unit.chargingTurns > 0;
+            const actionLocked = Boolean(simQueuedTurn) || unit.rechargeTurns > 0 || unit.chargingTurns > 0;
 
             return (
               <div key={`${unit.pokemon.id}-${actor}`} className="subpanel sim-action-card">
@@ -3419,7 +3433,7 @@ function App() {
                   <>
                     <label className="field">
                       <span>{effectiveDraftType === 'mega' ? 'Move After Mega' : 'Move'}</span>
-                      <select value={selectedMoveId} onChange={(event) => updateChoiceDraft(actor, { moveId: event.target.value })} disabled={!legalMoves.length || simPlaybackLocked}>
+                      <select value={selectedMoveId} onChange={(event) => updateChoiceDraft(actor, { moveId: event.target.value })} disabled={!legalMoves.length || Boolean(simQueuedTurn)}>
                         {legalMoves.map((move) => {
                           const moveReads = moveEffectivenessReadsForBattleTargets(simBattle, unit, liveEnemyTargets, move, previewMega);
                           return <option key={move.id} value={move.id}>{moveLabelWithEffectiveness(move, moveReads, selectedTarget)}</option>;
@@ -3442,7 +3456,7 @@ function App() {
                     {targetMode === 'foe' ? (
                       <label className="field">
                         <span>Target</span>
-                        <select value={selectedTarget} onChange={(event) => updateChoiceDraft(actor, { target: Number(event.target.value) })} disabled={simPlaybackLocked}>
+                        <select value={selectedTarget} onChange={(event) => updateChoiceDraft(actor, { target: Number(event.target.value) })} disabled={Boolean(simQueuedTurn)}>
                           {liveEnemyTargets.map(({ unit: enemy, targetIndex }) => (
                             <option key={`${enemy.pokemon.id}-${targetIndex}`} value={targetIndex}>{enemy.pokemon.displayName}</option>
                           ))}
@@ -3480,7 +3494,7 @@ function App() {
                 ) : (
                   <label className="field">
                     <span>Switch To</span>
-                    <select value={draft.switchTarget} onChange={(event) => updateChoiceDraft(actor, { switchTarget: Number(event.target.value) })} disabled={simPlaybackLocked}>
+                    <select value={draft.switchTarget} onChange={(event) => updateChoiceDraft(actor, { switchTarget: Number(event.target.value) })} disabled={Boolean(simQueuedTurn)}>
                       {switchTargets.map((benchIndex) => (
                         <option key={benchIndex} value={benchIndex}>{simBattle.player.units[benchIndex]?.pokemon.displayName}</option>
                       ))}
@@ -3494,19 +3508,23 @@ function App() {
         </div>
       )}
       <div className="team-actions">
-        <button className="action-button primary" onClick={submitSimTurn} disabled={simPlaybackLocked || (simTurnTimerEnabled && simChoicesLocked)}>
-          {simBattleNeedsReplacementPhase
-            ? (simTurnTimerEnabled ? (simChoicesLocked ? 'Replacements Locked' : 'Lock Replacements') : 'Send Replacements')
-            : (simTurnTimerEnabled ? (simChoicesLocked ? 'Choices Locked' : 'Lock Turn') : 'Resolve Turn')}
+        <button className="action-button primary" onClick={submitSimTurn} disabled={Boolean(simQueuedTurn)}>
+          {simQueuedTurn
+            ? (simBattleNeedsReplacementPhase ? 'Replacements Queued' : 'Turn Queued')
+            : (simBattleNeedsReplacementPhase ? 'Resolve Replacements' : 'Resolve Turn')}
         </button>
-        <button className="action-button" onClick={() => { setSimBattle(null); setSimMatchDeadlineAt(null); setSimChoiceDrafts({}); setSimChoicesLocked(false); }} disabled={simPlaybackLocked}>End Simulation</button>
+        <button className="action-button" onClick={() => { setSimBattle(null); setSimMatchDeadlineAt(null); setSimChoiceDrafts({}); setSimQueuedTurn(null); setSimChoicesLocked(false); }}>End Simulation</button>
       </div>
-      {simPlaybackLocked ? <div className="note-row compact-note">Battle playback is still resolving this turn. The next input phase opens as soon as the animations, logs, and commentary finish.</div> : null}
+      {simQueuedTurn ? (
+        <div className="note-row compact-note">Your next turn is queued and locked. It will resolve automatically as soon as the current battle sequence finishes.</div>
+      ) : simPlaybackLocked ? (
+        <div className="note-row compact-note">The current turn is still resolving. You can set the next turn now, and clicking Resolve Turn will queue those choices for the moment this playback finishes.</div>
+      ) : null}
     </>
   ) : (
     <div className="team-actions">
-      <button className="action-button primary" onClick={() => { setSimBattle(null); setSimMatchDeadlineAt(null); setSimChoiceDrafts({}); setSimChoicesLocked(false); startSimulatorPreview(); }}>Run Another Match</button>
-      <button className="action-button" onClick={() => { setSimBattle(null); setSimMatchDeadlineAt(null); setSimChoiceDrafts({}); setSimChoicesLocked(false); }}>Close Simulator</button>
+      <button className="action-button primary" onClick={() => { setSimBattle(null); setSimMatchDeadlineAt(null); setSimChoiceDrafts({}); setSimQueuedTurn(null); setSimChoicesLocked(false); startSimulatorPreview(); }}>Run Another Match</button>
+      <button className="action-button" onClick={() => { setSimBattle(null); setSimMatchDeadlineAt(null); setSimChoiceDrafts({}); setSimQueuedTurn(null); setSimChoicesLocked(false); }}>Close Simulator</button>
     </div>
   ));
 
@@ -3542,7 +3560,7 @@ function App() {
                 <div className="note-row compact-note">Your opponent will not see the full backline details here. The send-out resolves when the replacement clock expires or both battlers lock in.</div>
                 <label className="field">
                   <span>Send In</span>
-                  <select value={draft.switchTarget} onChange={(event) => updatePvpChoiceDraft(actor, { type: 'switch', switchTarget: Number(event.target.value) })} disabled={pvpPlaybackLocked}>
+                  <select value={draft.switchTarget} onChange={(event) => updatePvpChoiceDraft(actor, { type: 'switch', switchTarget: Number(event.target.value) })} disabled={Boolean(pvpQueuedTurn)}>
                     {availableBench.map((benchIndex) => (
                       <option key={benchIndex} value={benchIndex}>{pvpRoom.battle!.player.units[benchIndex]?.pokemon.displayName}</option>
                     ))}
@@ -3591,7 +3609,7 @@ function App() {
             const restrictionNotes = simulatorRestrictionNotes(unit);
             const previewMega = effectiveDraftType === 'mega';
             const selectedMoveReads = moveEffectivenessReadsForBattleTargets(pvpRoom.battle!, unit, liveEnemyTargets, selectedMove, previewMega);
-            const actionLocked = pvpPlaybackLocked || unit.rechargeTurns > 0 || unit.chargingTurns > 0;
+            const actionLocked = Boolean(pvpQueuedTurn) || unit.rechargeTurns > 0 || unit.chargingTurns > 0;
 
             return (
               <div key={`${unit.pokemon.id}-${actor}`} className="subpanel sim-action-card">
@@ -3622,7 +3640,7 @@ function App() {
                   <>
                     <label className="field">
                       <span>{effectiveDraftType === 'mega' ? 'Move After Mega' : 'Move'}</span>
-                      <select value={selectedMoveId} onChange={(event) => updatePvpChoiceDraft(actor, { moveId: event.target.value })} disabled={!legalMoves.length || pvpPlaybackLocked}>
+                      <select value={selectedMoveId} onChange={(event) => updatePvpChoiceDraft(actor, { moveId: event.target.value })} disabled={!legalMoves.length || Boolean(pvpQueuedTurn)}>
                         {legalMoves.map((move) => {
                           const moveReads = moveEffectivenessReadsForBattleTargets(pvpRoom.battle!, unit, liveEnemyTargets, move, previewMega);
                           return <option key={move.id} value={move.id}>{moveLabelWithEffectiveness(move, moveReads, selectedTarget)}</option>;
@@ -3645,7 +3663,7 @@ function App() {
                     {targetMode === 'foe' ? (
                       <label className="field">
                         <span>Target</span>
-                        <select value={selectedTarget} onChange={(event) => updatePvpChoiceDraft(actor, { target: Number(event.target.value) })} disabled={pvpPlaybackLocked}>
+                        <select value={selectedTarget} onChange={(event) => updatePvpChoiceDraft(actor, { target: Number(event.target.value) })} disabled={Boolean(pvpQueuedTurn)}>
                           {liveEnemyTargets.map(({ unit: enemy, targetIndex }) => (
                             <option key={`${enemy.pokemon.id}-${targetIndex}`} value={targetIndex}>{enemy.pokemon.displayName}</option>
                           ))}
@@ -3679,7 +3697,7 @@ function App() {
                 ) : (
                   <label className="field">
                     <span>Switch To</span>
-                    <select value={draft.switchTarget} onChange={(event) => updatePvpChoiceDraft(actor, { switchTarget: Number(event.target.value) })} disabled={pvpPlaybackLocked}>
+                    <select value={draft.switchTarget} onChange={(event) => updatePvpChoiceDraft(actor, { switchTarget: Number(event.target.value) })} disabled={Boolean(pvpQueuedTurn)}>
                       {switchTargets.map((benchIndex) => (
                         <option key={benchIndex} value={benchIndex}>{pvpRoom.battle!.player.units[benchIndex]?.pokemon.displayName}</option>
                       ))}
@@ -3692,12 +3710,16 @@ function App() {
         </div>
       )}
       <div className="team-actions">
-        <button className="action-button primary" onClick={() => { void submitPvpTurn(false); }} disabled={pvpPlaybackLocked}>
-          {pvpBattleNeedsReplacementPhase ? 'Lock Replacements' : 'Lock Turn'}
+        <button className="action-button primary" onClick={() => { void submitPvpTurn(false); }} disabled={Boolean(pvpQueuedTurn)}>
+          {pvpQueuedTurn ? (pvpBattleNeedsReplacementPhase ? 'Replacements Queued' : 'Turn Queued') : (pvpBattleNeedsReplacementPhase ? 'Lock Replacements' : 'Lock Turn')}
         </button>
-        <button className="action-button danger" onClick={() => { void handlePvpForfeit(); }} disabled={pvpPlaybackLocked}>Forfeit Match</button>
+        <button className="action-button danger" onClick={() => { void handlePvpForfeit(); }}>Forfeit Match</button>
       </div>
-      {pvpPlaybackLocked ? <div className="note-row compact-note">Battle playback is still resolving this turn. Move inputs reopen once the current sequence has fully finished.</div> : null}
+      {pvpQueuedTurn ? (
+        <div className="note-row compact-note">Your PvP turn is queued and locked. It will submit automatically once the current battle sequence finishes playing out.</div>
+      ) : pvpPlaybackLocked ? (
+        <div className="note-row compact-note">The current turn is still resolving. You can set the next turn now, and clicking Lock Turn will queue it for automatic submission the moment playback finishes.</div>
+      ) : null}
       {pvpMessage ? <div className="note-row">{pvpMessage}</div> : null}
     </>
   ) : (
@@ -3953,6 +3975,7 @@ function App() {
       setSimBattlefieldEvent(null);
       setSimVisibleBattleLog([]);
       setSimPlaybackLocked(false);
+      setSimQueuedTurn(null);
       setSimTurnClock(30);
       return;
     }
@@ -4029,6 +4052,28 @@ function App() {
   }, [simBattle]);
 
   useEffect(() => {
+    if (simPlaybackLocked || !simQueuedTurn) {
+      return;
+    }
+
+    const currentBattle = simBattleRef.current;
+    if (!currentBattle || currentBattle.stage !== 'battle' || currentBattle.winner) {
+      setSimQueuedTurn(null);
+      setSimChoicesLocked(false);
+      return;
+    }
+
+    if (currentBattle.turn !== simQueuedTurn.turn) {
+      setSimQueuedTurn(null);
+      setSimChoicesLocked(false);
+      setSimTurnNotice('Queued choices were cleared because the battle state changed before that turn could begin. Set the next turn again.');
+      return;
+    }
+
+    executeSimTurnSubmission(currentBattle, simQueuedTurn);
+  }, [simBattle?.turn, simBattle?.stage, simBattle?.winner, simPlaybackLocked, simQueuedTurn]);
+
+  useEffect(() => {
     const nextStage = pvpRoom?.stage ?? null;
     if (nextStage === 'battle' && previousPvpStageRef.current !== 'battle') {
       setPvpBattleMusicSeed((current) => current + 1);
@@ -4044,6 +4089,7 @@ function App() {
       setPvpBattlefieldEvent(null);
       setPvpVisibleBattleLog([]);
       setPvpPlaybackLocked(false);
+      setPvpQueuedTurn(null);
       return;
     }
 
@@ -4098,6 +4144,26 @@ function App() {
       previousPvpBattleRef.current = pvpRoom.battle;
     }
   }, [pvpRoom, onlineAccount]);
+
+  useEffect(() => {
+    if (pvpPlaybackLocked || !pvpQueuedTurn || !pvpRoom?.battle || !onlineAccount) {
+      return;
+    }
+
+    if (pvpQueuedTurn.roomCode && pvpQueuedTurn.roomCode !== pvpRoom.code) {
+      setPvpQueuedTurn(null);
+      setPvpMessage('Queued choices were cleared because the live room changed before they could be submitted.');
+      return;
+    }
+
+    if (pvpRoom.battle.turn !== pvpQueuedTurn.turn) {
+      setPvpQueuedTurn(null);
+      setPvpMessage('Queued choices were cleared because the battle state advanced before that turn opened.');
+      return;
+    }
+
+    void executePvpTurnSubmission(pvpQueuedTurn);
+  }, [onlineAccount, pvpPlaybackLocked, pvpQueuedTurn, pvpRoom?.battle?.turn, pvpRoom?.code]);
 
   useEffect(() => {
     if (!simBattlefieldEvent) {
@@ -4190,13 +4256,23 @@ function App() {
       return;
     }
 
+    if (pvpPlaybackLocked) {
+      void submitPvpTurn(true);
+      return;
+    }
+
     void submitPvpTurn(true);
-  }, [pvpCountdown, pvpRoom?.code, pvpRoom?.stage, pvpRoom?.playerChoicesLocked, pvpRoom?.battle]);
+  }, [pvpCountdown, pvpPlaybackLocked, pvpRoom?.code, pvpRoom?.stage, pvpRoom?.playerChoicesLocked, pvpRoom?.battle]);
 
   useEffect(() => {
     if (!simBattle || simBattle.stage !== 'battle' || simBattle.winner || !simTurnTimerEnabled) {
       setSimTurnClock(30);
       setSimChoicesLocked(false);
+      return;
+    }
+
+    if (simPlaybackLocked || simQueuedTurn) {
+      setSimTurnClock(30);
       return;
     }
 
@@ -4213,7 +4289,7 @@ function App() {
       window.clearInterval(intervalHandle);
       window.clearTimeout(timeoutHandle);
     };
-  }, [simDecisionPhaseKey, simBattle?.stage, simBattle?.winner, simTurnTimerEnabled]);
+  }, [simDecisionPhaseKey, simBattle?.stage, simBattle?.winner, simPlaybackLocked, simQueuedTurn, simTurnTimerEnabled]);
 
   useEffect(() => {
     if (!simMatchDeadlineAt || !simBattle || simBattle.stage !== 'battle') {
@@ -4228,7 +4304,7 @@ function App() {
   }, [simMatchDeadlineAt, simBattle?.stage]);
 
   useEffect(() => {
-    if (!simBattle || simBattle.stage !== 'battle' || simBattle.winner || !simAnnouncerEnabled || !simTurnTimerEnabled) {
+    if (!simBattle || simBattle.stage !== 'battle' || simBattle.winner || !simAnnouncerEnabled || !simTurnTimerEnabled || simPlaybackLocked || Boolean(simQueuedTurn)) {
       return;
     }
 
@@ -4242,7 +4318,7 @@ function App() {
         countdownLine ?? '',
       ]);
     }
-  }, [simTurnClock, simBattle, simAnnouncerEnabled, simTurnTimerEnabled, simAnnouncerStyle]);
+  }, [simTurnClock, simBattle, simAnnouncerEnabled, simPlaybackLocked, simQueuedTurn, simTurnTimerEnabled, simAnnouncerStyle]);
 
   useEffect(() => {
     if (!simBattle || simBattle.stage !== 'battle' || !simMatchDeadlineAt) {
@@ -4496,6 +4572,55 @@ function App() {
     };
   }
 
+  function planSimTurnSubmission(
+    battle: SimulatorBattleState,
+    drafts: Record<number, ChoiceDraft>,
+    timedOut = false,
+  ): QueuedTurnSubmission {
+    if (battleHasPendingReplacements(battle)) {
+      const { choices, notices } = buildReplacementChoices(battle, drafts, timedOut);
+      return {
+        choices,
+        notices,
+        turn: battle.turn,
+        replacementPhase: true,
+      };
+    }
+
+    const { choices, notices, reviews } = buildSimulatorChoices(battle, drafts, timedOut);
+    return {
+      choices,
+      notices,
+      reviews,
+      turn: battle.turn,
+      replacementPhase: false,
+    };
+  }
+
+  function executeSimTurnSubmission(currentBattle: SimulatorBattleState, submission: QueuedTurnSubmission) {
+    if (submission.replacementPhase) {
+      const nextBattle = applyReplacementChoices(currentBattle, submission.choices, buildAutoReplacementChoices(currentBattle, 'opponent'));
+      setSimQueuedTurn(null);
+      setSimBattle(nextBattle);
+      setSimChoiceDrafts({});
+      setSimChoicesLocked(false);
+      setSimTurnNotice(
+        submission.notices.length
+          ? submission.notices.join(' ')
+          : 'Replacement choices are locked. The next turn will begin once the new Pokemon hit the field.',
+      );
+      return;
+    }
+
+    const nextBattle = resolveTurn(currentBattle, submission.choices);
+    setSimQueuedTurn(null);
+    setSimBattle(nextBattle);
+    setSimChoiceDrafts({});
+    setSimChoicesLocked(false);
+    setSimTurnReviews((current) => [...current, ...(submission.reviews ?? [])]);
+    setSimTurnNotice(submission.notices.length ? submission.notices.join(' ') : null);
+  }
+
   function resolveSimulatorTurn(timedOut = false) {
     const currentBattle = simBattleRef.current;
     if (!currentBattle || currentBattle.stage !== 'battle') {
@@ -4506,27 +4631,18 @@ function App() {
       return;
     }
 
-    if (battleHasPendingReplacements(currentBattle)) {
-      const { choices, notices } = buildReplacementChoices(currentBattle, simChoiceDraftsRef.current, timedOut);
-      const nextBattle = applyReplacementChoices(currentBattle, choices, buildAutoReplacementChoices(currentBattle, 'opponent'));
-      setSimBattle(nextBattle);
-      setSimChoiceDrafts({});
-      setSimChoicesLocked(false);
+    const submission = planSimTurnSubmission(currentBattle, simChoiceDraftsRef.current, timedOut);
+    if (simPlaybackLocked) {
+      setSimQueuedTurn(submission);
+      setSimChoicesLocked(true);
       setSimTurnNotice(
-        notices.length
-          ? notices.join(' ')
-          : 'Replacement choices are locked. The next turn will begin once the new Pokemon hit the field.',
+        submission.notices.length
+          ? `${submission.notices.join(' ')} Next turn choices are queued and will resolve when the current battle sequence ends.`
+          : `Turn ${currentBattle.turn} choices are queued. They will resolve automatically once the current battle sequence finishes.`,
       );
       return;
     }
-
-    const { choices, notices, reviews } = buildSimulatorChoices(currentBattle, simChoiceDraftsRef.current, timedOut);
-    const nextBattle = resolveTurn(currentBattle, choices);
-    setSimBattle(nextBattle);
-    setSimChoiceDrafts({});
-    setSimChoicesLocked(false);
-    setSimTurnReviews((current) => [...current, ...reviews]);
-    setSimTurnNotice(notices.length ? notices.join(' ') : null);
+    executeSimTurnSubmission(currentBattle, submission);
   }
 
   function enforceManualItemClause(nextTeam: Team, preferredSlotIndex?: number) {
@@ -4749,6 +4865,7 @@ function App() {
     setSimMatchDeadlineAt(null);
     setSimBringOrder([]);
     setSimChoiceDrafts({});
+    setSimQueuedTurn(null);
     setSimChoicesLocked(false);
     setSimTurnReviews([]);
     setSimAnnouncerFeed([]);
@@ -4785,6 +4902,7 @@ function App() {
     setSimBattle(null);
     setSimMatchDeadlineAt(null);
     setSimChoiceDrafts({});
+    setSimQueuedTurn(null);
     setSimChoicesLocked(false);
     setSimTurnReviews([]);
     setSimAnnouncerFeed([]);
@@ -4851,6 +4969,7 @@ function App() {
     setSimPreview(null);
     setSimPreviewMessage(null);
     setSimChoiceDrafts({});
+    setSimQueuedTurn(null);
     setSimChoicesLocked(false);
     setSimTurnClock(30);
     setSimTurnNotice(null);
@@ -4885,13 +5004,7 @@ function App() {
   }
 
   function submitSimTurn() {
-    if (simBattle && simBattleNeedsReplacementPhase) {
-      resolveSimulatorTurn(false);
-      return;
-    }
-
-    if (simTurnTimerEnabled && simBattle?.stage === 'battle' && !simBattle.winner) {
-      setSimChoicesLocked(false);
+    if (simTurnTimerEnabled && simBattle?.stage === 'battle' && !simBattle.winner && !simPlaybackLocked) {
       setSimTurnNotice('Choices submitted. Resolving the turn now.');
     }
     resolveSimulatorTurn(false);
@@ -4956,6 +5069,7 @@ function App() {
       setPvpRoomCodeInput(room.code);
       setPvpBringOrder([]);
       setPvpChoiceDrafts({});
+      setPvpQueuedTurn(null);
       setPvpMessage(`Room ${room.code} is live. Share the 6-digit code with your opponent.`);
     } catch (error) {
       setPvpMessage(error instanceof Error ? error.message : 'Could not create the live room.');
@@ -4979,6 +5093,7 @@ function App() {
       setPvpRoom(room);
       setPvpBringOrder([]);
       setPvpChoiceDrafts({});
+      setPvpQueuedTurn(null);
       setPvpMessage(`Joined room ${room.code}. Team preview is live.`);
     } catch (error) {
       setPvpMessage(error instanceof Error ? error.message : 'Could not join the live room.');
@@ -5010,9 +5125,61 @@ function App() {
         bringOrder: pvpBringOrder,
       });
       setPvpRoom(room);
+      setPvpQueuedTurn(null);
       setPvpMessage('Bring order submitted. Waiting for the other player if needed.');
     } catch (error) {
       setPvpMessage(error instanceof Error ? error.message : 'Could not lock the bring order.');
+    }
+  }
+
+  function planPvpTurnSubmission(
+    battle: SimulatorBattleState,
+    drafts: Record<number, ChoiceDraft>,
+    timedOut = false,
+  ): QueuedTurnSubmission {
+    if (battleHasPendingReplacements(battle)) {
+      const { choices, notices } = buildReplacementChoices(battle, drafts, timedOut);
+      return {
+        choices,
+        notices,
+        turn: battle.turn,
+        replacementPhase: true,
+        roomCode: pvpRoom?.code,
+      };
+    }
+
+    const { choices, notices } = buildSimulatorChoices(battle, drafts, timedOut);
+    return {
+      choices,
+      notices,
+      turn: battle.turn,
+      replacementPhase: false,
+      roomCode: pvpRoom?.code,
+    };
+  }
+
+  async function executePvpTurnSubmission(submission: QueuedTurnSubmission) {
+    if (!onlineAccount || !pvpRoom?.battle) {
+      return;
+    }
+
+    try {
+      const room = await submitOnlineChoices({
+        account: onlineAccount,
+        code: pvpRoom.code,
+        choices: submission.choices,
+      });
+      setPvpQueuedTurn(null);
+      setPvpRoom(room);
+      setPvpChoiceDrafts({});
+      const playerLockMessage =
+        room.stage === 'battle' && room.playerChoicesLocked && !room.opponentChoicesLocked
+          ? 'Choices locked. Your move clock is stopped while the room waits on the opponent.'
+          : room.lastActionSummary;
+      setPvpMessage(submission.notices[0] ?? playerLockMessage ?? 'Turn submitted.');
+    } catch (error) {
+      setPvpQueuedTurn(null);
+      setPvpMessage(error instanceof Error ? error.message : 'Could not submit the turn.');
     }
   }
 
@@ -5025,25 +5192,17 @@ function App() {
       setBattleCoreReady(true);
     }
 
-    try {
-      const { choices, notices } = battleHasPendingReplacements(pvpRoom.battle)
-        ? buildReplacementChoices(pvpRoom.battle, pvpChoiceDrafts, timedOut)
-        : buildSimulatorChoices(pvpRoom.battle, pvpChoiceDrafts, timedOut);
-      const room = await submitOnlineChoices({
-        account: onlineAccount,
-        code: pvpRoom.code,
-        choices,
-      });
-      setPvpRoom(room);
-      setPvpChoiceDrafts({});
-      const playerLockMessage =
-        room.stage === 'battle' && room.playerChoicesLocked && !room.opponentChoicesLocked
-          ? 'Choices locked. Your move clock is stopped while the room waits on the opponent.'
-          : room.lastActionSummary;
-      setPvpMessage(notices[0] ?? playerLockMessage ?? 'Turn submitted.');
-    } catch (error) {
-      setPvpMessage(error instanceof Error ? error.message : 'Could not submit the turn.');
+    const submission = planPvpTurnSubmission(pvpRoom.battle, pvpChoiceDrafts, timedOut);
+    if (pvpPlaybackLocked) {
+      setPvpQueuedTurn(submission);
+      setPvpMessage(
+        submission.notices[0]
+          ? `${submission.notices[0]} Turn choices are queued and will submit once the current battle sequence ends.`
+          : `Turn ${pvpRoom.battle.turn} choices are queued and will submit automatically when the current battle sequence ends.`,
+      );
+      return;
     }
+    await executePvpTurnSubmission(submission);
   }
 
   async function handlePvpForfeit() {
@@ -5057,6 +5216,7 @@ function App() {
         code: pvpRoom.code,
       });
       setPvpRoom(room);
+      setPvpQueuedTurn(null);
       setPvpMessage('You forfeited the battle. The result counts as a loss.');
     } catch (error) {
       setPvpMessage(error instanceof Error ? error.message : 'Could not forfeit the room.');
