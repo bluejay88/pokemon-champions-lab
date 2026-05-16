@@ -202,6 +202,16 @@ const TURN_PLAYBACK_HOLD_MS = 1800;
 const BATTLEFIELD_EVENT_PULSE_MS = 2400;
 const BATTLEFIELD_SENDOUT_ANIMATION_MS = 1200;
 const BATTLEFIELD_SENDOUT_GIF_URL = 'https://i.pinimg.com/originals/33/23/7c/33237cd27dae223f6a5abdb04c310f59.gif';
+const BATTLEFIELD_PROTECT_GIF_URL = 'https://media.tenor.com/nl-VWhvKUz0AAAAC/barrier-circle.gif';
+const BATTLEFIELD_PROTECT_SHIELD_MOVES = new Set([
+  'Protect',
+  'Detect',
+  "King's Shield",
+  'Spiky Shield',
+  'Baneful Bunker',
+  'Quick Guard',
+  'Wide Guard',
+]);
 const fallbackUsageInsight: UsageInsight = {
   label: 'UU',
   reason: 'Usage insight is still loading for this surface.',
@@ -1332,6 +1342,17 @@ function buildTeamFromPlan(plan: GeneratedTeamPlan) {
   return team;
 }
 
+function refineTeamWithPopularPresets(team: Team) {
+  const next = cloneTeam(team);
+  next.slots = next.slots.map((slot) => {
+    if (!slot.pokemonId) {
+      return slot;
+    }
+    return prepareBuildForPokemon(slot, slot.pokemonId, next.format);
+  });
+  return sanitizeTeamForChampions(next);
+}
+
 function planSignature(plan: GeneratedTeamPlan | null) {
   if (!plan) {
     return '';
@@ -1369,13 +1390,17 @@ function displayNamesFromValidations(validations: ReturnType<typeof validateLock
   });
 }
 
-function randomOpponentTeam(format: BattleFormat, offMetaBias: number) {
+function randomOpponentTeam(format: BattleFormat, offMetaBias: number, recentSignatures: string[] = []) {
   const archetypes = activeArchetypeOptions();
-  const archetype = archetypes[Math.floor(Math.random() * archetypes.length)] ?? archetypes[0];
-  const plans = generateTeamPlans(archetype.id, format, offMetaBias, [], 6, true);
-  const selectedPlan = plans[Math.floor(Math.random() * plans.length)] ?? plans[0];
+  const sampledArchetypes = [...archetypes]
+    .sort(() => Math.random() - 0.5)
+    .slice(0, Math.min(4, archetypes.length));
+  const candidatePlans = sampledArchetypes.flatMap((archetype) => generateTeamPlans(archetype.id, format, offMetaBias, [], 6, true));
+  const nonRepeating = candidatePlans.filter((plan) => !recentSignatures.includes(planSignature(plan)));
+  const pool = nonRepeating.length ? nonRepeating : candidatePlans;
+  const selectedPlan = pool[Math.floor(Math.random() * Math.max(1, pool.length))] ?? pool[0];
   if (selectedPlan) {
-    return buildTeamFromPlan(selectedPlan);
+    return refineTeamWithPopularPresets(buildTeamFromPlan(selectedPlan));
   }
 
   const fallbackTeam = createTeam('Fallback Opponent', format);
@@ -1391,7 +1416,7 @@ function randomOpponentTeam(format: BattleFormat, offMetaBias: number) {
       abilityName: pokemon.abilities[0]?.name ?? null,
     };
   });
-  return fallbackTeam;
+  return refineTeamWithPopularPresets(fallbackTeam);
 }
 
 function usablePokemonForBuild(build: PokemonBuild) {
@@ -1952,6 +1977,17 @@ function moveLabelWithEffectiveness(
   return `${move.name} - ${focusRead.label}`;
 }
 
+function selectedMoveEffectivenessRead(
+  reads: MoveEffectivenessRead[],
+  selectedTarget: number,
+) {
+  return reads.find((read) => read.targetIndex === selectedTarget) ?? reads[0] ?? null;
+}
+
+function usesBattlefieldProtectShield(moveName?: string | null) {
+  return moveName ? BATTLEFIELD_PROTECT_SHIELD_MOVES.has(moveName) : false;
+}
+
 function pickPreferredMaleVoice() {
   if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
     return null;
@@ -2498,6 +2534,24 @@ function buildPlaybackBattleSnapshots(
   });
 }
 
+function buildIntroPresentationBattleState(battle: SimulatorBattleState) {
+  const next = cloneBattleState(battle);
+  if (!next) {
+    return null;
+  }
+
+  for (const side of [next.player, next.opponent]) {
+    for (const unitIndex of side.active) {
+      const unit = side.units[unitIndex];
+      if (unit) {
+        unit.revealed = false;
+      }
+    }
+  }
+
+  return next;
+}
+
 function playerUnitCanMegaEvolve(side: SimSide, unit: SimUnit) {
   if (side.megaUsed || unit.megaEvolved || !unit.megaPokemon) {
     return false;
@@ -2934,34 +2988,47 @@ function announcerWrapUpLines(current: SimulatorBattleState, style: AnnouncerSty
 
 function introBattleSendOutPlaybackSteps(current: SimulatorBattleState, style: AnnouncerStyle) {
   const steps: BattlePlaybackStep[] = [];
-  const appendSide = (side: SimSide) => {
-    side.active
-      .map((unitIndex, activeSlot) => ({ unit: side.units[unitIndex] ?? null, activeSlot }))
-      .filter((entry): entry is { unit: SimUnit; activeSlot: number } => Boolean(entry.unit && !entry.unit.fainted))
-      .sort((left, right) => {
-        const speedGap = announcerApproxSpeed(right.unit, side, current) - announcerApproxSpeed(left.unit, side, current);
-        return speedGap === 0 ? left.activeSlot - right.activeSlot : speedGap;
-      })
-      .forEach((unit) => {
-        const entry = `${side.name} sent out ${battleUnitDisplayName(unit.unit)}.`;
-        steps.push({
-          id: makeId('battle-step'),
-          entry,
-          event: {
-            id: makeId('battlefield-event'),
-            tone: 'switch',
-            message: entry,
-            targetName: battleUnitDisplayName(unit.unit),
-            targetBadge: 'On Field',
-          },
-          announcerLine: announcerStyleLine(style, fillAnnouncerLine(pickLine(announcerScripts.switch), { pokemon: battleUnitDisplayName(unit.unit) })),
-          holdMs: BATTLEFIELD_SENDOUT_ANIMATION_MS + 420,
-        });
-      });
-  };
+  const openingUnits = [
+    ...current.player.active.map((unitIndex, activeSlot) => ({
+      unit: current.player.units[unitIndex] ?? null,
+      activeSlot,
+      side: current.player,
+    })),
+    ...current.opponent.active.map((unitIndex, activeSlot) => ({
+      unit: current.opponent.units[unitIndex] ?? null,
+      activeSlot,
+      side: current.opponent,
+    })),
+  ]
+    .filter((entry): entry is { unit: SimUnit; activeSlot: number; side: SimSide } => Boolean(entry.unit && !entry.unit.fainted))
+    .sort((left, right) => {
+      const speedGap = announcerApproxSpeed(right.unit, right.side, current) - announcerApproxSpeed(left.unit, left.side, current);
+      if (speedGap !== 0) {
+        return speedGap;
+      }
+      if (left.side.name !== right.side.name) {
+        return left.side === current.player ? -1 : 1;
+      }
+      return left.activeSlot - right.activeSlot;
+    });
 
-  appendSide(current.opponent);
-  appendSide(current.player);
+  openingUnits.forEach((entrySet) => {
+    const entry = `${entrySet.side.name} sent out ${battleUnitDisplayName(entrySet.unit)}.`;
+    steps.push({
+      id: makeId('battle-step'),
+      entry,
+      event: {
+        id: makeId('battlefield-event'),
+        tone: 'switch',
+        message: entry,
+        targetName: battleUnitDisplayName(entrySet.unit),
+        targetBadge: 'On Field',
+      },
+      announcerLine: announcerStyleLine(style, fillAnnouncerLine(pickLine(announcerScripts.switch), { pokemon: battleUnitDisplayName(entrySet.unit) })),
+      holdMs: BATTLEFIELD_SENDOUT_ANIMATION_MS + 520,
+    });
+  });
+
   return steps;
 }
 
@@ -3609,6 +3676,7 @@ function App() {
   const recordedPvpBattleKeyRef = useRef<string | null>(null);
   const simPlaybackTimersRef = useRef<number[]>([]);
   const pvpPlaybackTimersRef = useRef<number[]>([]);
+  const recentSimulatorOpponentSignaturesRef = useRef<string[]>([]);
 
   const team = activeTeamFromState(state);
   const analysis = analyzeTeam(team);
@@ -3881,6 +3949,7 @@ function App() {
             const restrictionNotes = simulatorRestrictionNotes(unit);
             const previewMega = effectiveDraftType === 'mega';
             const selectedMoveReads = moveEffectivenessReadsForBattleTargets(simBattle, unit, liveEnemyTargets, selectedMove, previewMega);
+            const selectedTargetRead = selectedMoveEffectivenessRead(selectedMoveReads, selectedTarget);
             const actionLocked = Boolean(simQueuedTurn) || unit.rechargeTurns > 0 || unit.chargingTurns > 0;
 
             return (
@@ -3947,6 +4016,11 @@ function App() {
                     ) : targetNote ? (
                       <div className="note-row compact-note">
                         {targetNote}
+                      </div>
+                    ) : null}
+                    {targetMode === 'foe' && selectedTargetRead ? (
+                      <div className={`note-row compact-note action-target-note action-target-note-${selectedTargetRead.tone}`}>
+                        Selected target: <strong>{selectedTargetRead.targetName}</strong> - {selectedTargetRead.label} ({selectedTargetRead.multiplier.toFixed(2)}x)
                       </div>
                     ) : null}
                     {restrictionNotes.map((note) => (
@@ -4091,6 +4165,7 @@ function App() {
             const restrictionNotes = simulatorRestrictionNotes(unit);
             const previewMega = effectiveDraftType === 'mega';
             const selectedMoveReads = moveEffectivenessReadsForBattleTargets(pvpRoom.battle!, unit, liveEnemyTargets, selectedMove, previewMega);
+            const selectedTargetRead = selectedMoveEffectivenessRead(selectedMoveReads, selectedTarget);
             const actionLocked = Boolean(pvpQueuedTurn) || unit.rechargeTurns > 0 || unit.chargingTurns > 0;
 
             return (
@@ -4152,6 +4227,11 @@ function App() {
                         </select>
                       </label>
                     ) : targetNote ? <div className="note-row compact-note">{targetNote}</div> : null}
+                    {targetMode === 'foe' && selectedTargetRead ? (
+                      <div className={`note-row compact-note action-target-note action-target-note-${selectedTargetRead.tone}`}>
+                        Selected target: <strong>{selectedTargetRead.targetName}</strong> - {selectedTargetRead.label} ({selectedTargetRead.multiplier.toFixed(2)}x)
+                      </div>
+                    ) : null}
                     {restrictionNotes.map((note) => (
                       <div key={note} className="note-row compact-note">
                         {note}
@@ -4510,6 +4590,12 @@ function App() {
 
     const previousBattle = previousBattleRef.current;
     const { steps, wrapUp } = playbackStepsFromBattleUpdate(previousBattle, simBattle, simAnnouncerStyle);
+    const introDisplayBattle =
+      simBattle.stage === 'battle' && (!previousBattle || previousBattle.stage !== 'battle')
+        ? buildIntroPresentationBattleState(simBattle)
+        : previousBattle?.stage === 'battle'
+          ? previousBattle
+          : simBattle;
     if (steps.length || wrapUp.length) {
       scheduleBattlePlayback(
         steps,
@@ -4524,7 +4610,7 @@ function App() {
         simAnnouncerEnabled,
         setSimPlaybackLocked,
         setSimDisplayedBattle,
-        previousBattle?.stage === 'battle' ? previousBattle : simBattle,
+        introDisplayBattle,
       );
     } else {
       setSimDisplayedBattle(cloneBattleState(simBattle));
@@ -4622,7 +4708,14 @@ function App() {
 
     if (pvpRoom.battle) {
       const pvpAnnouncerEnabled = pvpRoom.seat === 'host' ? pvpRoom.hostAnnouncerEnabled : pvpRoom.guestAnnouncerEnabled;
-      const { steps, wrapUp } = playbackStepsFromBattleUpdate(previousPvpBattleRef.current, pvpRoom.battle, 'Arena');
+      const previousPvpBattle = previousPvpBattleRef.current;
+      const { steps, wrapUp } = playbackStepsFromBattleUpdate(previousPvpBattle, pvpRoom.battle, 'Arena');
+      const introDisplayBattle =
+        pvpRoom.battle.stage === 'battle' && (!previousPvpBattle || previousPvpBattle.stage !== 'battle')
+          ? buildIntroPresentationBattleState(pvpRoom.battle)
+          : previousPvpBattle?.stage === 'battle'
+            ? previousPvpBattle
+            : pvpRoom.battle;
       if (steps.length || wrapUp.length) {
         scheduleBattlePlayback(
           steps,
@@ -4637,7 +4730,7 @@ function App() {
           pvpAnnouncerEnabled,
           setPvpPlaybackLocked,
           setPvpDisplayedBattle,
-          previousPvpBattleRef.current?.stage === 'battle' ? previousPvpBattleRef.current : pvpRoom.battle,
+          introDisplayBattle,
         );
       } else {
         setPvpDisplayedBattle(cloneBattleState(pvpRoom.battle));
@@ -5421,7 +5514,15 @@ function App() {
       return;
     }
 
-    const opponentTeam = randomOpponentTeam(simFormat, state.profile.offMetaBias);
+    const opponentTeam = randomOpponentTeam(simFormat, state.profile.offMetaBias, recentSimulatorOpponentSignaturesRef.current);
+    const signature = opponentTeam.slots
+      .map((slot) => slot.pokemonId ?? '')
+      .filter(Boolean)
+      .sort()
+      .join('|');
+    if (signature) {
+      recentSimulatorOpponentSignaturesRef.current = [signature, ...recentSimulatorOpponentSignaturesRef.current.filter((entry) => entry !== signature)].slice(0, 8);
+    }
     setSimBattlefieldSeed(`sim-preview-${Date.now()}-${opponentTeam.id}-${simFormat}`);
     setSimPreview({
       format: simFormat,
@@ -6797,14 +6898,14 @@ function App() {
               <div className="battlefield-showcase-row">
                 <BattlefieldArena
                   title="Preview Battle Camera"
-                  subtitle="This larger battle stage now sits in its own dedicated section so you can read the map, sprite spacing, and projected opening lanes more clearly before the match starts."
+                  subtitle="Preview lanes stay species-hidden on the battlefield now, so the stage only shows sealed Pokeballs until the live send-out reveal sequence begins."
                   backdrop={simBackdrop}
                   topLabel="Opponent Preview"
                   bottomLabel="Your Locked Order"
-                  topSlots={previewBattlefieldSlots(simPreview.opponentTeam, simPreview.format, simPreviewOpponentOrder, 'Species shown, full set still hidden.')}
-                  bottomSlots={previewBattlefieldSlots(team, simPreview.format, simPreviewPlayerOrder, 'Projected lead lane from your current bring order.')}
-                  topBench={previewBattlefieldBench(simPreview.opponentTeam, simPreview.format, simPreviewOpponentOrder, 'Preview species still hidden in battle order.')}
-                  bottomBench={previewBattlefieldBench(team, simPreview.format, simPreviewPlayerOrder, 'Backline order from your current lock.')}
+                  topSlots={previewBattlefieldSlots(simPreview.opponentTeam, simPreview.format, simPreviewOpponentOrder, 'Hidden until the live reveal starts.')}
+                  bottomSlots={previewBattlefieldSlots(team, simPreview.format, simPreviewPlayerOrder, 'Hidden until the live reveal starts.')}
+                  topBench={previewBattlefieldBench(simPreview.opponentTeam, simPreview.format, simPreviewOpponentOrder, 'Reserved backline hidden during preview.')}
+                  bottomBench={previewBattlefieldBench(team, simPreview.format, simPreviewPlayerOrder, 'Reserved backline hidden during preview.')}
                   conditionSections={simPreviewFieldSections}
                   expansive
                 />
@@ -6826,7 +6927,7 @@ function App() {
                     topLabel={(simPresentationBattle ?? simBattle).opponent.name}
                     bottomLabel={(simPresentationBattle ?? simBattle).player.name}
                     topSlots={battlefieldActiveSlotsFromSide((simPresentationBattle ?? simBattle).opponent, (simPresentationBattle ?? simBattle).format)}
-                    bottomSlots={battlefieldActiveSlotsFromSide((simPresentationBattle ?? simBattle).player, (simPresentationBattle ?? simBattle).format, true)}
+                    bottomSlots={battlefieldActiveSlotsFromSide((simPresentationBattle ?? simBattle).player, (simPresentationBattle ?? simBattle).format, true, Boolean(simDisplayedBattle))}
                     topBench={battlefieldBenchSlotsFromSide((simPresentationBattle ?? simBattle).opponent)}
                     bottomBench={battlefieldBenchSlotsFromSide((simPresentationBattle ?? simBattle).player, true)}
                     event={simBattlefieldEvent}
@@ -7050,14 +7151,14 @@ function App() {
               <div className="battlefield-showcase-row">
                 <BattlefieldArena
                   title="PvP Preview Camera"
-                  subtitle="The room preview now keeps a larger dedicated battlefield section reserved below the preview lists so the lead lanes and reveal rules are easier to read."
+                  subtitle="The room preview battlefield now stays sealed with Pokeballs only, so neither side's stage sprites appear before the live reveal sequence starts."
                   backdrop={pvpBackdrop}
                   topLabel="Opponent Preview"
                   bottomLabel="Your Locked Order"
-                  topSlots={previewBattlefieldSlots(pvpRoom.opponentTeam ?? createTeam('Empty'), pvpRoom.format, pvpPreviewOpponentOrder, 'Preview species only, battle order unrevealed.')}
-                  bottomSlots={previewBattlefieldSlots(team, pvpRoom.format, pvpPreviewPlayerOrder, 'Projected lead lane from your current bring order.')}
-                  topBench={previewBattlefieldBench(pvpRoom.opponentTeam ?? createTeam('Empty'), pvpRoom.format, pvpPreviewOpponentOrder, 'Preview species only until live reveal.')}
-                  bottomBench={previewBattlefieldBench(team, pvpRoom.format, pvpPreviewPlayerOrder, 'Backline order from your current lock.')}
+                  topSlots={previewBattlefieldSlots(pvpRoom.opponentTeam ?? createTeam('Empty'), pvpRoom.format, pvpPreviewOpponentOrder, 'Hidden until the first send-out reveal.')}
+                  bottomSlots={previewBattlefieldSlots(team, pvpRoom.format, pvpPreviewPlayerOrder, 'Hidden until the first send-out reveal.')}
+                  topBench={previewBattlefieldBench(pvpRoom.opponentTeam ?? createTeam('Empty'), pvpRoom.format, pvpPreviewOpponentOrder, 'Reserved backline hidden during preview.')}
+                  bottomBench={previewBattlefieldBench(team, pvpRoom.format, pvpPreviewPlayerOrder, 'Reserved backline hidden during preview.')}
                   conditionSections={pvpPreviewFieldSections}
                   expansive
                 />
@@ -7079,7 +7180,7 @@ function App() {
                     topLabel={(pvpPresentationBattle ?? pvpRoom.battle).opponent.name}
                     bottomLabel={(pvpPresentationBattle ?? pvpRoom.battle).player.name}
                     topSlots={battlefieldActiveSlotsFromSide((pvpPresentationBattle ?? pvpRoom.battle).opponent, (pvpPresentationBattle ?? pvpRoom.battle).format)}
-                    bottomSlots={battlefieldActiveSlotsFromSide((pvpPresentationBattle ?? pvpRoom.battle).player, (pvpPresentationBattle ?? pvpRoom.battle).format, true)}
+                    bottomSlots={battlefieldActiveSlotsFromSide((pvpPresentationBattle ?? pvpRoom.battle).player, (pvpPresentationBattle ?? pvpRoom.battle).format, true, Boolean(pvpDisplayedBattle))}
                     topBench={battlefieldBenchSlotsFromSide((pvpPresentationBattle ?? pvpRoom.battle).opponent)}
                     bottomBench={battlefieldBenchSlotsFromSide((pvpPresentationBattle ?? pvpRoom.battle).player, true)}
                     event={pvpBattlefieldEvent}
@@ -7696,13 +7797,13 @@ function BattleSideView({ side, format, friendly = false }: { side: SimulatorBat
   );
 }
 
-function battlefieldActiveSlotsFromSide(side: SimSide, format: BattleFormat, friendly = false): BattlefieldSlotModel[] {
+function battlefieldActiveSlotsFromSide(side: SimSide, format: BattleFormat, friendly = false, concealFriendlyUnrevealed = false): BattlefieldSlotModel[] {
   const expected = format === 'Doubles' ? 2 : 1;
   const activeSlots: BattlefieldSlotModel[] = side.active
     .map((unitIndex) => side.units[unitIndex] ?? null)
     .filter((unit): unit is SimUnit => Boolean(unit))
     .map((unit, index) => {
-      const concealed = !friendly && !unit.revealed;
+      const concealed = !unit.revealed && (!friendly || concealFriendlyUnrevealed);
       return {
         key: `${side.name}-active-${unit.slotIndex}-${index}`,
         pokemon: concealed ? null : unit.pokemon,
@@ -7770,10 +7871,11 @@ function previewBattlefieldSlots(team: Team, format: BattleFormat, slotOrder: nu
       const pokemon = selectedPokemon(build) ?? resolvePokemonForm(build);
       return {
         key: `${team.id}-preview-${build.id}-${index}`,
-        pokemon,
-        title: build.nickname.trim() || pokemon?.displayName || `Slot ${index + 1}`,
+        pokemon: null,
+        title: `Locked lead ${index + 1}`,
         subtitle,
-        types: pokemon?.types ?? [],
+        types: [],
+        hidden: true,
       } satisfies BattlefieldSlotModel;
     });
 
@@ -7785,7 +7887,7 @@ function previewBattlefieldSlots(team: Team, format: BattleFormat, slotOrder: nu
       subtitle: 'Lock your bring order to project the opening board.',
       types: [],
       statusBadge: null,
-      hidden: false,
+      hidden: true,
       hpPercent: null,
       hpLabel: null,
       fainted: false,
@@ -7801,13 +7903,13 @@ function previewBattlefieldBench(team: Team, format: BattleFormat, slotOrder: nu
     .slice(activeCount)
     .map((slotIndex, order) => {
       const build = team.slots[slotIndex];
-      const pokemon = build ? selectedPokemon(build) ?? resolvePokemonForm(build) : null;
       return {
         key: `${team.id}-preview-bench-${build?.id ?? order}`,
-        pokemon,
-        title: build?.nickname.trim() || pokemon?.displayName || `Bench ${order + 1}`,
+        pokemon: null,
+        title: `Backline ${order + 1}`,
         subtitle,
-        types: pokemon?.types ?? [],
+        types: [],
+        hidden: true,
       } satisfies BattlefieldSlotModel;
     });
 }
@@ -7861,6 +7963,7 @@ function BattlefieldArena({
     const target = battlefieldSlotMatches(slot, event?.targetName);
     const revealTarget = target && event?.tone === 'switch';
     const impactTarget = target && event?.tone !== 'switch';
+    const protectShield = actor && event?.tone === 'guard' && usesBattlefieldProtectShield(event?.moveName ?? null);
     const eventBadge = actor && target
       ? [event?.actorBadge, event?.targetBadge].filter(Boolean).join(' | ')
       : actor
@@ -7894,6 +7997,16 @@ function BattlefieldArena({
                 className="battlefield-sendout-gif"
               />
               <span className="battlefield-sendout-flash" />
+            </div>
+          ) : null}
+          {protectShield && !slot.hidden && slot.pokemon ? (
+            <div className="battlefield-protect-overlay" aria-hidden="true">
+              <img
+                src={BATTLEFIELD_PROTECT_GIF_URL}
+                alt=""
+                className="battlefield-protect-gif"
+              />
+              <span className="battlefield-protect-glow" />
             </div>
           ) : null}
           {eventBadge ? <div className={`battlefield-float-badge battlefield-float-badge-${event?.tone ?? 'field'}`}>{eventBadge}</div> : null}
