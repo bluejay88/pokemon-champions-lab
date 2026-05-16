@@ -1452,13 +1452,22 @@ function applyProtectionContactRebound(state: SimulatorBattleState, target: SimU
   }
 }
 
-function blockedBySideProtection(move: PokemonMove, priority: number, targetRef: TargetRef) {
+function blockedBySideProtection(state: SimulatorBattleState, move: PokemonMove, priority: number, targetRef: TargetRef) {
   if (targetRef.side.quickGuardActive && priority > 0 && !protectBypassMoves.has(move.name)) {
     return 'Quick Guard';
   }
 
   if (targetRef.side.wideGuardActive && moveScope(move) !== 'single' && !protectBypassMoves.has(move.name)) {
     return 'Wide Guard';
+  }
+
+  if (
+    state.environment.terrain === 'psychic' &&
+    priority > 0 &&
+    !protectBypassMoves.has(move.name) &&
+    unitGroundedInState(state, targetRef.unit)
+  ) {
+    return 'Psychic Terrain';
   }
 
   return null;
@@ -2118,7 +2127,7 @@ function applyStatusMove(
       return false;
     }
 
-    const sideProtection = blockedBySideProtection(move, priority, targetRef);
+    const sideProtection = blockedBySideProtection(state, move, priority, targetRef);
     if (sideProtection) {
       state.log.unshift(`${targetRef.unit.pokemon.displayName} was shielded by ${sideProtection}.`);
       return false;
@@ -3756,7 +3765,7 @@ function executeDamageMove(
   let landedHit = false;
 
   for (const targetRef of targetRefs) {
-    const sideProtection = blockedBySideProtection(move, priority, targetRef);
+    const sideProtection = blockedBySideProtection(state, move, priority, targetRef);
     if (sideProtection) {
       state.log.unshift(`${targetRef.unit.pokemon.displayName} was shielded by ${sideProtection}.`);
       continue;

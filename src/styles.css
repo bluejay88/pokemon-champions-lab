@@ -1658,13 +1658,16 @@ button {
 }
 
 .battlefield-layout {
+  display: grid;
+  gap: 18px;
+  align-items: start;
   grid-template-columns: minmax(0, 1.28fr) minmax(240px, 0.72fr);
 }
 
 .battlefield-layout-with-controls,
 .battlefield-live-combat-row {
-  grid-template-columns: minmax(0, 1fr);
-  gap: 14px;
+  grid-template-columns: minmax(420px, 0.42fr) minmax(0, 0.58fr);
+  gap: 20px;
   align-items: start;
 }
 
@@ -1676,12 +1679,18 @@ button {
 }
 
 .battlefield-main-stack,
+.battlefield-command-column,
 .battlefield-control-panel,
 .battlefield-action-rail,
 .battlefield-action-stack {
   display: grid;
   gap: 18px;
   min-width: 0;
+}
+
+.battlefield-command-column {
+  align-self: start;
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .battlefield-control-panel {
@@ -1712,6 +1721,120 @@ button {
 .battlefield-stage-pixelated {
   image-rendering: pixelated;
   background-size: 100% 100%;
+}
+
+.battlefield-atmosphere-stack {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.battlefield-weather-layer,
+.battlefield-terrain-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.battlefield-weather-layer-rain {
+  opacity: 0.3;
+  background:
+    repeating-linear-gradient(110deg, rgba(185, 228, 255, 0) 0 18px, rgba(185, 228, 255, 0.48) 18px 22px, rgba(185, 228, 255, 0) 22px 42px);
+  animation: battlefield-rain-fall 1.35s linear infinite;
+}
+
+.battlefield-weather-layer-snow {
+  opacity: 0.56;
+  background-image:
+    radial-gradient(circle, rgba(255, 255, 255, 0.92) 0 2px, transparent 2.6px),
+    radial-gradient(circle, rgba(214, 238, 255, 0.88) 0 1.7px, transparent 2.3px),
+    radial-gradient(circle, rgba(244, 251, 255, 0.9) 0 1.3px, transparent 1.8px);
+  background-size: 94px 94px, 126px 126px, 78px 78px;
+  background-position: 12px 8px, 38px 28px, 62px 20px;
+  animation: battlefield-snow-fall 10s linear infinite;
+}
+
+.battlefield-weather-layer-sand {
+  opacity: 0.34;
+  background:
+    radial-gradient(circle at 12% 24%, rgba(220, 196, 143, 0.34) 0 2px, transparent 2.8px),
+    radial-gradient(circle at 44% 56%, rgba(235, 205, 152, 0.28) 0 2.2px, transparent 3px),
+    radial-gradient(circle at 76% 34%, rgba(207, 176, 124, 0.28) 0 1.8px, transparent 2.8px),
+    linear-gradient(180deg, rgba(195, 160, 102, 0.06), rgba(195, 160, 102, 0.18) 70%, rgba(195, 160, 102, 0.08));
+  background-size: 220px 180px, 280px 220px, 180px 140px, 100% 100%;
+  animation: battlefield-sand-sweep 5.6s linear infinite;
+}
+
+.battlefield-weather-layer-sun {
+  opacity: 1;
+  background:
+    radial-gradient(circle at 14% 18%, rgba(255, 210, 118, 0.46) 0 14%, rgba(255, 210, 118, 0.16) 28%, rgba(255, 210, 118, 0) 48%),
+    radial-gradient(circle at center, rgba(255, 176, 84, 0.12), transparent 58%);
+  animation: battlefield-sun-pulse 4.2s ease-in-out infinite;
+}
+
+.battlefield-terrain-layer-electric {
+  background:
+    linear-gradient(180deg, rgba(0, 0, 0, 0) 42%, rgba(66, 165, 255, 0.08) 56%, rgba(42, 133, 255, 0.18) 100%),
+    repeating-linear-gradient(92deg, rgba(108, 218, 255, 0) 0 22px, rgba(108, 218, 255, 0.24) 22px 26px, rgba(108, 218, 255, 0) 26px 54px);
+  animation: battlefield-electric-surge 2.2s linear infinite;
+}
+
+.battlefield-terrain-layer-grassy {
+  background:
+    linear-gradient(180deg, rgba(0, 0, 0, 0) 46%, rgba(45, 111, 67, 0.16) 62%, rgba(34, 136, 74, 0.26) 100%),
+    radial-gradient(circle at 14% 82%, rgba(102, 216, 165, 0.18) 0 4%, transparent 7%),
+    radial-gradient(circle at 68% 78%, rgba(132, 230, 188, 0.14) 0 4%, transparent 7%);
+  animation: battlefield-grassy-bloom 6s ease-in-out infinite;
+}
+
+.battlefield-terrain-layer-misty {
+  background:
+    linear-gradient(180deg, rgba(0, 0, 0, 0) 42%, rgba(188, 176, 255, 0.08) 60%, rgba(215, 197, 255, 0.16) 100%),
+    radial-gradient(circle at 20% 72%, rgba(221, 208, 255, 0.2) 0 8%, transparent 14%),
+    radial-gradient(circle at 76% 68%, rgba(194, 224, 255, 0.16) 0 9%, transparent 16%);
+  filter: blur(2px);
+  animation: battlefield-misty-drift 8s ease-in-out infinite;
+}
+
+.battlefield-terrain-layer-psychic {
+  background:
+    linear-gradient(180deg, rgba(0, 0, 0, 0) 44%, rgba(146, 88, 255, 0.08) 58%, rgba(196, 98, 255, 0.2) 100%),
+    repeating-radial-gradient(circle at center, rgba(219, 154, 255, 0.18) 0 12px, rgba(219, 154, 255, 0) 12px 34px);
+  animation: battlefield-psychic-wave 7s linear infinite;
+}
+
+.battlefield-atmosphere-ribbon {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  justify-self: end;
+  margin-top: -6px;
+}
+
+.battlefield-atmosphere-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 34px;
+  padding: 7px 13px;
+  border-radius: 999px;
+  border: 1px solid rgba(162, 201, 255, 0.18);
+  background: rgba(3, 11, 24, 0.72);
+  color: #f0f8ff;
+  font-size: 0.78rem;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  backdrop-filter: blur(10px);
+}
+
+.battlefield-atmosphere-pill-terrain {
+  border-color: rgba(132, 230, 188, 0.2);
 }
 
 .battlefield-stage-overlay {
@@ -2229,6 +2352,10 @@ button {
   min-height: 100%;
 }
 
+.battlefield-side-rail-command {
+  padding: 16px;
+}
+
 .battlefield-action-rail-docked {
   align-content: start;
   min-height: 100%;
@@ -2247,6 +2374,50 @@ button {
 
 .battlefield-control-panel .section-header p {
   font-size: 0.92rem;
+}
+
+.battlefield-command-column .sim-action-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  margin-top: 0;
+}
+
+.battlefield-command-column .sim-action-card {
+  min-height: 0;
+  padding: 16px;
+}
+
+.battlefield-command-column .replacement-phase-grid {
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+
+.battlefield-command-column .team-actions {
+  margin-top: 0;
+}
+
+.battlefield-side-rail-command .battlefield-rail-header strong {
+  font-size: 1.16rem;
+}
+
+.battlefield-side-rail-command .battlefield-rail-header span {
+  font-size: 0.9rem;
+  line-height: 1.45;
+}
+
+.battlefield-side-rail-command .battlefield-condition-stack {
+  grid-template-columns: minmax(0, 1fr);
+  max-height: 360px;
+  overflow-y: auto;
+  padding-right: 6px;
+}
+
+.battlefield-side-rail-command .battlefield-condition-group {
+  padding: 12px;
+}
+
+.battlefield-side-rail-command .battlefield-condition-group strong,
+.battlefield-side-rail-command .battlefield-empty-rail strong {
+  font-size: 0.76rem;
 }
 
 .battlefield-action-rail-docked .sim-action-grid {
@@ -2536,6 +2707,48 @@ button {
   100% { box-shadow: 0 16px 30px rgba(0, 0, 0, 0.16); }
 }
 
+@keyframes battlefield-rain-fall {
+  0% { transform: translate3d(0, -12%, 0); }
+  100% { transform: translate3d(-8%, 14%, 0); }
+}
+
+@keyframes battlefield-snow-fall {
+  0% { transform: translate3d(0, -6%, 0); }
+  100% { transform: translate3d(-3%, 12%, 0); }
+}
+
+@keyframes battlefield-sand-sweep {
+  0% { transform: translate3d(-4%, 0, 0); }
+  100% { transform: translate3d(6%, 0, 0); }
+}
+
+@keyframes battlefield-sun-pulse {
+  0%, 100% { opacity: 0.82; transform: scale(1); }
+  50% { opacity: 1; transform: scale(1.03); }
+}
+
+@keyframes battlefield-electric-surge {
+  0% { transform: translate3d(-4%, 0, 0); opacity: 0.72; }
+  50% { opacity: 0.98; }
+  100% { transform: translate3d(4%, 0, 0); opacity: 0.74; }
+}
+
+@keyframes battlefield-grassy-bloom {
+  0%, 100% { opacity: 0.74; transform: translateY(0); }
+  50% { opacity: 0.96; transform: translateY(-1.5%); }
+}
+
+@keyframes battlefield-misty-drift {
+  0%, 100% { opacity: 0.7; transform: translate3d(-2%, 0, 0); }
+  50% { opacity: 0.9; transform: translate3d(2%, -1%, 0); }
+}
+
+@keyframes battlefield-psychic-wave {
+  0% { transform: scale(1); opacity: 0.72; }
+  50% { transform: scale(1.05); opacity: 0.92; }
+  100% { transform: scale(1.1); opacity: 0.72; }
+}
+
 .growth-chart-list,
 .replay-stack {
   max-height: 420px;
@@ -2639,6 +2852,11 @@ button {
     grid-template-columns: minmax(0, 1.38fr) minmax(270px, 0.62fr);
   }
 
+  .battlefield-layout-with-controls,
+  .battlefield-panel-expansive .battlefield-layout-with-controls {
+    grid-template-columns: minmax(460px, 0.34fr) minmax(0, 0.66fr);
+  }
+
   .battlefield-dock-row {
     grid-template-columns: minmax(280px, 0.4fr) minmax(0, 0.6fr);
   }
@@ -2683,6 +2901,11 @@ button {
 
   .battlefield-panel-expansive .battlefield-layout {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .battlefield-layout-with-controls,
+  .battlefield-panel-expansive .battlefield-layout-with-controls {
+    grid-template-columns: minmax(390px, 0.4fr) minmax(0, 0.6fr);
   }
 
   .battlefield-panel-expansive .battlefield-stage {
@@ -2732,6 +2955,10 @@ button {
   .battlefield-live-combat-row,
   .battlefield-layout-with-controls {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .battlefield-command-column {
+    order: 1;
   }
 
   .battlefield-control-panel {
@@ -2964,6 +3191,10 @@ button {
 }
 
 @media (max-width: 980px) {
+  .battlefield-command-column .sim-action-grid {
+    grid-template-columns: 1fr;
+  }
+
   .battlefield-dock-row {
     grid-template-columns: minmax(0, 1fr);
   }

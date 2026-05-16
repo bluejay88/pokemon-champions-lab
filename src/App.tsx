@@ -2070,6 +2070,18 @@ function battlePlaylistSummary(trackIds: string[]) {
   return playlist.map(battleTrackLabel).join(', ');
 }
 
+function battlefieldWeatherLabel(weather: EnvironmentState['weather'], turns = 0) {
+  return weather === 'clear'
+    ? 'Clear Skies'
+    : `${titleCaseFieldLabel(weather)}${turns > 0 ? ` ${turns}` : ''}`;
+}
+
+function battlefieldTerrainLabel(terrain: EnvironmentState['terrain'], turns = 0) {
+  return terrain === 'none'
+    ? 'Neutral Field'
+    : `${titleCaseFieldLabel(terrain)} Terrain${turns > 0 ? ` ${turns}` : ''}`;
+}
+
 function reservedMegaActorForDrafts(drafts: Record<number, ChoiceDraft>) {
   for (const [actor, draft] of Object.entries(drafts)) {
     if (draft.type === 'mega') {
@@ -5453,6 +5465,10 @@ function App() {
                         title="Live Battle Stage"
                         subtitle="This dedicated lower stage stays locked to one battle map for the full match, with larger sprite lanes, clearer HP reads, and room for hit, KO, and ability cues to breathe."
                         backdrop={simBackdrop}
+                        weather={simBattle.environment.weather}
+                        terrain={simBattle.environment.terrain}
+                        weatherTurns={simBattle.weatherTurns}
+                        terrainTurns={simBattle.terrainTurns}
                         topLabel={simBattle.opponent.name}
                         bottomLabel={simBattle.player.name}
                         topSlots={battlefieldActiveSlotsFromSide(simBattle.opponent, simBattle.format)}
@@ -5697,6 +5713,10 @@ function App() {
                         title="Live PvP Stage"
                         subtitle="This full-width broadcast field stays locked to one map for the whole room, with larger active lanes, clearer backline reveal space, and more readable battle flow."
                         backdrop={pvpBackdrop}
+                        weather={pvpRoom.battle.environment.weather}
+                        terrain={pvpRoom.battle.environment.terrain}
+                        weatherTurns={pvpRoom.battle.weatherTurns}
+                        terrainTurns={pvpRoom.battle.terrainTurns}
                         topLabel={pvpRoom.battle.opponent.name}
                         bottomLabel={pvpRoom.battle.player.name}
                         topSlots={battlefieldActiveSlotsFromSide(pvpRoom.battle.opponent, pvpRoom.battle.format)}
@@ -6333,6 +6353,10 @@ function BattlefieldArena({
   bottomBench = [],
   event = null,
   conditionSections = [],
+  weather = 'clear',
+  terrain = 'none',
+  weatherTurns = 0,
+  terrainTurns = 0,
   expansive = false,
   controlDock = null,
 }: {
@@ -6347,6 +6371,10 @@ function BattlefieldArena({
   bottomBench?: BattlefieldSlotModel[];
   event?: BattlefieldPlaybackEvent | null;
   conditionSections?: BattlefieldConditionSection[];
+  weather?: EnvironmentState['weather'];
+  terrain?: EnvironmentState['terrain'];
+  weatherTurns?: number;
+  terrainTurns?: number;
   expansive?: boolean;
   controlDock?: ReactNode;
 }) {
@@ -6442,15 +6470,45 @@ function BattlefieldArena({
     <div className={expansive ? 'subpanel battlefield-panel battlefield-panel-expansive' : 'subpanel battlefield-panel'}>
       <SectionHeader title={title} subtitle={subtitle} compact />
       <div className={controlDock ? 'battlefield-layout battlefield-layout-with-controls' : 'battlefield-layout'}>
+        {controlDock ? (
+          <aside className="battlefield-command-column">
+            <div className="battlefield-action-stack">
+              {controlDock}
+            </div>
+            <aside className="battlefield-side-rail battlefield-side-rail-inline battlefield-side-rail-docked battlefield-side-rail-command">
+              {fieldConditionRail}
+            </aside>
+          </aside>
+        ) : null}
+
         <div className="battlefield-main-stack">
           <div className="battlefield-scroll-panel">
             <div className="battlefield-stage-shell">
-              <div className={backdrop.pixelated ? 'battlefield-stage battlefield-stage-pixelated' : 'battlefield-stage'} style={{ backgroundImage: `url("${backdrop.image}")` }}>
+              <div
+                className={[
+                  backdrop.pixelated ? 'battlefield-stage battlefield-stage-pixelated' : 'battlefield-stage',
+                  weather !== 'clear' ? `battlefield-stage-weather-${weather}` : '',
+                  terrain !== 'none' ? `battlefield-stage-terrain-${terrain}` : '',
+                ].filter(Boolean).join(' ')}
+                style={{ backgroundImage: `url("${backdrop.image}")` }}
+              >
+                {(weather !== 'clear' || terrain !== 'none') ? (
+                  <div className="battlefield-atmosphere-stack" aria-hidden="true">
+                    {terrain !== 'none' ? <div className={`battlefield-terrain-layer battlefield-terrain-layer-${terrain}`} /> : null}
+                    {weather !== 'clear' ? <div className={`battlefield-weather-layer battlefield-weather-layer-${weather}`} /> : null}
+                  </div>
+                ) : null}
                 <div className="battlefield-stage-overlay" />
                 <div className="battlefield-backdrop-meta">
                   <strong>{backdrop.label}</strong>
                   <span>{backdrop.flavor}</span>
                 </div>
+                {(weather !== 'clear' || terrain !== 'none') ? (
+                  <div className="battlefield-atmosphere-ribbon">
+                    {weather !== 'clear' ? <span className="battlefield-atmosphere-pill">{battlefieldWeatherLabel(weather, weatherTurns)}</span> : null}
+                    {terrain !== 'none' ? <span className="battlefield-atmosphere-pill battlefield-atmosphere-pill-terrain">{battlefieldTerrainLabel(terrain, terrainTurns)}</span> : null}
+                  </div>
+                ) : null}
                 {event ? (
                   <div className={`battlefield-event battlefield-event-${event.tone}`} key={event.id}>
                     {event.moveName ? <span>{event.moveName}</span> : null}
@@ -6499,18 +6557,6 @@ function BattlefieldArena({
                 </div>
               </div>
             </div>
-            {controlDock ? (
-              <div className="battlefield-dock-row">
-                <aside className="battlefield-side-rail battlefield-side-rail-inline battlefield-side-rail-docked">
-                  {fieldConditionRail}
-                </aside>
-                <aside className="battlefield-action-rail battlefield-action-rail-docked">
-                  <div className="battlefield-action-stack">
-                    {controlDock}
-                  </div>
-                </aside>
-              </div>
-            ) : null}
           </div>
         </div>
 

@@ -1233,6 +1233,72 @@ terrainBattle.environment.terrain = 'psychic';
 terrainBattle = withMockRandom([0.1, 0.1, 0.1], () => resolveTurn(terrainBattle, [{ type: 'move', actor: 0, moveId: iceSpinnerChoiceId, target: 0 }]));
 assert.equal(terrainBattle.environment.terrain, 'none', 'Ice Spinner should clear the current terrain.');
 
+let electricTerrainBattle = buildBattle(
+  'Singles',
+  [buildSlot('electric-terrain-sleep-user', sporeUser, ['Hypnosis'], { evs: { ...blankStats(), hp: 20, specialDefense: 20, speed: 26 } })],
+  [buildSlot('electric-terrain-target', groundedProtectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } })],
+);
+electricTerrainBattle.environment.terrain = 'electric';
+electricTerrainBattle.terrainTurns = 5;
+electricTerrainBattle = withMockRandom([0.1, 0.1, 0.1], () => resolveTurn(electricTerrainBattle, [{ type: 'move', actor: 0, moveId: sporeChoiceId, target: 0 }]));
+assert.equal(electricTerrainBattle.opponent.units[0].build.status, 'healthy', 'Electric Terrain should block sleep for grounded targets.');
+
+let mistyTerrainBattle = buildBattle(
+  'Singles',
+  [buildSlot('misty-terrain-burn-user', willOWispUser, ['Will-O-Wisp'], { evs: { ...blankStats(), hp: 20, speed: 20, specialDefense: 26 } })],
+  [buildSlot('misty-terrain-target', groundedProtectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } })],
+);
+mistyTerrainBattle.environment.terrain = 'misty';
+mistyTerrainBattle.terrainTurns = 5;
+mistyTerrainBattle = withMockRandom([0.1, 0.1, 0.1], () => resolveTurn(mistyTerrainBattle, [{ type: 'move', actor: 0, moveId: willOWispChoiceId, target: 0 }]));
+assert.equal(mistyTerrainBattle.opponent.units[0].build.status, 'healthy', 'Misty Terrain should block new status conditions for grounded targets.');
+
+let grassyTerrainBattle = buildBattle(
+  'Singles',
+  [buildSlot('grassy-terrain-heal-user', groundedProtectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 }, currentHpPercent: 55 })],
+  [buildSlot('grassy-terrain-foe', sunnyDayUser, ['Sunny Day'], { evs: { ...blankStats(), hp: 20, specialDefense: 24, defense: 22 } })],
+);
+grassyTerrainBattle.environment.terrain = 'grassy';
+grassyTerrainBattle.terrainTurns = 5;
+grassyTerrainBattle.player.units[0].currentHp = Math.max(1, Math.floor(grassyTerrainBattle.player.units[0].maxHp * 0.55));
+const grassyStartHp = grassyTerrainBattle.player.units[0].currentHp;
+grassyTerrainBattle = withMockRandom([0.1, 0.1, 0.1], () =>
+  resolveTurnWithChoices(
+    grassyTerrainBattle,
+    [{ type: 'move', actor: 0, moveId: protectChoiceId, target: 0 }],
+    [{ type: 'move', actor: 0, moveId: sunnyDayChoiceId, target: 0 }],
+  ));
+assert.ok(grassyTerrainBattle.player.units[0].currentHp > grassyStartHp, 'Grassy Terrain should heal grounded active Pokemon at end of turn.');
+
+let psychicTerrainPriorityBattle = buildBattle(
+  'Doubles',
+  [
+    buildSlot('psychic-terrain-fake-out-user', pranksterUser, ['Fake Out'], { abilityName: 'Prankster', evs: { ...blankStats(), hp: 20, speed: 32, defense: 14 } }),
+    buildSlot('psychic-terrain-ally', groundedProtectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } }),
+  ],
+  [
+    buildSlot('psychic-terrain-target-a', groundedProtectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } }),
+    buildSlot('psychic-terrain-target-b', sunnyDayUser, ['Sunny Day'], { evs: { ...blankStats(), hp: 20, specialDefense: 24, defense: 22 } }),
+  ],
+);
+psychicTerrainPriorityBattle.environment.terrain = 'psychic';
+psychicTerrainPriorityBattle.terrainTurns = 5;
+const psychicTerrainTargetHp = psychicTerrainPriorityBattle.opponent.units[0].currentHp;
+psychicTerrainPriorityBattle = withMockRandom([0.1, 0.1, 0.1], () =>
+  resolveTurnWithChoices(
+    psychicTerrainPriorityBattle,
+    [
+      { type: 'move', actor: 0, moveId: pranksterFakeOutChoiceId, target: 0 },
+      { type: 'move', actor: 1, moveId: protectChoiceId, target: 0 },
+    ],
+    [
+      { type: 'move', actor: 0, moveId: protectChoiceId, target: 0 },
+      { type: 'move', actor: 1, moveId: sunnyDayChoiceId, target: 0 },
+    ],
+  ));
+assert.equal(psychicTerrainPriorityBattle.opponent.units[0].currentHp, psychicTerrainTargetHp, 'Psychic Terrain should block priority attacks into grounded targets.');
+assert.ok(psychicTerrainPriorityBattle.log.some((entry) => entry.includes('Psychic Terrain')), 'Psychic Terrain should be called out when it blocks a priority move.');
+
 let seedBattle = buildBattle(
   'Singles',
   [buildSlot('seed-user', leechSeedUser, ['Leech Seed'], { evs: { ...blankStats(), hp: 32, specialDefense: 20, defense: 14 }, currentHpPercent: 60 })],
