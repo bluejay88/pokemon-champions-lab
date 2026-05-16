@@ -180,6 +180,8 @@ const ATTACK_PLAYBACK_HOLD_MS = 8000;
 const FIELD_PLAYBACK_HOLD_MS = 2600;
 const TURN_PLAYBACK_HOLD_MS = 1800;
 const BATTLEFIELD_EVENT_PULSE_MS = 2400;
+const BATTLEFIELD_SENDOUT_ANIMATION_MS = 1200;
+const BATTLEFIELD_SENDOUT_GIF_URL = 'https://i.pinimg.com/originals/33/23/7c/33237cd27dae223f6a5abdb04c310f59.gif';
 const fallbackUsageInsight: UsageInsight = {
   label: 'UU',
   reason: 'Usage insight is still loading for this surface.',
@@ -7091,6 +7093,8 @@ function BattlefieldArena({
   const renderBattlefieldSlot = (slot: BattlefieldSlotModel, orientation: 'top' | 'bottom') => {
     const actor = battlefieldSlotMatches(slot, event?.actorName);
     const target = battlefieldSlotMatches(slot, event?.targetName);
+    const revealTarget = target && event?.tone === 'switch';
+    const impactTarget = target && event?.tone !== 'switch';
     const eventBadge = actor && target
       ? [event?.actorBadge, event?.targetBadge].filter(Boolean).join(' | ')
       : actor
@@ -7103,7 +7107,8 @@ function BattlefieldArena({
       orientation === 'top' ? 'battlefield-card-top' : 'battlefield-card-bottom',
       event && (actor || target) ? `battlefield-card-tone-${event.tone}` : '',
       actor ? 'is-actor' : '',
-      target ? 'is-target' : '',
+      impactTarget ? 'is-target' : '',
+      revealTarget ? 'is-reveal' : '',
       slot.fainted ? 'is-fainted' : '',
     ].filter(Boolean).join(' ');
 
@@ -7111,6 +7116,20 @@ function BattlefieldArena({
       <div key={slot.key} className={className}>
         <div className="battlefield-card-stage">
           {slot.hidden ? <HiddenBenchFrame size="standard" /> : <PokemonSpriteFrame pokemon={slot.pokemon} size="standard" />}
+          {revealTarget && !slot.hidden && slot.pokemon ? (
+            <div
+              className="battlefield-sendout-overlay"
+              style={{ animationDuration: `${BATTLEFIELD_SENDOUT_ANIMATION_MS}ms` }}
+              aria-hidden="true"
+            >
+              <img
+                src={BATTLEFIELD_SENDOUT_GIF_URL}
+                alt=""
+                className="battlefield-sendout-gif"
+              />
+              <span className="battlefield-sendout-flash" />
+            </div>
+          ) : null}
           {eventBadge ? <div className={`battlefield-float-badge battlefield-float-badge-${event?.tone ?? 'field'}`}>{eventBadge}</div> : null}
         </div>
         <div className="battlefield-card-copy">

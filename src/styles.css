@@ -2511,6 +2511,47 @@ button {
   animation: battlefield-impact-panel 560ms ease;
 }
 
+.battlefield-card.is-reveal .battlefield-card-stage {
+  overflow: visible;
+}
+
+.battlefield-card.is-reveal .sprite-image {
+  animation: battlefield-sendout-reveal 1200ms ease both;
+}
+
+.battlefield-sendout-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+  animation: battlefield-sendout-overlay 1200ms ease forwards;
+}
+
+.battlefield-sendout-gif {
+  width: min(84%, 172px);
+  height: auto;
+  object-fit: contain;
+  filter: drop-shadow(0 10px 22px rgba(5, 11, 18, 0.4));
+  image-rendering: auto;
+}
+
+.battlefield-panel-expansive .battlefield-sendout-gif {
+  width: min(84%, 216px);
+}
+
+.battlefield-sendout-flash {
+  position: absolute;
+  inset: 18%;
+  border-radius: 999px;
+  background:
+    radial-gradient(circle, rgba(255, 255, 255, 0.96) 0%, rgba(223, 246, 255, 0.92) 30%, rgba(144, 221, 255, 0.55) 55%, rgba(144, 221, 255, 0) 78%);
+  mix-blend-mode: screen;
+  opacity: 0;
+  animation: battlefield-sendout-flash 1200ms ease forwards;
+}
+
 .battlefield-card-tone-impact .battlefield-card-stage::after {
   --battlefield-trail-color: rgba(94, 199, 255, 0.92);
 }
@@ -2937,6 +2978,36 @@ button {
   34% { transform: translate3d(10px, -3px, 0) scale(1.02); }
   55% { transform: translate3d(-5px, 0, 0) scale(0.99); }
   100% { transform: translate3d(0, 0, 0) scale(1); }
+}
+
+@keyframes battlefield-sendout-overlay {
+  0% { opacity: 1; }
+  68% { opacity: 1; }
+  100% { opacity: 0; }
+}
+
+@keyframes battlefield-sendout-flash {
+  0%, 38% { opacity: 0; transform: scale(0.72); }
+  58% { opacity: 1; transform: scale(1.06); }
+  100% { opacity: 0; transform: scale(1.22); }
+}
+
+@keyframes battlefield-sendout-reveal {
+  0%, 45% {
+    opacity: 0;
+    transform: scale(0.72) translateY(14px);
+    filter: brightness(1.35) drop-shadow(0 22px 28px rgba(5, 11, 18, 0.26));
+  }
+  62% {
+    opacity: 1;
+    transform: scale(1.08) translateY(-2px);
+    filter: brightness(1.24) drop-shadow(0 22px 28px rgba(5, 11, 18, 0.36));
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+    filter: drop-shadow(0 18px 24px rgba(5, 11, 18, 0.42));
+  }
 }
 
 @keyframes battlefield-impact-panel {
