@@ -268,7 +268,13 @@ for (const moveName of ['Protect', 'Encore', 'Disable', 'Aurora Veil', 'Clear Sm
 
 const garchomp = getPokemonById('garchomp');
 const steelix = getPokemonById('steelix');
-assert(garchomp && steelix, 'Expected Garchomp and Steelix to exist.');
+const chargeBeamAuditUser = findPokemonWithMoves(['Charge Beam'], ['Jolteon', 'Zapdos', 'Magnezone']);
+const psychicAuditUser = findPokemonWithMoves(['Psychic'], ['Espeon', 'Alakazam', 'Gardevoir']);
+const crushClawAuditUser = findPokemonWithMoves(['Crush Claw'], ['Zangoose', 'Sandslash', 'Kangaskhan']);
+const triAttackAuditUser = findPokemonWithMoves(['Tri Attack'], ['Porygon-Z', 'Dodrio']);
+const lightScreenAuditTarget = dataset.pokemon.find((pokemon) => pokemon.displayName === 'Umbreon') ?? null;
+const secondaryEffectAuditTarget = dataset.pokemon.find((pokemon) => pokemon.displayName === 'Clefable') ?? dataset.pokemon.find((pokemon) => pokemon.displayName === 'Snorlax') ?? null;
+assert(garchomp && steelix && chargeBeamAuditUser && psychicAuditUser && crushClawAuditUser && triAttackAuditUser && lightScreenAuditTarget && secondaryEffectAuditTarget, 'Expected baseline audit attackers, targets, and move users to exist.');
 const attacker = {
   ...makeEmptyBuild('audit-attacker'),
   pokemonId: garchomp.id,
@@ -286,8 +292,10 @@ const defender = {
 };
 const earthquake = garchomp.movePool.find((move) => move.id === 'earthquake');
 const dragonClaw = garchomp.movePool.find((move) => move.name === 'Dragon Claw');
+const chargeBeamAuditMove = chargeBeamAuditUser.movePool.find((move) => move.name === 'Charge Beam');
 assert(earthquake, 'Garchomp should have Earthquake in its move pool.');
 assert(dragonClaw, 'Garchomp should have Dragon Claw in its move pool for AI comparison checks.');
+assert(chargeBeamAuditMove, 'Charge Beam should exist for the audit user.');
 const damageResult = calculateDamage(attacker, defender, earthquake, champions.defaultEnvironment);
 assert(damageResult, 'Damage calculation should return a result for damaging moves.');
 assert.ok(damageResult.maxDamage > damageResult.minDamage || damageResult.maxDamage > 0, 'Damage result should contain positive damage output.');
@@ -324,6 +332,33 @@ const wonderRoomDamageResult = calculateDamage(attacker, defender, earthquake, {
   ...champions.defaultEnvironment,
   wonderRoom: true,
 });
+const reflectDragonClawDamageResult = calculateDamage(attacker, defender, dragonClaw, {
+  ...champions.defaultEnvironment,
+  reflect: true,
+});
+const chargeBeamAuditAttacker = {
+  ...makeEmptyBuild('audit-charge-beam-attacker'),
+  pokemonId: chargeBeamAuditUser.id,
+  natureId: 'timid',
+  moveIds: [chargeBeamAuditMove.id],
+  evs: { ...blankStats(), specialAttack: 32, speed: 24, hp: 10 },
+};
+const lightScreenAuditDefender = {
+  ...makeEmptyBuild('audit-light-screen-defender'),
+  pokemonId: lightScreenAuditTarget.id,
+  natureId: 'calm',
+  moveIds: [lightScreenAuditTarget.movePool[0]?.id ?? 'protect'],
+  evs: { ...blankStats(), hp: 32, specialDefense: 20, defense: 14 },
+};
+const chargeBeamDamageResult = calculateDamage(chargeBeamAuditAttacker, lightScreenAuditDefender, chargeBeamAuditMove, champions.defaultEnvironment);
+const lightScreenChargeBeamDamageResult = calculateDamage(chargeBeamAuditAttacker, lightScreenAuditDefender, chargeBeamAuditMove, {
+  ...champions.defaultEnvironment,
+  lightScreen: true,
+});
+const auroraVeilChargeBeamDamageResult = calculateDamage(chargeBeamAuditAttacker, lightScreenAuditDefender, chargeBeamAuditMove, {
+  ...champions.defaultEnvironment,
+  auroraVeil: true,
+});
 assert(spreadDamageResult && auroraVeilDamageResult && helpingHandDamageResult && magicRoomDamageResult && wonderRoomDamageResult, 'Damage calculation should support spread, room, and support-field contexts.');
 assert.ok(spreadDamageResult.averageDamage < damageResult.averageDamage, 'Spread-target damage should be reduced in Doubles.');
 assert.ok(grassyEarthquakeDamageResult && grassyEarthquakeDamageResult.averageDamage < damageResult.averageDamage, 'Grassy Terrain should reduce Earthquake damage against grounded targets.');
@@ -331,6 +366,9 @@ assert.ok(auroraVeilDamageResult.averageDamage < spreadDamageResult.averageDamag
 assert.ok(helpingHandDamageResult.averageDamage > damageResult.averageDamage, 'Helping Hand should boost outgoing damage.');
 assert.ok(magicRoomDamageResult.averageDamage < damageResult.averageDamage, 'Magic Room should suppress held-item damage boosts.');
 assert.ok(wonderRoomDamageResult.averageDamage > damageResult.averageDamage, 'Wonder Room should swap the defender into its lower special-wall stat when appropriate.');
+assert.ok(reflectDragonClawDamageResult && reflectDragonClawDamageResult.averageDamage < calculateDamage(attacker, defender, dragonClaw, champions.defaultEnvironment).averageDamage, 'Reflect should reduce physical damage.');
+assert.ok(chargeBeamDamageResult && lightScreenChargeBeamDamageResult && lightScreenChargeBeamDamageResult.averageDamage < chargeBeamDamageResult.averageDamage, 'Light Screen should reduce special damage.');
+assert.ok(auroraVeilChargeBeamDamageResult && chargeBeamDamageResult && auroraVeilChargeBeamDamageResult.averageDamage < chargeBeamDamageResult.averageDamage, 'Aurora Veil should reduce special damage as well.');
 
 const freezeDryUser = findPokemonWithMoves(['Freeze-Dry'], ['Glaceon', 'Aurorus', 'Vanilluxe']);
 const hawlucha = dataset.pokemon.find((pokemon) => pokemon.displayName === 'Hawlucha') ?? null;
@@ -409,6 +447,7 @@ const snarlUser = findPokemonWithMoves(['Snarl'], ['Incineroar', 'Arcanine']);
 const shadowBallUser = findPokemonWithMoves(['Shadow Ball'], ['Froslass', 'Gengar', 'Alakazam']);
 const specialTargetA = findPokemonWithMoves(['Shadow Ball'], ['Gengar', 'Alakazam', 'Flutter Mane']);
 const specialTargetB = findPokemonWithMoves(['Thunderbolt'], ['Jolteon', 'Zapdos', 'Raikou']);
+const helpingHandSupportUsers = dataset.pokemon.filter((pokemon) => pokemon.movePool.some((move) => move.name === 'Helping Hand') && pokemon.movePool.some((move) => move.category !== 'Status'));
 const wishUser = findPokemonWithMoves(['Wish'], ['Clefable', 'Sylveon', 'Umbreon']);
 const pivotUser = findPokemonWithMoves(['Volt Switch'], ['Jolteon', 'Zapdos', 'Rotom']);
 const brickBreakUser = findPokemonWithMoves(['Brick Break'], ['Garchomp', 'Dragonite', 'Lucario']);
@@ -1172,6 +1211,27 @@ const aiEarthquakeAvoidBattle = buildBattle(
 const aiEarthquakeAvoidChoice = generateAiChoices(aiEarthquakeAvoidBattle, 'player').find((choice) => choice.actor === 0);
 assert.notEqual(aiEarthquakeAvoidChoice?.moveId, earthquakeChoiceId, 'AI should avoid Earthquake when both foes are immune and a grounded ally would eat the collateral.');
 
+const [helpingHandSupportA, helpingHandSupportB] = helpingHandSupportUsers;
+const helpingHandSupportAMoveName = helpingHandSupportA.movePool.find((move) => move.category !== 'Status')?.name ?? helpingHandSupportA.movePool[0].name;
+const helpingHandSupportBMoveName = helpingHandSupportB.movePool.find((move) => move.category !== 'Status')?.name ?? helpingHandSupportB.movePool[0].name;
+const helpingHandSupportAChoiceId = moveIdFor(helpingHandSupportA, 'Helping Hand');
+const helpingHandSupportBChoiceId = moveIdFor(helpingHandSupportB, 'Helping Hand');
+assert(helpingHandSupportAChoiceId && helpingHandSupportBChoiceId, 'Helping Hand audit users should expose Helping Hand.');
+const aiHelpingHandDisciplineBattle = buildBattle(
+  'Doubles',
+  [
+    buildSlot('ai-helping-hand-a', helpingHandSupportA, ['Helping Hand', helpingHandSupportAMoveName], { evs: { ...blankStats(), hp: 24, defense: 18, specialDefense: 24 } }),
+    buildSlot('ai-helping-hand-b', helpingHandSupportB, ['Helping Hand', helpingHandSupportBMoveName], { evs: { ...blankStats(), hp: 24, defense: 18, specialDefense: 24 } }),
+  ],
+  [
+    buildSlot('ai-helping-hand-target-a', groundedProtectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } }),
+    buildSlot('ai-helping-hand-target-b', specialTargetB, [specialTargetB.movePool[0].name], { evs: { ...blankStats(), hp: 20, defense: 20, specialDefense: 26 } }),
+  ],
+);
+const aiHelpingHandChoices = generateAiChoices(aiHelpingHandDisciplineBattle, 'player');
+const aiHelpingHandCount = aiHelpingHandChoices.filter((choice) => choice.type !== 'switch' && [helpingHandSupportAChoiceId, helpingHandSupportBChoiceId].includes(choice.moveId)).length;
+assert.ok(aiHelpingHandCount <= 1, 'AI should not waste a full turn by selecting Helping Hand on both active lanes at once.');
+
 let parabolicChargeBattle = buildBattle(
   'Doubles',
   [
@@ -1630,6 +1690,66 @@ let nastyPlotBattle = buildBattle(
 nastyPlotBattle = withMockRandom([0.1, 0.1, 0.1], () => resolveTurn(nastyPlotBattle, [{ type: 'move', actor: 0, moveId: nastyPlotChoiceId, target: 0 }]));
 assert.equal(nastyPlotBattle.player.units[0].build.specialAttackStage, 2, 'Nasty Plot should sharply raise Sp. Atk.');
 
+let chargeBeamBattle = buildBattle(
+  'Singles',
+  [buildSlot('charge-beam-user', chargeBeamAuditUser, ['Charge Beam'], { natureId: 'timid', evs: { ...blankStats(), specialAttack: 32, speed: 24, hp: 10 } })],
+  [buildSlot('charge-beam-foe', groundedProtectUser, [groundedProtectUser.movePool.find((move) => move.category !== 'Status')?.name ?? groundedProtectUser.movePool[0].name], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } })],
+);
+const chargeBeamFoeMoveId = groundedProtectUser.movePool.find((move) => move.category !== 'Status')?.id ?? groundedProtectUser.movePool[0].id;
+chargeBeamBattle = withMockRandom([0.1, 0.1, 0.1], () =>
+  resolveTurnWithChoices(
+    chargeBeamBattle,
+    [{ type: 'move', actor: 0, moveId: chargeBeamAuditMove.id, target: 0 }],
+    [{ type: 'move', actor: 0, moveId: chargeBeamFoeMoveId, target: 0 }],
+  ));
+assert.equal(chargeBeamBattle.player.units[0].build.specialAttackStage, 1, 'Charge Beam should boost the user\'s Sp. Atk when the secondary roll succeeds.');
+
+const psychicAuditMove = moveIdFor(psychicAuditUser, 'Psychic');
+assert(psychicAuditMove, 'Psychic audit move should exist.');
+let psychicSecondaryBattle = buildBattle(
+  'Singles',
+  [buildSlot('psychic-user', psychicAuditUser, ['Psychic'], { natureId: 'timid', evs: { ...blankStats(), specialAttack: 32, speed: 24, hp: 10 } })],
+  [buildSlot('psychic-foe', secondaryEffectAuditTarget, [secondaryEffectAuditTarget.movePool.find((move) => move.category !== 'Status')?.name ?? secondaryEffectAuditTarget.movePool[0].name], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } })],
+);
+const secondaryEffectTargetMoveId = secondaryEffectAuditTarget.movePool.find((move) => move.category !== 'Status')?.id ?? secondaryEffectAuditTarget.movePool[0].id;
+psychicSecondaryBattle = withMockRandom([0.1, 0.1, 0.1], () =>
+  resolveTurnWithChoices(
+    psychicSecondaryBattle,
+    [{ type: 'move', actor: 0, moveId: psychicAuditMove, target: 0 }],
+    [{ type: 'move', actor: 0, moveId: secondaryEffectTargetMoveId, target: 0 }],
+  ));
+assert.equal(psychicSecondaryBattle.opponent.units[0].build.specialDefenseStage, -1, 'Psychic should lower Sp. Def by one stage when the secondary roll succeeds.');
+
+const crushClawAuditMove = moveIdFor(crushClawAuditUser, 'Crush Claw');
+assert(crushClawAuditMove, 'Crush Claw audit move should exist.');
+let crushClawBattle = buildBattle(
+  'Singles',
+  [buildSlot('crush-claw-user', crushClawAuditUser, ['Crush Claw'], { natureId: 'jolly', evs: { ...blankStats(), attack: 32, speed: 24, hp: 10 } })],
+  [buildSlot('crush-claw-foe', secondaryEffectAuditTarget, [secondaryEffectAuditTarget.movePool.find((move) => move.category !== 'Status')?.name ?? secondaryEffectAuditTarget.movePool[0].name], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } })],
+);
+crushClawBattle = withMockRandom([0.1, 0.1, 0.1], () =>
+  resolveTurnWithChoices(
+    crushClawBattle,
+    [{ type: 'move', actor: 0, moveId: crushClawAuditMove, target: 0 }],
+    [{ type: 'move', actor: 0, moveId: secondaryEffectTargetMoveId, target: 0 }],
+  ));
+assert.equal(crushClawBattle.opponent.units[0].build.defenseStage, -1, 'Crush Claw should lower Defense by one stage when the secondary roll succeeds.');
+
+const triAttackAuditMove = moveIdFor(triAttackAuditUser, 'Tri Attack');
+assert(triAttackAuditMove, 'Tri Attack audit move should exist.');
+let triAttackBattle = buildBattle(
+  'Singles',
+  [buildSlot('tri-attack-user', triAttackAuditUser, ['Tri Attack'], { natureId: 'timid', evs: { ...blankStats(), specialAttack: 32, speed: 24, hp: 10 } })],
+  [buildSlot('tri-attack-foe', secondaryEffectAuditTarget, [secondaryEffectAuditTarget.movePool.find((move) => move.category !== 'Status')?.name ?? secondaryEffectAuditTarget.movePool[0].name], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } })],
+);
+triAttackBattle = withMockRandom([0.1, 0.1, 0.1, 0.1], () =>
+  resolveTurnWithChoices(
+    triAttackBattle,
+    [{ type: 'move', actor: 0, moveId: triAttackAuditMove, target: 0 }],
+    [{ type: 'move', actor: 0, moveId: secondaryEffectTargetMoveId, target: 0 }],
+  ));
+assert.equal(triAttackBattle.opponent.units[0].build.status, 'burn', 'Tri Attack should be able to inflict a rolled major status when its secondary effect succeeds.');
+
 let weatherTimerBattle = buildBattle(
   'Singles',
   [buildSlot('sunny-user', sunnyDayUser, ['Sunny Day', 'Protect'], { evs: { ...blankStats(), hp: 24, speed: 22, specialDefense: 20 } })],
@@ -1861,6 +1981,7 @@ const finalGambitUser = findPokemonWithMoves(['Final Gambit'], ['Lucario']);
 const explosionUser = findPokemonWithMoves(['Explosion'], ['Forretress', 'Garbodor', 'Glalie']);
 const partingShotUser = findPokemonWithMoves(['Parting Shot'], ['Incineroar', 'Morpeko', 'Pangoro']);
 assert(confuseRayUser && blockUser && trickUser && substituteUser && recycleUser && healingWishUser && lockOnUser && fairyLockUser && sleepTalkUser && knockOffUser && psychicNoiseUser && throatChopUser && snarlUser && expandingForceUser && dragonDartsUser && finalGambitUser && explosionUser && partingShotUser, 'Expected audit users for the expanded move-family checks.');
+assert.ok(helpingHandSupportUsers.length >= 2, 'Expected at least two Helping Hand users with damaging fallback moves for AI discipline checks.');
 
 const confuseRayChoiceId = moveIdFor(confuseRayUser, 'Confuse Ray');
 const blockChoiceId = moveIdFor(blockUser, 'Block');
@@ -2335,7 +2456,7 @@ const summary = [
   `Verified item clause sanitization for manual teams and AI-generated teams.`,
   `Verified move-parity registry coverage at ${paritySummary.coveredPercent}% across ${paritySummary.total} Champions moves, with ${paritySummary.explicit} explicit hooks tagged in the report.`,
   `Verified damage engine produces live damage output under the Champions EV model, including Doubles spread reduction, Aurora Veil, Helping Hand, Magic Room, and Wonder Room checks.`,
-  `Verified simulator rules for chained Protect odds, burn end-turn chip, burn physical damage cuts, paralysis fail-rate and speed penalty, Hydration / Shed Skin / Healer / Natural Cure cures, Limber / Insomnia / Sweet Veil / Water Bubble status immunities, same-turn Soak into later status application, Leftovers healing, Sitrus auto-consumption, confusion/trap timers, Trick and Recycle item flow, Substitute and Healing Wish handling, Lock-On accuracy, ally-target support hooks, rain-locked Thunder accuracy, Snarl spread debuffs, Earthquake spread parity across ally collateral, Flying immunity, Levitate immunity, Protect, Wide Guard, and Grassy Terrain, Parabolic Charge spread healing, Draining Kiss and Bitter Blade drain ratios, Matcha Gotcha spread recovery, Pain Split averaging, Sparkling Aria burn cures, Sticky Web and Toxic Spikes switch-in hooks, forced-thaw freeze timing, Rest sleep timing, Disable and Torment move locks, weather field timers, opponent reveal state, Calm Mind and Nasty Plot boosts, Trick Room toggling, recharge turns, charge-turn attacks, mid-turn doubles retargeting, Struggle locks, Dark-type immunity to opposing Prankster status moves, and Mega weather ordering.`,
+  `Verified simulator rules for chained Protect odds, burn end-turn chip, burn physical damage cuts, paralysis fail-rate and speed penalty, Hydration / Shed Skin / Healer / Natural Cure cures, Limber / Insomnia / Sweet Veil / Water Bubble status immunities, same-turn Soak into later status application, Leftovers healing, Sitrus auto-consumption, confusion/trap timers, Trick and Recycle item flow, Substitute and Healing Wish handling, Lock-On accuracy, ally-target support hooks, rain-locked Thunder accuracy, Snarl spread debuffs, Earthquake spread parity across ally collateral, Flying immunity, Levitate immunity, Protect, Wide Guard, and Grassy Terrain, Reflect / Light Screen / Aurora Veil damage reduction, Charge Beam self boosts, Psychic and Crush Claw stat drops, Tri Attack status rolls, Helping Hand AI discipline, Parabolic Charge spread healing, Draining Kiss and Bitter Blade drain ratios, Matcha Gotcha spread recovery, Pain Split averaging, Sparkling Aria burn cures, Sticky Web and Toxic Spikes switch-in hooks, forced-thaw freeze timing, Rest sleep timing, Disable and Torment move locks, weather field timers, opponent reveal state, Calm Mind and Nasty Plot boosts, Trick Room toggling, recharge turns, charge-turn attacks, mid-turn doubles retargeting, Struggle locks, Dark-type immunity to opposing Prankster status moves, and Mega weather ordering.`,
   `Verified 50 fully automated simulator battle sweeps across Singles and Doubles (${simulatorBattlePlayerWins} player-side wins / ${simulatorBattleOpponentWins} opponent-side wins).`,
   `Verified shared PvP room logic, including bring-four lock-in, full roster integrity, immediate dual-lock resolution, deadline-based turn resolution, overall match-timer draws, forfeit handling, and 50 automated room-code battle simulations (${onlineBattleHostWins} host wins / ${onlineBattleGuestWins} guest wins / ${onlineBattleDraws} draws).`,
   warnings.length ? `Source-data warnings: ${warnings.length} HP floor rows on the scraped form pages disagree with fixed 31 IV policy, so the app keeps the fixed-IV result intentionally.` : 'Source-data warnings: none.',

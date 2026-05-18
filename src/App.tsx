@@ -157,6 +157,13 @@ type BattlefieldConditionSection = {
   label: string;
   tags: BattleTag[];
 };
+type BattlefieldSideOverlayEffect = {
+  key: string;
+  label: string;
+  turns: number;
+  asset: string;
+  tone: 'reflect' | 'light-screen' | 'aurora-veil';
+};
 type BattlePlaybackStep = {
   id: string;
   entry: string;
@@ -203,6 +210,11 @@ const BATTLEFIELD_EVENT_PULSE_MS = 2400;
 const BATTLEFIELD_SENDOUT_ANIMATION_MS = 1200;
 const BATTLEFIELD_SENDOUT_GIF_URL = 'https://i.pinimg.com/originals/33/23/7c/33237cd27dae223f6a5abdb04c310f59.gif';
 const BATTLEFIELD_PROTECT_GIF_URL = 'https://media.tenor.com/nl-VWhvKUz0AAAAC/barrier-circle.gif';
+const BATTLEFIELD_SIDE_OVERLAY_ASSETS = {
+  reflect: '/battle-effects/reflect.png',
+  'light-screen': '/battle-effects/light-screen.png',
+  'aurora-veil': '/battle-effects/aurora-veil.png',
+} as const;
 const BATTLEFIELD_PROTECT_SHIELD_MOVES = new Set([
   'Protect',
   'Detect',
@@ -1147,6 +1159,38 @@ function simulatorSideConditionTags(side: SimSide) {
     });
   }
   return tags;
+}
+
+function battlefieldSideOverlayEffects(side: SimSide): BattlefieldSideOverlayEffect[] {
+  const effects: BattlefieldSideOverlayEffect[] = [];
+  if (side.reflectTurns > 0) {
+    effects.push({
+      key: `${side.name}-overlay-reflect`,
+      label: 'Reflect',
+      turns: side.reflectTurns,
+      asset: BATTLEFIELD_SIDE_OVERLAY_ASSETS.reflect,
+      tone: 'reflect',
+    });
+  }
+  if (side.lightScreenTurns > 0) {
+    effects.push({
+      key: `${side.name}-overlay-light-screen`,
+      label: 'Light Screen',
+      turns: side.lightScreenTurns,
+      asset: BATTLEFIELD_SIDE_OVERLAY_ASSETS['light-screen'],
+      tone: 'light-screen',
+    });
+  }
+  if (side.auroraVeilTurns > 0) {
+    effects.push({
+      key: `${side.name}-overlay-aurora-veil`,
+      label: 'Aurora Veil',
+      turns: side.auroraVeilTurns,
+      asset: BATTLEFIELD_SIDE_OVERLAY_ASSETS['aurora-veil'],
+      tone: 'aurora-veil',
+    });
+  }
+  return effects;
 }
 
 function sleepTimerMeta(unit: SimUnit) {
@@ -6198,6 +6242,9 @@ function App() {
                 format={team.format}
                 blockedItemIds={selectedSlotBlockedItemIds}
               />
+              <div className="subpanel slot-analyzer-subpanel">
+                <SelectedSlotAnalyzer build={selectedTeamSlot} team={team} format={team.format} slotIndex={selectedSlotIndex} />
+              </div>
               <div className="subpanel team-summary-subpanel">
                 <SectionHeader title="Team Summary" subtitle="The same AI labels and survivability notes are reflected live inside Team Builder." compact />
                 <div className="result-grid">
@@ -6930,6 +6977,8 @@ function App() {
                     bottomSlots={battlefieldActiveSlotsFromSide((simPresentationBattle ?? simBattle).player, (simPresentationBattle ?? simBattle).format, true, Boolean(simDisplayedBattle))}
                     topBench={battlefieldBenchSlotsFromSide((simPresentationBattle ?? simBattle).opponent)}
                     bottomBench={battlefieldBenchSlotsFromSide((simPresentationBattle ?? simBattle).player, true)}
+                    topSideEffects={battlefieldSideOverlayEffects((simPresentationBattle ?? simBattle).opponent)}
+                    bottomSideEffects={battlefieldSideOverlayEffects((simPresentationBattle ?? simBattle).player)}
                     event={simBattlefieldEvent}
                     conditionSections={simFieldSections}
                     controlDock={<div className="battlefield-control-panel">{simCommandDeck}</div>}
@@ -7183,6 +7232,8 @@ function App() {
                     bottomSlots={battlefieldActiveSlotsFromSide((pvpPresentationBattle ?? pvpRoom.battle).player, (pvpPresentationBattle ?? pvpRoom.battle).format, true, Boolean(pvpDisplayedBattle))}
                     topBench={battlefieldBenchSlotsFromSide((pvpPresentationBattle ?? pvpRoom.battle).opponent)}
                     bottomBench={battlefieldBenchSlotsFromSide((pvpPresentationBattle ?? pvpRoom.battle).player, true)}
+                    topSideEffects={battlefieldSideOverlayEffects((pvpPresentationBattle ?? pvpRoom.battle).opponent)}
+                    bottomSideEffects={battlefieldSideOverlayEffects((pvpPresentationBattle ?? pvpRoom.battle).player)}
                     event={pvpBattlefieldEvent}
                     conditionSections={pvpFieldSections}
                     controlDock={<div className="battlefield-control-panel">{pvpCommandDeck}</div>}
@@ -7745,6 +7796,130 @@ function SelectedSlotSpotlight({ build, format, slotIndex }: { build: PokemonBui
   );
 }
 
+function SelectedSlotAnalyzer({
+  build,
+  team,
+  format,
+  slotIndex,
+}: {
+  build: PokemonBuild;
+  team: Team;
+  format: BattleFormat;
+  slotIndex: number;
+}) {
+  const normalizedBuild = normalizeBuildForChampions(build);
+  const activePokemon = resolvePokemonForm(normalizedBuild);
+  const usage = getPokemonUsageInsight(activePokemon, format);
+  const presetSummary = getPopularPresetSummary(activePokemon, format);
+  const metaNotes = [presetSummary?.previewNote, presetSummary?.supportNote].filter((note): note is string => Boolean(note));
+
+  if (!activePokemon) {
+    return (
+      <>
+        <SectionHeader title="AI Slot Analyzer" subtitle="Live build feedback appears here once the slot has a Pokemon." compact />
+        <div className="notes-list compact-scroll slot-analyzer-list">
+          <div className="note-row">Pick a Pokemon in Slot {slotIndex + 1} to unlock live usage, spread, and role feedback.</div>
+        </div>
+      </>
+    );
+  }
+
+  const stats = buildStats(activePokemon.baseStats, normalizedBuild.evs, normalizedBuild.natureId);
+  const moves = activePokemon.movePool.filter((move) => normalizedBuild.moveIds.includes(move.id));
+  const attackingBias = bestAttackingStat(stats);
+  const physicalMoves = moves.filter((move) => move.category === 'Physical').length;
+  const specialMoves = moves.filter((move) => move.category === 'Special').length;
+  const matchedPresetMoves = presetSummary
+    ? presetSummary.moveNames.filter((moveName) => moves.some((move) => move.name === moveName)).length
+    : 0;
+  const speedControlCount = team.slots.reduce((sum, slot) => {
+    const pokemon = resolvePokemonForm(slot);
+    if (!pokemon) {
+      return sum;
+    }
+    const slotMoves = pokemon.movePool.filter((move) => slot.moveIds.includes(move.id));
+    return sum + (slotMoves.some((move) => ['Tailwind', 'Thunder Wave', 'Icy Wind', 'Trick Room', 'Electroweb', 'Bulldoze'].includes(move.name)) ? 1 : 0);
+  }, 0);
+  const bulkTarget = stats.defense + stats.specialDefense;
+  const bulkDelta = stats.hp - bulkTarget;
+  const notes: string[] = [];
+  const recommendations: string[] = [];
+
+  if (Math.abs(bulkDelta) <= 28) {
+    notes.push(`Bulk curve is healthy: HP ${stats.hp} is staying close to Defense + Sp. Def ${bulkTarget}.`);
+  } else if (bulkDelta < 0) {
+    recommendations.push(`HP is ${Math.abs(bulkDelta)} points behind the combined defenses. A little more HP investment would smooth the shell.`);
+  } else {
+    recommendations.push(`HP is ${bulkDelta} points ahead of the combined defenses. A bit more defense or Sp. Def would round the slot out.`);
+  }
+
+  if (attackingBias === 'attack' && specialMoves > physicalMoves + 1) {
+    recommendations.push('The EV and nature lean physical, but the move list is reading more special right now. Tighten that split for cleaner damage output.');
+  } else if (attackingBias === 'specialAttack' && physicalMoves > specialMoves + 1) {
+    recommendations.push('The EV and nature lean special, but the move list is reading more physical right now. Either shift the spread or trim one physical slot.');
+  } else {
+    notes.push(`Offensive split is aligned: the spread and move package both support ${attackingBias === 'attack' ? 'physical' : 'special'} pressure.`);
+  }
+
+  if (presetSummary) {
+    if (matchedPresetMoves >= 3) {
+      notes.push(`Preset alignment is strong at ${matchedPresetMoves}/4 moves, so this slot is close to the common ${format} ladder shell.`);
+    } else if (matchedPresetMoves <= 1) {
+      recommendations.push(`Only ${matchedPresetMoves}/4 moves overlap with the common ${format} preset. That can work, but it is playing more like a pocket line.`);
+    }
+
+    if (presetSummary.itemName) {
+      const currentItem = getItemById(normalizedBuild.itemId)?.name ?? 'No item';
+      if (currentItem !== presetSummary.itemName) {
+        recommendations.push(`The tracked public shell usually holds ${presetSummary.itemName}, but this build is currently on ${currentItem}. Make sure that tradeoff is intentional.`);
+      }
+    }
+
+    if (presetSummary.useMega && !normalizedBuild.useMega) {
+      recommendations.push('The tracked ladder shell usually spends the Mega button here, but this build is not currently armed to Mega Evolve.');
+    }
+  }
+
+  if (moves.some((move) => ['Reflect', 'Light Screen', 'Aurora Veil'].includes(move.name))) {
+    notes.push('This slot supports team defense directly, which now also mirrors cleanly on the live battlefield through the screen overlays and field-condition rail.');
+  }
+
+  if (format === 'Doubles' && speedControlCount === 0) {
+    recommendations.push('The current team shell is still missing dedicated speed control. Tailwind, Thunder Wave, Icy Wind, Trick Room, or another pace lever would help.');
+  } else if (format === 'Doubles' && speedControlCount > 0) {
+    notes.push(`Team speed control is already covered by ${speedControlCount} slot${speedControlCount === 1 ? '' : 's'}, so this build can stay focused on its own job.`);
+  }
+
+  if (normalizedBuild.useMega) {
+    notes.push('Mega plan is armed here, so this slot is already flagged as one of your late-battle anchors.');
+  }
+
+  return (
+    <>
+      <SectionHeader title="AI Slot Analyzer" subtitle="Live build feedback pulled from the current spread, common usage trends, and the rest of your team shell." compact />
+      <div className="result-grid">
+        <InfoStat label="Slot" value={`${slotIndex + 1}`} />
+        <InfoStat label="Usage" value={usage.label} />
+        <InfoStat label="Preset Match" value={presetSummary ? `${matchedPresetMoves}/4` : 'N/A'} />
+        <InfoStat label="Bias" value={attackingBias === 'attack' ? 'Physical' : 'Special'} />
+      </div>
+      <div className="notes-list compact-scroll slot-analyzer-list">
+        {presetSummary ? <div className="note-row"><strong>Meta source:</strong> {presetSummary.source}</div> : null}
+        <div className="note-row"><strong>Read:</strong> {usage.reason}</div>
+        {metaNotes.map((note) => (
+          <div key={note} className="note-row">{note}</div>
+        ))}
+        {notes.map((note) => (
+          <div key={note} className="note-row">{note}</div>
+        ))}
+        {recommendations.length ? recommendations.map((note) => (
+          <div key={note} className="note-row">Adjustment: {note}</div>
+        )) : <div className="note-row">The current build looks structurally clean from the analyzer’s point of view.</div>}
+      </div>
+    </>
+  );
+}
+
 function BattleSideView({ side, format, friendly = false }: { side: SimulatorBattleState['player']; format: BattleFormat; friendly?: boolean }) {
   return (
     <div className={friendly ? 'battle-side friendly' : 'battle-side'}>
@@ -7931,6 +8106,8 @@ function BattlefieldArena({
   bottomSlots,
   topBench = [],
   bottomBench = [],
+  topSideEffects = [],
+  bottomSideEffects = [],
   event = null,
   conditionSections = [],
   weather = 'clear',
@@ -7949,6 +8126,8 @@ function BattlefieldArena({
   bottomSlots: BattlefieldSlotModel[];
   topBench?: BattlefieldSlotModel[];
   bottomBench?: BattlefieldSlotModel[];
+  topSideEffects?: BattlefieldSideOverlayEffect[];
+  bottomSideEffects?: BattlefieldSideOverlayEffect[];
   event?: BattlefieldPlaybackEvent | null;
   conditionSections?: BattlefieldConditionSection[];
   weather?: EnvironmentState['weather'];
@@ -8082,6 +8261,19 @@ function BattlefieldArena({
     </>
   );
 
+  const renderSideEffects = (effects: BattlefieldSideOverlayEffect[], orientation: 'top' | 'bottom') => (
+    effects.length ? (
+      <div className={`battlefield-side-effect-stack battlefield-side-effect-stack-${orientation}`} aria-hidden="true">
+        {effects.map((effect) => (
+          <div key={effect.key} className={`battlefield-side-effect battlefield-side-effect-${effect.tone}`}>
+            <img src={effect.asset} alt="" className="battlefield-side-effect-image" />
+            <span className="battlefield-side-effect-pill">{`${effect.label} ${effect.turns}`}</span>
+          </div>
+        ))}
+      </div>
+    ) : null
+  );
+
   return (
     <div className={expansive ? 'subpanel battlefield-panel battlefield-panel-expansive' : 'subpanel battlefield-panel'}>
       <SectionHeader title={title} subtitle={subtitle} compact />
@@ -8146,6 +8338,7 @@ function BattlefieldArena({
                 ) : null}
 
                 <div className="battlefield-side battlefield-side-top">
+                  {renderSideEffects(topSideEffects, 'top')}
                   <div className="battlefield-side-label">{topLabel}</div>
                   <div className={`battlefield-active-lanes lanes-${topSlots.length}`}>
                     {topSlots.map((slot) => renderBattlefieldSlot(slot, 'top'))}
@@ -8153,6 +8346,7 @@ function BattlefieldArena({
                 </div>
 
                 <div className="battlefield-side battlefield-side-bottom">
+                  {renderSideEffects(bottomSideEffects, 'bottom')}
                   <div className="battlefield-side-label">{bottomLabel}</div>
                   <div className={`battlefield-active-lanes lanes-${bottomSlots.length}`}>
                     {bottomSlots.map((slot) => renderBattlefieldSlot(slot, 'bottom'))}

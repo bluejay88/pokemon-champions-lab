@@ -1954,25 +1954,28 @@ button {
 }
 
 .battlefield-weather-layer-snow {
-  opacity: 0.56;
+  opacity: 0.7;
   background-image:
-    radial-gradient(circle, rgba(255, 255, 255, 0.92) 0 2px, transparent 2.6px),
-    radial-gradient(circle, rgba(214, 238, 255, 0.88) 0 1.7px, transparent 2.3px),
-    radial-gradient(circle, rgba(244, 251, 255, 0.9) 0 1.3px, transparent 1.8px);
-  background-size: 94px 94px, 126px 126px, 78px 78px;
-  background-position: 12px 8px, 38px 28px, 62px 20px;
-  animation: battlefield-snow-fall 10s linear infinite;
+    radial-gradient(circle, rgba(255, 255, 255, 0.94) 0 2.2px, transparent 2.9px),
+    radial-gradient(circle, rgba(214, 238, 255, 0.9) 0 1.8px, transparent 2.5px),
+    radial-gradient(circle, rgba(244, 251, 255, 0.92) 0 1.4px, transparent 2px),
+    radial-gradient(circle, rgba(232, 245, 255, 0.72) 0 1.1px, transparent 1.8px);
+  background-size: 82px 82px, 110px 110px, 68px 68px, 54px 54px;
+  background-position: 10px 6px, 34px 22px, 58px 18px, 18px 30px;
+  animation: battlefield-snow-fall 8.5s linear infinite;
 }
 
 .battlefield-weather-layer-sand {
-  opacity: 0.34;
-  background:
-    radial-gradient(circle at 12% 24%, rgba(220, 196, 143, 0.34) 0 2px, transparent 2.8px),
-    radial-gradient(circle at 44% 56%, rgba(235, 205, 152, 0.28) 0 2.2px, transparent 3px),
-    radial-gradient(circle at 76% 34%, rgba(207, 176, 124, 0.28) 0 1.8px, transparent 2.8px),
-    linear-gradient(180deg, rgba(195, 160, 102, 0.06), rgba(195, 160, 102, 0.18) 70%, rgba(195, 160, 102, 0.08));
-  background-size: 220px 180px, 280px 220px, 180px 140px, 100% 100%;
-  animation: battlefield-sand-sweep 5.6s linear infinite;
+  opacity: 0.52;
+  background-image:
+    radial-gradient(circle, rgba(232, 201, 153, 0.72) 0 2.1px, transparent 2.9px),
+    radial-gradient(circle, rgba(214, 176, 116, 0.58) 0 1.8px, transparent 2.6px),
+    radial-gradient(circle, rgba(188, 149, 90, 0.46) 0 1.4px, transparent 2.1px),
+    radial-gradient(circle, rgba(240, 218, 176, 0.42) 0 1.1px, transparent 1.9px),
+    linear-gradient(180deg, rgba(209, 175, 116, 0.08), rgba(195, 160, 102, 0.24) 70%, rgba(195, 160, 102, 0.1));
+  background-size: 86px 86px, 114px 114px, 72px 72px, 58px 58px, 100% 100%;
+  background-position: 12px 10px, 36px 30px, 62px 16px, 20px 38px, 0 0;
+  animation: battlefield-sand-sweep 4.6s linear infinite;
 }
 
 .battlefield-weather-layer-sun {
@@ -2090,6 +2093,14 @@ button {
   height: 58px;
 }
 
+.slot-analyzer-subpanel .result-grid {
+  margin-bottom: 12px;
+}
+
+.slot-analyzer-list {
+  max-height: 260px;
+}
+
 .battlefield-backdrop-meta {
   display: grid;
   gap: 4px;
@@ -2173,6 +2184,7 @@ button {
 .battlefield-side {
   display: grid;
   gap: 14px;
+  isolation: isolate;
 }
 
 .battlefield-panel-expansive .battlefield-side {
@@ -2186,6 +2198,63 @@ button {
 
 .battlefield-side-bottom {
   align-self: end;
+}
+
+.battlefield-side-effect-stack {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  overflow: visible;
+}
+
+.battlefield-side-effect {
+  position: absolute;
+  inset: -6% -4%;
+  display: grid;
+  place-items: center;
+  opacity: 0.44;
+  mix-blend-mode: screen;
+  filter: drop-shadow(0 10px 28px rgba(188, 225, 255, 0.18));
+}
+
+.battlefield-side-effect-image {
+  width: min(100%, 720px);
+  height: auto;
+  object-fit: contain;
+  animation: battlefield-screen-overlay-pulse 3.2s ease-in-out infinite;
+}
+
+.battlefield-side-effect-pill {
+  position: absolute;
+  top: 12px;
+  right: 18px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(240, 248, 255, 0.18);
+  background: rgba(3, 11, 24, 0.62);
+  color: #f4fbff;
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.battlefield-side-effect-stack-top .battlefield-side-effect-pill {
+  top: auto;
+  bottom: 14px;
+}
+
+.battlefield-side-effect-reflect .battlefield-side-effect-image {
+  animation-duration: 3s;
+}
+
+.battlefield-side-effect-light-screen .battlefield-side-effect-image {
+  animation-duration: 3.6s;
+}
+
+.battlefield-side-effect-aurora-veil .battlefield-side-effect-image {
+  animation-duration: 4.1s;
 }
 
 .battlefield-side-label {
@@ -3081,6 +3150,18 @@ button {
   0% { opacity: 0; transform: scale(0.74); }
   28% { opacity: 1; transform: scale(1.04); }
   100% { opacity: 0; transform: scale(1.14); }
+}
+
+@keyframes battlefield-screen-overlay-pulse {
+  0%,
+  100% {
+    opacity: 0.82;
+    transform: scale(0.985);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.01);
+  }
 }
 
 @keyframes battlefield-impact-panel {

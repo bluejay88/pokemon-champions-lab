@@ -3486,7 +3486,7 @@ function applyTargetStatEffect(state: SimulatorBattleState, actor: SimUnit, targ
     return;
   }
 
-  if ((move.name === 'Bug Buzz' || move.name === 'Earth Power' || move.name === 'Energy Ball' || move.name === 'Flash Cannon') && chanceRoll(10)) {
+  if ((move.name === 'Bug Buzz' || move.name === 'Earth Power' || move.name === 'Energy Ball' || move.name === 'Flash Cannon' || move.name === 'Psychic') && chanceRoll(10)) {
     if (applyStageChangesFromSource(state, actor, target, { specialDefenseStage: -1 }, move.name)) {
       state.log.unshift(`${target.pokemon.displayName}'s Sp. Def fell because of ${move.name}.`);
     }
@@ -3496,6 +3496,12 @@ function applyTargetStatEffect(state: SimulatorBattleState, actor: SimUnit, targ
   if (move.name === 'Crunch' && chanceRoll(20)) {
     if (applyStageChangesFromSource(state, actor, target, { defenseStage: -1 }, move.name)) {
       state.log.unshift(`${target.pokemon.displayName}'s Defense fell because of Crunch.`);
+    }
+  }
+
+  if (move.name === 'Crush Claw' && chanceRoll(50)) {
+    if (applyStageChangesFromSource(state, actor, target, { defenseStage: -1 }, move.name)) {
+      state.log.unshift(`${target.pokemon.displayName}'s Defense fell because of Crush Claw.`);
     }
   }
 
@@ -3601,6 +3607,13 @@ function applyTargetStatusEffect(state: SimulatorBattleState, actor: SimUnit, ta
     return;
   }
 
+  if (move.name === 'Tri Attack' && chanceRoll(20)) {
+    const roll = Math.random();
+    const nextStatus: PokemonBuild['status'] = roll < 1 / 3 ? 'burn' : roll < 2 / 3 ? 'freeze' : 'paralysis';
+    maybeInflictStatus(state, actor, target, nextStatus, move.name);
+    return;
+  }
+
   if ((move.name === 'Flamethrower' || move.name === 'Fire Blast' || move.name === 'Flare Blitz' || move.name === 'Fire Punch') && chanceRoll(10)) {
     maybeInflictStatus(state, actor, target, 'burn', move.name);
     return;
@@ -3653,6 +3666,11 @@ function applySelfAfterAttack(state: SimulatorBattleState, actor: SimUnit, move:
   if (move.name === 'Psyshield Bash' && landedHit) {
     applySingleStage(actor, 'defenseStage', 1);
     state.log.unshift(`${actor.pokemon.displayName} boosted its Defense with Psyshield Bash.`);
+  }
+
+  if (move.name === 'Charge Beam' && landedHit && chanceRoll(move.effectChance ?? 70)) {
+    applySingleStage(actor, 'specialAttackStage', 1);
+    state.log.unshift(`${actor.pokemon.displayName}'s Sp. Atk rose because of Charge Beam.`);
   }
 
   if (move.name === 'Close Combat') {
@@ -4724,7 +4742,7 @@ function aiBestSwitchChoice(
   return bestCandidate.score > bestMoveScore + 10 ? bestCandidate : null;
 }
 
-function aiChoiceForUnit(state: SimulatorBattleState, sideId: SideId, actor: number): SimulatorChoice {
+function aiChoiceForUnit(state: SimulatorBattleState, sideId: SideId, actor: number, blockedMoveNames: Set<string> = new Set()): SimulatorChoice {
   const actingSide = sideForId(state, sideId);
   const defendingSide = opposingSide(state, sideId);
   const unit = targetActiveUnit(actingSide, actor);
@@ -4732,7 +4750,11 @@ function aiChoiceForUnit(state: SimulatorBattleState, sideId: SideId, actor: num
     return { type: 'move', actor, moveId: actingSide.units[actingSide.active[actor]]?.build.moveIds[0] ?? '', target: 0 };
   }
 
-  const legalMoves = legalMovesForUnit(unit, state, sideId);
+  const baseLegalMoves = legalMovesForUnit(unit, state, sideId);
+  const legalMoves = blockedMoveNames.size
+    ? baseLegalMoves.filter((move) => !blockedMoveNames.has(move.name))
+    : baseLegalMoves;
+  const fallbackMoves = legalMoves.length ? legalMoves : baseLegalMoves;
   const liveOpponents = livingActiveTargets(defendingSide);
   const liveAllies = livingActiveTargets(actingSide).filter((entry) => entry.activeSlot !== actor);
   const threat = aiThreatProfileForUnit(state, sideId, unit);
@@ -4744,7 +4766,7 @@ function aiChoiceForUnit(state: SimulatorBattleState, sideId: SideId, actor: num
   const totalBoosts = unit.build.attackStage + unit.build.specialAttackStage + unit.build.speedStage + unit.build.defenseStage + unit.build.specialDefenseStage;
   const candidates: AiActionCandidate[] = [];
 
-  for (const move of legalMoves) {
+  for (const move of fallbackMoves) {
     if (move.category !== 'Status') {
       for (const targetRef of liveOpponents) {
         const score = aiOffensiveChoiceScore(state, sideId, actor, unit, move, targetRef.activeSlot);
@@ -4959,7 +4981,7 @@ function aiChoiceForUnit(state: SimulatorBattleState, sideId: SideId, actor: num
 
   const bestMoveCandidate =
     candidates.sort((left, right) => right.score - left.score)[0] ??
-    { choice: { type: 'move', actor, moveId: legalMoves[0]?.id ?? '', target: 0 } satisfies SimulatorChoice, score: 0 };
+    { choice: { type: 'move', actor, moveId: fallbackMoves[0]?.id ?? '', target: 0 } satisfies SimulatorChoice, score: 0 };
 
   const switchCandidate = aiBestSwitchChoice(state, sideId, actor, unit, bestMoveCandidate.score, threat);
   const selected = switchCandidate && switchCandidate.score > bestMoveCandidate.score ? switchCandidate.choice : bestMoveCandidate.choice;
@@ -4981,6 +5003,44 @@ function normalizeMegaChoicesForSide(state: SimulatorBattleState, sideId: SideId
 
     megaReserved = true;
     return choice;
+  });
+}
+
+function isHelpingHandChoice(state: SimulatorBattleState, sideId: SideId, choice: SimulatorChoice) {
+  if (choice.type === 'switch') {
+    return false;
+  }
+  const side = sideForId(state, sideId);
+  const unit = targetActiveUnit(side, choice.actor);
+  const move = unit ? findMove(unit, choice.moveId) : null;
+  return move?.name === 'Helping Hand';
+}
+
+function normalizeHelpingHandChoicesForSide(state: SimulatorBattleState, sideId: SideId, choices: SimulatorChoice[]) {
+  const helpingHandChoices = choices.filter((choice) => isHelpingHandChoice(state, sideId, choice));
+  if (helpingHandChoices.length <= 1) {
+    return choices;
+  }
+
+  const side = sideForId(state, sideId);
+  const keepActor = helpingHandChoices
+    .map((choice) => {
+      const actorUnit = targetActiveUnit(side, choice.actor);
+      const ally = livingActiveTargets(side).find((entry) => entry.activeSlot !== choice.actor)?.unit ?? null;
+      const allyBest = ally ? aiBestDamageScoreForUnit(state, sideId, choice.actor, ally) : 0;
+      const actorThreat = actorUnit ? aiThreatProfileForUnit(state, sideId, actorUnit).maxRatio : 0;
+      return {
+        actor: choice.actor,
+        score: allyBest * 1.2 - actorThreat * 0.18,
+      };
+    })
+    .sort((left, right) => right.score - left.score)[0]?.actor ?? helpingHandChoices[0]?.actor ?? 0;
+
+  return choices.map((choice) => {
+    if (!isHelpingHandChoice(state, sideId, choice) || choice.actor === keepActor) {
+      return choice;
+    }
+    return aiChoiceForUnit(state, sideId, choice.actor, new Set(['Helping Hand']));
   });
 }
 
@@ -5068,7 +5128,11 @@ export function advancePreviewToBattle(state: SimulatorBattleState) {
 
 export function generateAiChoices(state: SimulatorBattleState, sideId: SideId) {
   const side = sideForId(state, sideId);
-  const draftedChoices = side.active.map((_, actor) => aiChoiceForUnit(state, sideId, actor));
+  const draftedChoices = normalizeHelpingHandChoicesForSide(
+    state,
+    sideId,
+    side.active.map((_, actor) => aiChoiceForUnit(state, sideId, actor)),
+  );
   const megaChoices = draftedChoices.filter((choice): choice is Extract<SimulatorChoice, { type: 'mega' }> => choice.type === 'mega');
   if (megaChoices.length <= 1) {
     return draftedChoices;
