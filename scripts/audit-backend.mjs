@@ -272,9 +272,10 @@ const chargeBeamAuditUser = findPokemonWithMoves(['Charge Beam'], ['Jolteon', 'Z
 const psychicAuditUser = findPokemonWithMoves(['Psychic'], ['Espeon', 'Alakazam', 'Gardevoir']);
 const crushClawAuditUser = findPokemonWithMoves(['Crush Claw'], ['Zangoose', 'Sandslash', 'Kangaskhan']);
 const triAttackAuditUser = findPokemonWithMoves(['Tri Attack'], ['Porygon-Z', 'Dodrio']);
+const batonPassAuditUser = findPokemonWithMoves(['Baton Pass', 'Calm Mind'], ['Espeon', 'Umbreon', 'Jolteon', 'Sylveon']);
 const lightScreenAuditTarget = dataset.pokemon.find((pokemon) => pokemon.displayName === 'Umbreon') ?? null;
 const secondaryEffectAuditTarget = dataset.pokemon.find((pokemon) => pokemon.displayName === 'Clefable') ?? dataset.pokemon.find((pokemon) => pokemon.displayName === 'Snorlax') ?? null;
-assert(garchomp && steelix && chargeBeamAuditUser && psychicAuditUser && crushClawAuditUser && triAttackAuditUser && lightScreenAuditTarget && secondaryEffectAuditTarget, 'Expected baseline audit attackers, targets, and move users to exist.');
+assert(garchomp && steelix && chargeBeamAuditUser && psychicAuditUser && crushClawAuditUser && triAttackAuditUser && batonPassAuditUser && lightScreenAuditTarget && secondaryEffectAuditTarget, 'Expected baseline audit attackers, targets, and move users to exist.');
 const attacker = {
   ...makeEmptyBuild('audit-attacker'),
   pokemonId: garchomp.id,
@@ -1750,6 +1751,48 @@ triAttackBattle = withMockRandom([0.1, 0.1, 0.1, 0.1], () =>
   ));
 assert.equal(triAttackBattle.opponent.units[0].build.status, 'burn', 'Tri Attack should be able to inflict a rolled major status when its secondary effect succeeds.');
 
+const batonPassAuditMove = moveIdFor(batonPassAuditUser, 'Baton Pass');
+assert(batonPassAuditMove, 'Baton Pass audit move should exist.');
+const batonPassAuditProtectMove = moveIdFor(groundedProtectUser, 'Protect')
+  ?? moveIdFor(groundedProtectUser, groundedProtectUser.movePool.find((move) => move.category === 'Status')?.name ?? '');
+let batonPassBattle = buildBattle(
+  'Singles',
+  [
+    buildSlot('baton-pass-user', batonPassAuditUser, ['Baton Pass', 'Calm Mind'], { natureId: 'timid', evs: { ...blankStats(), specialAttack: 32, speed: 24, hp: 10 } }),
+    buildSlot('baton-pass-receiver', garchomp, ['Dragon Claw'], { natureId: 'jolly', evs: { ...blankStats(), attack: 32, speed: 24, hp: 10 } }),
+  ],
+  [buildSlot('baton-pass-foe', groundedProtectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } })],
+);
+batonPassBattle.player.units[0].build.specialAttackStage = 2;
+batonPassBattle.player.units[0].build.speedStage = 1;
+batonPassBattle.player.units[0].substituteHp = 22;
+batonPassBattle.player.units[0].aquaRing = true;
+batonPassBattle.player.units[0].perishSongTurns = 2;
+assert(batonPassAuditProtectMove, 'Baton Pass audit foe should have a legal Protect line.');
+batonPassBattle = withMockRandom(
+  [0.1, 0.1, 0.1],
+  () => resolveTurnWithChoices(
+    batonPassBattle,
+    [{ type: 'move', actor: 0, moveId: batonPassAuditMove, target: 1 }],
+    [{ type: 'move', actor: 0, moveId: batonPassAuditProtectMove, target: 0 }],
+  ),
+);
+assert.equal(batonPassBattle.player.active[0], 1, 'Baton Pass should switch directly into the chosen backline receiver.');
+assert.equal(batonPassBattle.player.units[1].build.specialAttackStage, 2, 'Baton Pass should transfer special attack boosts to the chosen receiver.');
+assert.equal(batonPassBattle.player.units[1].build.speedStage, 1, 'Baton Pass should transfer speed boosts to the chosen receiver.');
+assert.equal(batonPassBattle.player.units[1].substituteHp, 22, 'Baton Pass should transfer Substitute to the chosen receiver.');
+assert.equal(batonPassBattle.player.units[1].aquaRing, true, 'Baton Pass should transfer Aqua Ring to the chosen receiver.');
+assert.equal(batonPassBattle.player.units[1].perishSongTurns, 1, 'Baton Pass should carry the active Perish Song count onto the receiver, then tick it down with the normal end-of-turn perish counter flow.');
+
+let batonPassFailBattle = buildBattle(
+  'Singles',
+  [buildSlot('baton-pass-alone', batonPassAuditUser, ['Baton Pass'], { natureId: 'timid', evs: { ...blankStats(), specialAttack: 32, speed: 24, hp: 10 } })],
+  [buildSlot('baton-pass-fail-foe', groundedProtectUser, [groundedProtectUser.movePool.find((move) => move.category !== 'Status')?.name ?? groundedProtectUser.movePool[0].name], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } })],
+);
+batonPassFailBattle = withMockRandom([0.1, 0.1, 0.1], () => resolveTurn(batonPassFailBattle, [{ type: 'move', actor: 0, moveId: batonPassAuditMove, target: 0 }]));
+assert.equal(batonPassFailBattle.player.active[0], 0, 'Baton Pass should fail to change the field when no healthy backline receiver exists.');
+assert.ok(batonPassFailBattle.log.some((entry) => entry.includes('no healthy bench receiver')), 'Baton Pass should clearly log when no legal receiver exists.');
+
 let weatherTimerBattle = buildBattle(
   'Singles',
   [buildSlot('sunny-user', sunnyDayUser, ['Sunny Day', 'Protect'], { evs: { ...blankStats(), hp: 24, speed: 22, specialDefense: 20 } })],
@@ -1883,6 +1926,11 @@ const aiMegaChoices = generateAiChoices(aiMegaAllocationBattle, 'opponent');
 assert.ok(
   aiMegaChoices.filter((choice) => choice.type === 'mega').length <= 1,
   'Expert AI should only reserve one Mega Evolution even if two active lanes are Mega-capable.',
+);
+assert.equal(
+  aiMegaChoices.filter((choice) => choice.type === 'mega').length,
+  1,
+  'Expert AI should actively spend one Mega Evolution in a favorable opening state when a legal Mega lane is available.',
 );
 
 let meteorBeamBattle = buildBattle(
@@ -2456,7 +2504,7 @@ const summary = [
   `Verified item clause sanitization for manual teams and AI-generated teams.`,
   `Verified move-parity registry coverage at ${paritySummary.coveredPercent}% across ${paritySummary.total} Champions moves, with ${paritySummary.explicit} explicit hooks tagged in the report.`,
   `Verified damage engine produces live damage output under the Champions EV model, including Doubles spread reduction, Aurora Veil, Helping Hand, Magic Room, and Wonder Room checks.`,
-  `Verified simulator rules for chained Protect odds, burn end-turn chip, burn physical damage cuts, paralysis fail-rate and speed penalty, Hydration / Shed Skin / Healer / Natural Cure cures, Limber / Insomnia / Sweet Veil / Water Bubble status immunities, same-turn Soak into later status application, Leftovers healing, Sitrus auto-consumption, confusion/trap timers, Trick and Recycle item flow, Substitute and Healing Wish handling, Lock-On accuracy, ally-target support hooks, rain-locked Thunder accuracy, Snarl spread debuffs, Earthquake spread parity across ally collateral, Flying immunity, Levitate immunity, Protect, Wide Guard, and Grassy Terrain, Reflect / Light Screen / Aurora Veil damage reduction, Charge Beam self boosts, Psychic and Crush Claw stat drops, Tri Attack status rolls, Helping Hand AI discipline, Parabolic Charge spread healing, Draining Kiss and Bitter Blade drain ratios, Matcha Gotcha spread recovery, Pain Split averaging, Sparkling Aria burn cures, Sticky Web and Toxic Spikes switch-in hooks, forced-thaw freeze timing, Rest sleep timing, Disable and Torment move locks, weather field timers, opponent reveal state, Calm Mind and Nasty Plot boosts, Trick Room toggling, recharge turns, charge-turn attacks, mid-turn doubles retargeting, Struggle locks, Dark-type immunity to opposing Prankster status moves, and Mega weather ordering.`,
+  `Verified simulator rules for chained Protect odds, burn end-turn chip, burn physical damage cuts, paralysis fail-rate and speed penalty, Hydration / Shed Skin / Healer / Natural Cure cures, Limber / Insomnia / Sweet Veil / Water Bubble status immunities, same-turn Soak into later status application, Leftovers healing, Sitrus auto-consumption, confusion/trap timers, Trick and Recycle item flow, Baton Pass receiver targeting and passable-state transfer, Substitute and Healing Wish handling, Lock-On accuracy, ally-target support hooks, rain-locked Thunder accuracy, Snarl spread debuffs, Earthquake spread parity across ally collateral, Flying immunity, Levitate immunity, Protect, Wide Guard, and Grassy Terrain, Reflect / Light Screen / Aurora Veil damage reduction, Charge Beam self boosts, Psychic and Crush Claw stat drops, Tri Attack status rolls, Helping Hand AI discipline, AI Mega reservation discipline, Parabolic Charge spread healing, Draining Kiss and Bitter Blade drain ratios, Matcha Gotcha spread recovery, Pain Split averaging, Sparkling Aria burn cures, Sticky Web and Toxic Spikes switch-in hooks, forced-thaw freeze timing, Rest sleep timing, Disable and Torment move locks, weather field timers, opponent reveal state, Calm Mind and Nasty Plot boosts, Trick Room toggling, recharge turns, charge-turn attacks, mid-turn doubles retargeting, Struggle locks, Dark-type immunity to opposing Prankster status moves, and Mega weather ordering.`,
   `Verified 50 fully automated simulator battle sweeps across Singles and Doubles (${simulatorBattlePlayerWins} player-side wins / ${simulatorBattleOpponentWins} opponent-side wins).`,
   `Verified shared PvP room logic, including bring-four lock-in, full roster integrity, immediate dual-lock resolution, deadline-based turn resolution, overall match-timer draws, forfeit handling, and 50 automated room-code battle simulations (${onlineBattleHostWins} host wins / ${onlineBattleGuestWins} guest wins / ${onlineBattleDraws} draws).`,
   warnings.length ? `Source-data warnings: ${warnings.length} HP floor rows on the scraped form pages disagree with fixed 31 IV policy, so the app keeps the fixed-IV result intentionally.` : 'Source-data warnings: none.',

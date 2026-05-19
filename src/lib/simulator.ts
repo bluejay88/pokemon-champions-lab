@@ -1165,6 +1165,82 @@ function copyBoostState(from: SimUnit, to: SimUnit) {
   }
 }
 
+function captureBatonPassState(unit: SimUnit) {
+  return {
+    boostState: {
+      attackStage: unit.build.attackStage,
+      defenseStage: unit.build.defenseStage,
+      specialAttackStage: unit.build.specialAttackStage,
+      specialDefenseStage: unit.build.specialDefenseStage,
+      speedStage: unit.build.speedStage,
+      accuracyStage: unit.build.accuracyStage,
+      evasionStage: unit.build.evasionStage,
+    },
+    substituteHp: unit.substituteHp,
+    aquaRing: unit.aquaRing,
+    ingrain: unit.ingrain,
+    seededBySideId: unit.seededBySideId,
+    perishSongTurns: unit.perishSongTurns,
+    lockOnTurns: unit.lockOnTurns,
+    lockOnTargetSideId: unit.lockOnTargetSideId,
+    lockOnTargetUnitIndex: unit.lockOnTargetUnitIndex,
+    magnetRiseTurns: unit.magnetRiseTurns,
+    stockpileLevel: unit.stockpileLevel,
+    critStageBonus: unit.critStageBonus,
+  };
+}
+
+function applyCapturedBatonPassState(unit: SimUnit, passedState: ReturnType<typeof captureBatonPassState>) {
+  unit.build.attackStage = passedState.boostState.attackStage;
+  unit.build.defenseStage = passedState.boostState.defenseStage;
+  unit.build.specialAttackStage = passedState.boostState.specialAttackStage;
+  unit.build.specialDefenseStage = passedState.boostState.specialDefenseStage;
+  unit.build.speedStage = passedState.boostState.speedStage;
+  unit.build.accuracyStage = passedState.boostState.accuracyStage;
+  unit.build.evasionStage = passedState.boostState.evasionStage;
+  unit.substituteHp = passedState.substituteHp;
+  unit.aquaRing = passedState.aquaRing;
+  unit.ingrain = passedState.ingrain;
+  unit.seededBySideId = passedState.seededBySideId;
+  unit.perishSongTurns = passedState.perishSongTurns;
+  unit.lockOnTurns = passedState.lockOnTurns;
+  unit.lockOnTargetSideId = passedState.lockOnTargetSideId;
+  unit.lockOnTargetUnitIndex = passedState.lockOnTargetUnitIndex;
+  unit.magnetRiseTurns = passedState.magnetRiseTurns;
+  unit.stockpileLevel = passedState.stockpileLevel;
+  unit.critStageBonus = passedState.critStageBonus;
+}
+
+function batonPassToBench(state: SimulatorBattleState, sideId: SideId, actor: SimUnit, replacementIndex: number | null) {
+  const side = sideForId(state, sideId);
+  const currentIndex = side.units.indexOf(actor);
+  const activeSlot = side.active.findIndex((entry) => entry === currentIndex);
+  const livingBench = livingBenchTargets(side);
+  if (!livingBench.length || activeSlot < 0) {
+    state.log.unshift(`${actor.pokemon.displayName}'s Baton Pass failed because no healthy bench receiver was available.`);
+    return false;
+  }
+
+  const resolvedReplacementIndex =
+    typeof replacementIndex === 'number' && livingBench.includes(replacementIndex)
+      ? replacementIndex
+      : livingBench[0] ?? null;
+  if (resolvedReplacementIndex === null) {
+    state.log.unshift(`${actor.pokemon.displayName}'s Baton Pass failed because no legal receiver could be chosen.`);
+    return false;
+  }
+
+  const passedState = captureBatonPassState(actor);
+  switchOutUnit(side, currentIndex, state);
+  side.active[activeSlot] = resolvedReplacementIndex;
+  side.bench = [...side.bench.filter((entry) => entry !== resolvedReplacementIndex), currentIndex];
+  side.units[resolvedReplacementIndex].turnsActive = 0;
+  applyCapturedBatonPassState(side.units[resolvedReplacementIndex], passedState);
+  state.log.unshift(`${actor.pokemon.displayName} baton passed into ${side.units[resolvedReplacementIndex].pokemon.displayName}.`);
+  switchInUnit(state, sideId, resolvedReplacementIndex, false);
+  return true;
+}
+
 function autoPivotToBench(state: SimulatorBattleState, sideId: SideId, actor: SimUnit, reason: string, passBoosts = false) {
   const side = sideForId(state, sideId);
   const currentIndex = side.units.indexOf(actor);
@@ -2087,6 +2163,7 @@ function applyStatusMove(
   actor: SimUnit,
   move: PokemonMove,
   target: SimUnit | null,
+  requestedTarget = 0,
 ) {
   const actingSideId: SideId = state.player === actingSide ? 'player' : 'opponent';
   const actorActiveSlot = actingSide.active.findIndex((entry) => entry === actingSide.units.indexOf(actor));
@@ -2819,7 +2896,7 @@ function applyStatusMove(
     const chosenMove = callableMoves[Math.floor(Math.random() * callableMoves.length)];
     state.log.unshift(`${actor.pokemon.displayName}'s Sleep Talk called ${chosenMove.name}.`);
     if (chosenMove.category === 'Status') {
-      applyStatusMove(state, actingSide, defendingSide, actor, chosenMove, target);
+      applyStatusMove(state, actingSide, defendingSide, actor, chosenMove, target, 0);
     } else {
       executeDamageMove(state, actor, target, chosenMove, actingSide, defendingSide);
     }
@@ -2868,7 +2945,7 @@ function applyStatusMove(
     actor.lastMoveId = copiedMove.id;
     state.log.unshift(`${actor.pokemon.displayName} copied ${copiedMove.name}.`);
     if (copiedMove.category === 'Status') {
-      applyStatusMove(state, actingSide, defendingSide, actor, copiedMove, target);
+      applyStatusMove(state, actingSide, defendingSide, actor, copiedMove, target, 0);
     } else {
       executeDamageMove(state, actor, target, copiedMove, actingSide, defendingSide);
     }
@@ -3020,7 +3097,7 @@ function applyStatusMove(
     }
     state.log.unshift(`${actor.pokemon.displayName} ordered ${chosenTarget.pokemon.displayName} to repeat ${repeatedMove.name}.`);
     if (repeatedMove.category === 'Status') {
-      applyStatusMove(state, sideForUnit(state, chosenTarget), opposingSide(state, unitSideId(state, chosenTarget)), chosenTarget, repeatedMove, resolveMoveTarget(state, opposingSide(state, unitSideId(state, chosenTarget)), 0, repeatedMove));
+      applyStatusMove(state, sideForUnit(state, chosenTarget), opposingSide(state, unitSideId(state, chosenTarget)), chosenTarget, repeatedMove, resolveMoveTarget(state, opposingSide(state, unitSideId(state, chosenTarget)), 0, repeatedMove), 0);
     } else {
       executeDamageMove(state, chosenTarget, resolveMoveTarget(state, opposingSide(state, unitSideId(state, chosenTarget)), 0, repeatedMove), repeatedMove, sideForUnit(state, chosenTarget), opposingSide(state, unitSideId(state, chosenTarget)));
     }
@@ -3365,7 +3442,7 @@ function applyStatusMove(
   }
 
   if (move.name === 'Baton Pass') {
-    autoPivotToBench(state, actingSideId, actor, move.name, true);
+    batonPassToBench(state, actingSideId, actor, requestedTarget);
     return;
   }
 
@@ -4348,7 +4425,32 @@ function maybeUpgradeChoiceToMega(state: SimulatorBattleState, sideId: SideId, a
 
   const megaAbility = resolveAbility({ ...unit.build, useMega: true }, unit.megaPokemon)?.name ?? null;
   const weatherOrTerrainMega = weatherAbilities.has(megaAbility ?? '') || terrainAbilities.has(megaAbility ?? '');
-  const shouldMegaNow = weatherOrTerrainMega || state.turn <= 3 || unit.currentHp > unit.maxHp * 0.45;
+  const hpRatio = unit.currentHp / Math.max(1, unit.maxHp);
+  const move = choice.moveId ? findMove(unit, choice.moveId) : null;
+  const isDamagingLine = Boolean(move && move.category !== 'Status');
+  const positiveBoosts =
+    Math.max(0, unit.build.attackStage)
+    + Math.max(0, unit.build.specialAttackStage)
+    + Math.max(0, unit.build.speedStage)
+    + Math.max(0, unit.build.defenseStage)
+    + Math.max(0, unit.build.specialDefenseStage);
+  const candidateScores = actingSide.active
+    .map((_, activeActor) => {
+      const activeChoice = activeActor === actor
+        ? ({ ...choice, type: 'mega' } satisfies SimulatorChoice)
+        : ({ type: 'move', actor: activeActor, moveId: '', target: 0 } satisfies SimulatorChoice);
+      return aiMegaChoiceScore(state, sideId, activeChoice);
+    })
+    .filter((score) => Number.isFinite(score));
+  const bestActiveMegaScore = candidateScores.length ? Math.max(...candidateScores) : -Infinity;
+  const thisMegaScore = aiMegaChoiceScore(state, sideId, { ...choice, type: 'mega' });
+  const shouldMegaNow =
+    weatherOrTerrainMega
+    || (Number.isFinite(thisMegaScore) && thisMegaScore >= bestActiveMegaScore - 4 && (
+      (isDamagingLine && (state.turn <= 6 || hpRatio > 0.26))
+      || positiveBoosts > 0
+      || hpRatio > 0.68
+    ));
   return shouldMegaNow ? ({ ...choice, type: 'mega' } satisfies SimulatorChoice) : choice;
 }
 
@@ -4798,6 +4900,43 @@ function aiChoiceForUnit(state: SimulatorBattleState, sideId: SideId, actor: num
       continue;
     }
 
+    if (move.name === 'Baton Pass') {
+      const benchTargets = livingBenchTargets(actingSide);
+      const transferableValue =
+        Math.max(0, unit.build.attackStage) * 12
+        + Math.max(0, unit.build.specialAttackStage) * 12
+        + Math.max(0, unit.build.speedStage) * 16
+        + Math.max(0, unit.build.defenseStage) * 8
+        + Math.max(0, unit.build.specialDefenseStage) * 8
+        + Math.max(0, unit.build.accuracyStage) * 5
+        + Math.max(0, unit.build.evasionStage) * 5;
+      const supportCarry =
+        (unit.substituteHp > 0 ? 22 : 0)
+        + (unit.aquaRing ? 12 : 0)
+        + (unit.ingrain ? 10 : 0)
+        + (unit.stockpileLevel > 0 ? unit.stockpileLevel * 8 : 0)
+        + (unit.critStageBonus > 0 ? unit.critStageBonus * 6 : 0)
+        + (unit.magnetRiseTurns > 0 ? 8 : 0)
+        - (unit.perishSongTurns > 0 ? 18 : 0);
+      const urgencyBonus = threat.maxRatio >= 1 ? 16 : threat.maxRatio >= 0.75 ? 8 : 0;
+      if (benchTargets.length && transferableValue + supportCarry + urgencyBonus >= 18) {
+        for (const benchIndex of benchTargets) {
+          const benchUnit = actingSide.units[benchIndex] ?? null;
+          if (!benchUnit || benchUnit.fainted) {
+            continue;
+          }
+          const benchThreat = aiThreatProfileForUnit(state, sideId, benchUnit);
+          const offensivePressure = aiBestDamageScoreForUnit(state, sideId, actor, benchUnit);
+          const safetyScore = (1 - Math.min(1.35, benchThreat.maxRatio)) * 34;
+          const healthScore = benchUnit.currentHp / Math.max(1, benchUnit.maxHp) * 12;
+          const switchInScore = aiSwitchInBonus(state, sideId, benchUnit);
+          const score = 34 + transferableValue + supportCarry + urgencyBonus + offensivePressure * 0.44 + safetyScore + healthScore + switchInScore;
+          candidates.push({ choice: { type: 'move', actor, moveId: move.id, target: benchIndex }, score });
+        }
+      }
+      continue;
+    }
+
     if (allyBoostMoves.has(move.name)) {
       if (ally && threat.maxRatio < 0.7) {
         const allyPhysicalBias = effectiveStatsForUnit(ally).attack >= effectiveStatsForUnit(ally).specialAttack;
@@ -5113,11 +5252,9 @@ export function advancePreviewToBattle(state: SimulatorBattleState) {
   const next = structuredClone(state) as SimulatorBattleState;
   next.stage = 'battle';
   next.previewEndsAt = null;
-  next.log.unshift(`${next.player.name} sent out ${describeActive(next.player)}.`);
-  next.log.unshift(`${next.opponent.name} sent out ${describeActive(next.opponent)}.`);
 
   for (const entry of simultaneousSwitchInOrder(next)) {
-    switchInUnit(next, entry.sideId, entry.unitIndex, false);
+    switchInUnit(next, entry.sideId, entry.unitIndex, true);
   }
 
   clearFaintedActiveSlots(next.player);
@@ -5413,7 +5550,7 @@ export function resolveTurnWithChoices(
     }
 
     if (move.category === 'Status') {
-      applyStatusMove(next, actingSide, defendingSide, actor, move, target);
+      applyStatusMove(next, actingSide, defendingSide, actor, move, target, actionChoice.target);
     } else {
       executeDamageMove(next, actor, target, move, actingSide, defendingSide);
     }

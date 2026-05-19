@@ -16,10 +16,10 @@ export const battleMusicTracks: OnlineBattleTrack[] = [
   },
   {
     id: 'gen2-champion',
-    label: 'Johto Trainer Battle',
-    generation: 'Gen II',
-    audioUrl: 'https://play.pokemonshowdown.com/audio/hgss-johto-trainer.mp3',
-    sourceUrl: 'https://play.pokemonshowdown.com/audio/hgss-johto-trainer.mp3',
+    label: 'Champion Theme',
+    generation: 'Gen II - Gold / Silver',
+    audioUrl: 'https://downloads.khinsider.com/game-soundtracks/album/pokemon-gold-silver-crystal/101.%20Battle%21%20%28Champion%29.mp3',
+    sourceUrl: 'https://downloads.khinsider.com/game-soundtracks/album/pokemon-gold-silver-crystal/101.%20Battle%21%20%28Champion%29.mp3',
   },
   {
     id: 'gen3-colosseum',
@@ -62,6 +62,20 @@ export const battleMusicTracks: OnlineBattleTrack[] = [
     generation: 'Gen VIII Warmup / ORAS',
     audioUrl: 'https://play.pokemonshowdown.com/audio/oras-rival.mp3',
     sourceUrl: 'https://play.pokemonshowdown.com/audio/oras-rival.mp3',
+  },
+  {
+    id: 'gen8-marnie',
+    label: "Marnie's Theme",
+    generation: 'Gen VIII - Sword / Shield',
+    audioUrl: 'https://downloads.khinsider.com/game-soundtracks/album/pokemon-sword-shield-ost/42%20-%20Marnie%27s%20Theme.mp3',
+    sourceUrl: 'https://downloads.khinsider.com/game-soundtracks/album/pokemon-sword-shield-ost/42%20-%20Marnie%27s%20Theme.mp3',
+  },
+  {
+    id: 'gen8-gym-leader',
+    label: 'Gym Leader Theme',
+    generation: 'Gen VIII - Sword / Shield',
+    audioUrl: 'https://downloads.khinsider.com/game-soundtracks/album/pokemon-sword-shield-ost/60%20-%20Battle%21%20%28Gym%20Leader%29.mp3',
+    sourceUrl: 'https://downloads.khinsider.com/game-soundtracks/album/pokemon-sword-shield-ost/60%20-%20Battle%21%20%28Gym%20Leader%29.mp3',
   },
   {
     id: 'gen9-tera',

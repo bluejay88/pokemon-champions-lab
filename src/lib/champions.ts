@@ -498,6 +498,7 @@ export function createDefaultState(): AppState {
       preferredBattleTrackId: 'gen5-final',
       battleMusicPlaylistIds: ['gen5-final'],
       announcerDefaultEnabled: true,
+      lysanderCutscenesEnabled: true,
       onlineAccount: null,
       matchHistory: [],
     },

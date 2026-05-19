@@ -188,6 +188,7 @@ export interface Profile {
   preferredBattleTrackId: string;
   battleMusicPlaylistIds: string[];
   announcerDefaultEnabled: boolean;
+  lysanderCutscenesEnabled: boolean;
   onlineAccount: OnlineBattleAccount | null;
   matchHistory: SimulatorMatchRecord[];
 }

@@ -164,6 +164,14 @@ type BattlefieldSideOverlayEffect = {
   asset: string;
   tone: 'reflect' | 'light-screen' | 'aurora-veil';
 };
+type LysanderCutsceneVariant = 'intro' | 'win' | 'loss';
+type LysanderCutsceneState = {
+  key: string;
+  variant: LysanderCutsceneVariant;
+  title: string;
+  line: string;
+  image: string;
+};
 type BattlePlaybackStep = {
   id: string;
   entry: string;
@@ -214,6 +222,11 @@ const BATTLEFIELD_SIDE_OVERLAY_ASSETS = {
   reflect: '/battle-effects/reflect.png',
   'light-screen': '/battle-effects/light-screen.png',
   'aurora-veil': '/battle-effects/aurora-veil.png',
+} as const;
+const LYSANDER_ART = {
+  intro: '/lysander/lysander-intro-scene.png',
+  win: '/lysander/lysander-win.png',
+  loss: '/lysander/lysander-loss.png',
 } as const;
 const BATTLEFIELD_PROTECT_SHIELD_MOVES = new Set([
   'Protect',
@@ -862,8 +875,9 @@ const simulatorAutoTargetMoves = new Set([
   'Wide Guard',
 ]);
 const simulatorAllyTargetMoves = new Set(['Coaching', 'Heal Pulse', 'Helping Hand']);
+const simulatorBenchTargetMoves = new Set(['Baton Pass']);
 
-type SimulatorTargetMode = 'foe' | 'ally' | 'auto';
+type SimulatorTargetMode = 'foe' | 'ally' | 'bench' | 'auto';
 
 const announcerScripts: Record<
   'preview' | 'turn' | 'switch' | 'hit' | 'super' | 'resist' | 'miss' | 'status' | 'protect' | 'ko' | 'finish' | 'star',
@@ -1003,8 +1017,37 @@ function pickLine(lines: string[]) {
   return lines[Math.floor(Math.random() * lines.length)] ?? lines[0] ?? '';
 }
 
+const lysanderIntroLines = [
+  'The veil is up. Show me whether your reads can survive the cold light of a real battle.',
+  'Every shield breaks somewhere. Let me see if you know where to strike.',
+  'You made it this far. Now prove your team can breathe inside my weather.',
+  'The field belongs to precision. Step forward and show me your control.',
+];
+
+const lysanderWinLines = [
+  'A clean line, a sealed board, and one more challenger turned away.',
+  'You fought with spirit, but the veil held. Learn the rhythm and return stronger.',
+  'That battle never left my pace. The next answer starts in your prep, not your excuses.',
+];
+
+const lysanderLossLines = [
+  'So you really did pierce the veil. Hold onto that clarity, you earned it.',
+  'That was the answer I was waiting for. Sharp prep, sharper execution.',
+  'Well played. You broke through the screen, the pressure, and the finish.',
+];
+
 function fillAnnouncerLine(template: string, replacements: Record<string, string | number | null | undefined>) {
   return Object.entries(replacements).reduce((line, [key, value]) => line.replaceAll(`{${key}}`, String(value ?? '')), template);
+}
+
+function buildLysanderScene(variant: LysanderCutsceneVariant): LysanderCutsceneState {
+  return {
+    key: `${variant}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    variant,
+    title: variant === 'intro' ? 'Lysander enters the arena' : variant === 'win' ? 'Lysander claims the match' : 'Lysander concedes the field',
+    line: pickLine(variant === 'intro' ? lysanderIntroLines : variant === 'win' ? lysanderWinLines : lysanderLossLines),
+    image: variant === 'intro' ? LYSANDER_ART.intro : variant === 'win' ? LYSANDER_ART.win : LYSANDER_ART.loss,
+  };
 }
 
 function titleCaseFieldLabel(value: string) {
@@ -1409,6 +1452,14 @@ function planSignature(plan: GeneratedTeamPlan | null) {
     .join('|');
 }
 
+function generatedPlanHasMega(plan: GeneratedTeamPlan) {
+  return plan.slots.some((slot) => {
+    const pokemon = slot.pokemonId ? getPokemonById(slot.pokemonId) : null;
+    const item = slot.itemId ? getItemById(slot.itemId) : null;
+    return Boolean(slot.useMega || pokemon?.isMega || item?.category === 'mega-stone');
+  });
+}
+
 function lockedNamesFromValidations(validations: ReturnType<typeof validateLockedPokemonInputs>) {
   return validations
     .map((validation) => {
@@ -1441,7 +1492,9 @@ function randomOpponentTeam(format: BattleFormat, offMetaBias: number, recentSig
     .slice(0, Math.min(4, archetypes.length));
   const candidatePlans = sampledArchetypes.flatMap((archetype) => generateTeamPlans(archetype.id, format, offMetaBias, [], 6, true));
   const nonRepeating = candidatePlans.filter((plan) => !recentSignatures.includes(planSignature(plan)));
-  const pool = nonRepeating.length ? nonRepeating : candidatePlans;
+  const basePool = nonRepeating.length ? nonRepeating : candidatePlans;
+  const megaPool = basePool.filter(generatedPlanHasMega);
+  const pool = megaPool.length ? megaPool : basePool;
   const selectedPlan = pool[Math.floor(Math.random() * Math.max(1, pool.length))] ?? pool[0];
   if (selectedPlan) {
     return refineTeamWithPopularPresets(buildTeamFromPlan(selectedPlan));
@@ -1535,15 +1588,16 @@ function chooseOpponentBringOrder(format: BattleFormat, opponentTeam: Team, play
       const trickRoomLeadBias = knownMovesForBuild(build, pokemon).some((move) => move.name === 'Trick Room')
         ? Math.max(0, 180 - stats.speed) * 0.18
         : 0;
+      const spreadPressure = knownMovesForBuild(build, pokemon).some((move) => ['Heat Wave', 'Rock Slide', 'Icy Wind', 'Snarl', 'Dazzling Gleam', 'Blizzard', 'Earthquake'].includes(move.name)) ? 10 : 0;
       const offense =
         playerBuilds.reduce((total, defenderBuild) => total + bestAverageDamagePercent(build, defenderBuild), 0) /
         Math.max(1, playerBuilds.length);
       const defense =
         playerBuilds.reduce((total, attackerBuild) => total + Math.max(0, 100 - bestAverageDamagePercent(attackerBuild, build)), 0) /
         Math.max(1, playerBuilds.length);
-      const megaBonus = build.useMega || getItemById(build.itemId)?.category === 'mega-stone' ? 12 : 0;
-      const totalScore = offense * 0.62 + defense * 0.34 + supportScore + speedScore + megaBonus;
-      const leadScore = offense * 0.46 + defense * 0.18 + supportScore * 1.22 + speedScore + trickRoomLeadBias;
+      const megaBonus = build.useMega || getItemById(build.itemId)?.category === 'mega-stone' ? 28 : 0;
+      const totalScore = offense * 0.62 + defense * 0.34 + supportScore + speedScore + spreadPressure + megaBonus;
+      const leadScore = offense * 0.46 + defense * 0.18 + supportScore * 1.22 + speedScore + trickRoomLeadBias + spreadPressure + megaBonus * 0.78;
 
       return {
         slotIndex,
@@ -1857,6 +1911,10 @@ function simulatorTargetMode(move: PokemonMove | null, format: BattleFormat): Si
     return 'foe';
   }
 
+  if (simulatorBenchTargetMoves.has(move.name)) {
+    return 'bench';
+  }
+
   if (simulatorAutoTargetMoves.has(move.name)) {
     return 'auto';
   }
@@ -1868,9 +1926,15 @@ function simulatorTargetMode(move: PokemonMove | null, format: BattleFormat): Si
   return 'foe';
 }
 
-function simulatorTargetNote(move: PokemonMove | null, format: BattleFormat, allyName: string | null) {
+function simulatorTargetNote(move: PokemonMove | null, format: BattleFormat, allyName: string | null, benchNames: string[] = []) {
   if (!move) {
     return null;
+  }
+
+  if (simulatorBenchTargetMoves.has(move.name)) {
+    return benchNames.length
+      ? `${move.name} needs a healthy backline receiver. It will pass legal stat changes, Substitute, Perish Song, Ingrain, Aqua Ring, and similar Baton Pass effects into ${benchNames.join(', ')}.`
+      : `${move.name} needs at least one healthy backline Pokemon to receive the pass.`;
   }
 
   if (simulatorAllyTargetMoves.has(move.name) && format !== 'Doubles') {
@@ -2622,10 +2686,18 @@ function sanitizedChoiceDraftsForBattle(battle: SimulatorBattleState, drafts: Re
     const switchTargets = battle.player.bench.filter((benchIndex) => !battle.player.units[benchIndex]?.fainted);
     const fallbackSwitchTarget = switchTargets[0] ?? 0;
 
+    const safeMoveId = legalMoves.some((move) => move.id === draft?.moveId) ? draft!.moveId : fallbackMoveId;
+    const selectedMove = legalMoves.find((move) => move.id === safeMoveId) ?? legalMoves[0] ?? null;
+    const targetMode = simulatorTargetMode(selectedMove, battle.format);
     const safeDraft: ChoiceDraft = {
       type: draft?.type ?? 'move',
-      moveId: legalMoves.some((move) => move.id === draft?.moveId) ? draft!.moveId : fallbackMoveId,
-      target: liveTargets.some((entry) => entry.targetIndex === draft?.target) ? draft!.target : fallbackTarget,
+      moveId: safeMoveId,
+      target:
+        targetMode === 'bench'
+          ? (typeof draft?.target === 'number' && switchTargets.includes(draft.target) ? draft.target : (switchTargets[0] ?? -1))
+          : liveTargets.some((entry) => entry.targetIndex === draft?.target)
+            ? draft!.target
+            : fallbackTarget,
       switchTarget: typeof draft?.switchTarget === 'number' && switchTargets.includes(draft.switchTarget) ? draft.switchTarget : fallbackSwitchTarget,
     };
 
@@ -3674,6 +3746,7 @@ function App() {
   const [simPlaybackLocked, setSimPlaybackLocked] = useState(false);
   const [simQueuedTurn, setSimQueuedTurn] = useState<QueuedTurnSubmission | null>(null);
   const [simTurnReviews, setSimTurnReviews] = useState<SimulatorTurnReview[]>([]);
+  const [simLysanderScene, setSimLysanderScene] = useState<LysanderCutsceneState | null>(null);
   const [simCountdown, setSimCountdown] = useState(0);
   const [simPreviewMessage, setSimPreviewMessage] = useState<string | null>(null);
   const [presenceStats, setPresenceStats] = useState<OnlinePresenceStats>({ activeUsers: 0, totalVisits: 0, activeBattles: 0 });
@@ -3717,6 +3790,7 @@ function App() {
   const previousSimStageRef = useRef<string | null>(null);
   const previousPvpStageRef = useRef<string | null>(null);
   const recordedBattleKeyRef = useRef<string | null>(null);
+  const recordedLysanderSceneKeyRef = useRef<string | null>(null);
   const recordedPvpBattleKeyRef = useRef<string | null>(null);
   const simPlaybackTimersRef = useRef<number[]>([]);
   const pvpPlaybackTimersRef = useRef<number[]>([]);
@@ -3984,12 +4058,23 @@ function App() {
               simBattle.player.active
                 .map((activeIndex) => simBattle.player.units[activeIndex])
                 .find((candidate) => candidate && candidate !== unit && !candidate.fainted) ?? null;
+            const benchTargetUnits = simBattle.player.bench
+              .map((benchIndex) => ({ benchIndex, unit: simBattle.player.units[benchIndex] ?? null }))
+              .filter((entry): entry is { benchIndex: number; unit: SimUnit } => Boolean(entry.unit && !entry.unit.fainted));
             const liveEnemyTargets = livingTargetSlots(simBattle.opponent);
             const selectedTarget = liveEnemyTargets.some((entry) => entry.targetIndex === draft.target)
               ? draft.target
               : (liveEnemyTargets[0]?.targetIndex ?? 0);
+            const selectedBenchTarget = benchTargetUnits.some((entry) => entry.benchIndex === draft.target)
+              ? draft.target
+              : (benchTargetUnits[0]?.benchIndex ?? -1);
             const targetMode = simulatorTargetMode(selectedMove, simBattle.format);
-            const targetNote = simulatorTargetNote(selectedMove, simBattle.format, allyUnit?.pokemon.displayName ?? null);
+            const targetNote = simulatorTargetNote(
+              selectedMove,
+              simBattle.format,
+              allyUnit?.pokemon.displayName ?? null,
+              benchTargetUnits.map((entry) => entry.unit.pokemon.displayName),
+            );
             const restrictionNotes = simulatorRestrictionNotes(unit);
             const previewMega = effectiveDraftType === 'mega';
             const selectedMoveReads = moveEffectivenessReadsForBattleTargets(simBattle, unit, liveEnemyTargets, selectedMove, previewMega);
@@ -4054,6 +4139,15 @@ function App() {
                         <select value={selectedTarget} onChange={(event) => updateChoiceDraft(actor, { target: Number(event.target.value) })} disabled={Boolean(simQueuedTurn)}>
                           {liveEnemyTargets.map(({ unit: enemy, targetIndex }) => (
                             <option key={`${enemy.pokemon.id}-${targetIndex}`} value={targetIndex}>{enemy.pokemon.displayName}</option>
+                          ))}
+                        </select>
+                      </label>
+                    ) : targetMode === 'bench' && benchTargetUnits.length ? (
+                      <label className="field">
+                        <span>Pass To</span>
+                        <select value={selectedBenchTarget} onChange={(event) => updateChoiceDraft(actor, { target: Number(event.target.value) })} disabled={Boolean(simQueuedTurn)}>
+                          {benchTargetUnits.map(({ benchIndex, unit: benchUnit }) => (
+                            <option key={`${benchUnit.pokemon.id}-${benchIndex}`} value={benchIndex}>{benchUnit.pokemon.displayName}</option>
                           ))}
                         </select>
                       </label>
@@ -4200,12 +4294,23 @@ function App() {
               pvpRoom.battle!.player.active
                 .map((activeIndex) => pvpRoom.battle!.player.units[activeIndex])
                 .find((candidate) => candidate && candidate !== unit && !candidate.fainted) ?? null;
+            const benchTargetUnits = pvpRoom.battle!.player.bench
+              .map((benchIndex) => ({ benchIndex, unit: pvpRoom.battle!.player.units[benchIndex] ?? null }))
+              .filter((entry): entry is { benchIndex: number; unit: SimUnit } => Boolean(entry.unit && !entry.unit.fainted));
             const liveEnemyTargets = livingTargetSlots(pvpRoom.battle!.opponent);
             const selectedTarget = liveEnemyTargets.some((entry) => entry.targetIndex === draft.target)
               ? draft.target
               : (liveEnemyTargets[0]?.targetIndex ?? 0);
+            const selectedBenchTarget = benchTargetUnits.some((entry) => entry.benchIndex === draft.target)
+              ? draft.target
+              : (benchTargetUnits[0]?.benchIndex ?? -1);
             const targetMode = simulatorTargetMode(selectedMove, pvpRoom.battle!.format);
-            const targetNote = simulatorTargetNote(selectedMove, pvpRoom.battle!.format, allyUnit?.pokemon.displayName ?? null);
+            const targetNote = simulatorTargetNote(
+              selectedMove,
+              pvpRoom.battle!.format,
+              allyUnit?.pokemon.displayName ?? null,
+              benchTargetUnits.map((entry) => entry.unit.pokemon.displayName),
+            );
             const restrictionNotes = simulatorRestrictionNotes(unit);
             const previewMega = effectiveDraftType === 'mega';
             const selectedMoveReads = moveEffectivenessReadsForBattleTargets(pvpRoom.battle!, unit, liveEnemyTargets, selectedMove, previewMega);
@@ -4267,6 +4372,15 @@ function App() {
                         <select value={selectedTarget} onChange={(event) => updatePvpChoiceDraft(actor, { target: Number(event.target.value) })} disabled={Boolean(pvpQueuedTurn)}>
                           {liveEnemyTargets.map(({ unit: enemy, targetIndex }) => (
                             <option key={`${enemy.pokemon.id}-${targetIndex}`} value={targetIndex}>{enemy.pokemon.displayName}</option>
+                          ))}
+                        </select>
+                      </label>
+                    ) : targetMode === 'bench' && benchTargetUnits.length ? (
+                      <label className="field">
+                        <span>Pass To</span>
+                        <select value={selectedBenchTarget} onChange={(event) => updatePvpChoiceDraft(actor, { target: Number(event.target.value) })} disabled={Boolean(pvpQueuedTurn)}>
+                          {benchTargetUnits.map(({ benchIndex, unit: benchUnit }) => (
+                            <option key={`${benchUnit.pokemon.id}-${benchIndex}`} value={benchIndex}>{benchUnit.pokemon.displayName}</option>
                           ))}
                         </select>
                       </label>
@@ -4551,6 +4665,18 @@ function App() {
   }, [activeTab, profileMusicPreviewActive]);
 
   useEffect(() => {
+    if (!simLysanderScene) {
+      return;
+    }
+
+    const handle = window.setTimeout(() => {
+      setSimLysanderScene((current) => current?.key === simLysanderScene.key ? null : current);
+    }, simLysanderScene.variant === 'intro' ? 3600 : 3200);
+
+    return () => window.clearTimeout(handle);
+  }, [simLysanderScene]);
+
+  useEffect(() => {
     simBattleRef.current = simBattle;
   }, [simBattle]);
 
@@ -4617,9 +4743,11 @@ function App() {
       clearPlaybackTimers(simPlaybackTimersRef);
       previousBattleRef.current = null;
       recordedBattleKeyRef.current = null;
+      recordedLysanderSceneKeyRef.current = null;
       setSimDisplayedBattle(null);
       setSimBattlefieldEvent(null);
       setSimVisibleBattleLog([]);
+      setSimLysanderScene(null);
       setSimPlaybackLocked(false);
       setSimQueuedTurn(null);
       setSimTurnClock(30);
@@ -4660,6 +4788,10 @@ function App() {
       setSimDisplayedBattle(cloneBattleState(simBattle));
     }
 
+    if (simBattle.stage === 'battle' && (!previousBattle || previousBattle.stage !== 'battle') && state.profile.lysanderCutscenesEnabled) {
+      setSimLysanderScene(buildLysanderScene('intro'));
+    }
+
     if (simBattle.stage === 'finished') {
       const battleKey = `${simBattle.winner ?? 'draw'}-${simBattle.turn}-${simBattle.player.units.map((unit) => unit.pokemon.id).join('|')}-${simBattle.opponent.units.map((unit) => unit.pokemon.id).join('|')}`;
       if (recordedBattleKeyRef.current !== battleKey) {
@@ -4686,10 +4818,16 @@ function App() {
         setSelectedReplayId(record.id);
         recordedBattleKeyRef.current = battleKey;
       }
+
+      const sceneKey = `${simBattle.winner ?? 'draw'}-${battleKey}`;
+      if (state.profile.lysanderCutscenesEnabled && recordedLysanderSceneKeyRef.current !== sceneKey) {
+        recordedLysanderSceneKeyRef.current = sceneKey;
+        setSimLysanderScene(buildLysanderScene(simBattle.winner === 'opponent' ? 'win' : 'loss'));
+      }
     }
 
     previousBattleRef.current = simBattle;
-  }, [simBattle, simAnnouncerEnabled, simAnnouncerRate, simAnnouncerStyle, simTurnTimerEnabled, team.name]);
+  }, [simBattle, simAnnouncerEnabled, simAnnouncerRate, simAnnouncerStyle, simTurnTimerEnabled, state.profile.lysanderCutscenesEnabled, team.name]);
 
   useEffect(() => {
     if (!simBattle || simBattle.stage !== 'battle' || simBattle.winner) {
@@ -4704,7 +4842,7 @@ function App() {
 
     const nextBattle = applyReplacementChoices(simBattle, [], buildAutoReplacementChoices(simBattle, 'opponent'));
     setSimBattle(nextBattle);
-    setSimTurnNotice('Arena AI sent out its replacement at the top of the turn. Pick your next action when ready.');
+    setSimTurnNotice('Lysander sent out a replacement at the top of the turn. Pick your next action when ready.');
   }, [simBattle]);
 
   useEffect(() => {
@@ -5160,7 +5298,14 @@ function App() {
         }
       } else if (draft && fallbackMove) {
         const selectedMove = legalMoves.find((move) => move.id === draft.moveId) ?? fallbackMove;
-        const selectedTarget = liveTargets.some((entry) => entry.targetIndex === draft.target) ? draft.target : randomTarget;
+        const targetMode = simulatorTargetMode(selectedMove, battle.format);
+        const benchTargets = battle.player.bench.filter((benchIndex) => !battle.player.units[benchIndex]?.fainted);
+        const selectedTarget =
+          targetMode === 'bench'
+            ? (benchTargets.includes(draft.target) ? draft.target : (benchTargets[0] ?? -1))
+            : liveTargets.some((entry) => entry.targetIndex === draft.target)
+              ? draft.target
+              : randomTarget;
         choice = {
           type: draft.type,
           actor,
@@ -5639,7 +5784,7 @@ function App() {
       return;
     }
     battle.player.name = state.profile.trainerName.trim() || 'Player';
-    battle.opponent.name = 'Arena AI';
+    battle.opponent.name = 'Lysander';
     setSimBattle(battle);
     setSimMatchDeadlineAt(new Date(Date.now() + 8 * 60_000).toISOString());
     setSimPreview(null);
@@ -5649,6 +5794,7 @@ function App() {
     setSimChoicesLocked(false);
     setSimTurnClock(30);
     setSimTurnNotice(null);
+    setSimLysanderScene(null);
   }
 
   function updateChoiceDraft(actor: number, partial: Partial<ChoiceDraft>) {
@@ -6864,7 +7010,7 @@ function App() {
                 </>
               ) : simBattle ? (
                 <>
-                  <SectionHeader title={simBattleResolved ? 'Battle Result' : `Battle Turn ${simBattle.turn}`} subtitle={simBattleResolved ? (simBattle.winner === 'player' ? 'You won the sandbox battle.' : simBattle.winner === 'opponent' ? 'The AI won the sandbox battle.' : 'The sandbox battle ended in a draw on match time.') : 'Select moves or switches for each active Pokemon, then resolve the turn.'} />
+                  <SectionHeader title={simBattleResolved ? 'Battle Result' : `Battle Turn ${simBattle.turn}`} subtitle={simBattleResolved ? (simBattle.winner === 'player' ? 'You won the sandbox battle.' : simBattle.winner === 'opponent' ? 'Lysander won the sandbox battle.' : 'The sandbox battle ended in a draw on match time.') : 'Select moves or switches for each active Pokemon, then resolve the turn.'} />
                   <div className="sim-battle-grid">
                     <BattleSideView side={simBattle.opponent} format={simBattle.format} />
                     <div className="sim-center-column">
@@ -6874,7 +7020,7 @@ function App() {
                         <InfoStat label="Trick Room" value={simBattle.trickRoomTurns ? `${simBattle.trickRoomTurns} turns` : 'Off'} />
                         <InfoStat label="Gravity" value={simBattle.gravityTurns ? `${simBattle.gravityTurns} turns` : 'Off'} />
                         <InfoStat label="Your Tailwind" value={simBattle.player.tailwindTurns ? `${simBattle.player.tailwindTurns}` : 'Off'} />
-                        <InfoStat label="AI Tailwind" value={simBattle.opponent.tailwindTurns ? `${simBattle.opponent.tailwindTurns}` : 'Off'} />
+                        <InfoStat label="Lysander Tailwind" value={simBattle.opponent.tailwindTurns ? `${simBattle.opponent.tailwindTurns}` : 'Off'} />
                         <InfoStat label="Move Clock" value={simTurnTimerEnabled && !simBattleResolved ? `${simTurnClock}s` : 'Off'} />
                         <InfoStat label="Match Clock" value={!simBattleResolved ? `${Math.floor(simMatchClock / 60)}:${`${simMatchClock % 60}`.padStart(2, '0')}` : 'Ended'} />
                       </div>
@@ -6982,8 +7128,11 @@ function App() {
                     event={simBattlefieldEvent}
                     conditionSections={simFieldSections}
                     controlDock={<div className="battlefield-control-panel">{simCommandDeck}</div>}
+                    backgroundCharacterSrc="/lysander/lysander-win.png"
+                    backgroundCharacterAlt="Lysander"
                     expansive
                   />
+                  {simLysanderScene ? <LysanderSceneOverlay scene={simLysanderScene} /> : null}
                 </div>
               </div>
             </section>
@@ -7467,10 +7616,16 @@ function App() {
                 checked={state.profile.announcerDefaultEnabled}
                 onChange={(checked) => setState((current) => ({ ...current, profile: { ...current.profile, announcerDefaultEnabled: checked } }))}
               />
+              <ToggleField
+                label="Lysander Cutscenes"
+                checked={state.profile.lysanderCutscenesEnabled}
+                onChange={(checked) => setState((current) => ({ ...current, profile: { ...current.profile, lysanderCutscenesEnabled: checked } }))}
+              />
               <div className="notes-list compact-scroll">
                 <div className="note-row">Online battle account: {onlineAccount ? `${onlineAccount.trainerName} registered` : 'Not signed in yet'}</div>
                 {onlineAccount ? <div className="note-row">Email on file: {onlineAccount.email || 'Not provided'}</div> : null}
                 <div className="note-row">Battle music mode: {state.profile.battleMusicMode === 'single' ? 'single selected track' : state.profile.battleMusicMode === 'random' ? 'randomized between battles' : 'playlist cycling between tracks'}</div>
+                <div className="note-row">Lysander intro and result scenes in the AI simulator: {state.profile.lysanderCutscenesEnabled ? 'On' : 'Off'}.</div>
               </div>
               <div className="save-status-row">
                 <span>{saveStatusLabel}</span>
@@ -7832,6 +7987,7 @@ function SelectedSlotAnalyzer({
   const matchedPresetMoves = presetSummary
     ? presetSummary.moveNames.filter((moveName) => moves.some((move) => move.name === moveName)).length
     : 0;
+  const hasBatonPass = moves.some((move) => move.name === 'Baton Pass');
   const speedControlCount = team.slots.reduce((sum, slot) => {
     const pokemon = resolvePokemonForm(slot);
     if (!pokemon) {
@@ -7884,6 +8040,15 @@ function SelectedSlotAnalyzer({
     notes.push('This slot supports team defense directly, which now also mirrors cleanly on the live battlefield through the screen overlays and field-condition rail.');
   }
 
+  if (hasBatonPass) {
+    notes.push('Baton Pass is now treated as a real backline-target line in the simulator, so this slot can route boosts, Substitute, and legal carryover effects into a chosen reserve instead of blindly pivoting.');
+    if (moves.some((move) => ['Calm Mind', 'Agility', 'Nasty Plot', 'Swords Dance', 'Substitute'].includes(move.name))) {
+      notes.push('This build reads like a real pass shell. The analyzer likes that the move package actually gives Baton Pass something worth carrying.');
+    } else {
+      recommendations.push('Baton Pass is present, but the move set is light on passable value. A boost or Substitute line would make the pass plan more meaningful.');
+    }
+  }
+
   if (format === 'Doubles' && speedControlCount === 0) {
     recommendations.push('The current team shell is still missing dedicated speed control. Tailwind, Thunder Wave, Icy Wind, Trick Room, or another pace lever would help.');
   } else if (format === 'Doubles' && speedControlCount > 0) {
@@ -7905,6 +8070,7 @@ function SelectedSlotAnalyzer({
       </div>
       <div className="notes-list compact-scroll slot-analyzer-list">
         {presetSummary ? <div className="note-row"><strong>Meta source:</strong> {presetSummary.source}</div> : null}
+        <div className="note-row"><strong>Prep index:</strong> Pokemon Zone and the live Champions ladder references were both used to keep this analyzer closer to real team-building shells instead of pure damage math.</div>
         <div className="note-row"><strong>Read:</strong> {usage.reason}</div>
         {metaNotes.map((note) => (
           <div key={note} className="note-row">{note}</div>
@@ -7967,6 +8133,20 @@ function BattleSideView({ side, format, friendly = false }: { side: SimulatorBat
             </div>
           ) : null;
         })}
+      </div>
+    </div>
+  );
+}
+
+function LysanderSceneOverlay({ scene }: { scene: LysanderCutsceneState }) {
+  return (
+    <div className={`lysander-scene-overlay lysander-scene-overlay-${scene.variant}`}>
+      <div className="lysander-scene-card">
+        <img src={scene.image} alt={scene.title} className="lysander-scene-image" />
+        <div className="lysander-scene-bubble">
+          <strong>{scene.title}</strong>
+          <span>{scene.line}</span>
+        </div>
       </div>
     </div>
   );
@@ -8116,6 +8296,8 @@ function BattlefieldArena({
   terrainTurns = 0,
   expansive = false,
   controlDock = null,
+  backgroundCharacterSrc = null,
+  backgroundCharacterAlt = '',
 }: {
   title: string;
   subtitle: string;
@@ -8136,6 +8318,8 @@ function BattlefieldArena({
   terrainTurns?: number;
   expansive?: boolean;
   controlDock?: ReactNode;
+  backgroundCharacterSrc?: string | null;
+  backgroundCharacterAlt?: string;
 }) {
   const renderBattlefieldSlot = (slot: BattlefieldSlotModel, orientation: 'top' | 'bottom') => {
     const actor = event?.tone === 'switch' ? false : battlefieldSlotMatches(slot, event?.actorName);
@@ -8315,6 +8499,11 @@ function BattlefieldArena({
                   <div className="battlefield-atmosphere-ribbon">
                     {weather !== 'clear' ? <span className="battlefield-atmosphere-pill">{battlefieldWeatherLabel(weather, weatherTurns)}</span> : null}
                     {terrain !== 'none' ? <span className="battlefield-atmosphere-pill battlefield-atmosphere-pill-terrain">{battlefieldTerrainLabel(terrain, terrainTurns)}</span> : null}
+                  </div>
+                ) : null}
+                {backgroundCharacterSrc ? (
+                  <div className="battlefield-background-character" aria-hidden="true">
+                    <img src={backgroundCharacterSrc} alt={backgroundCharacterAlt} className="battlefield-background-character-image" />
                   </div>
                 ) : null}
                 {event ? (
