@@ -77,6 +77,9 @@ type MoveParityEntry = ReturnType<MoveParityRuntimeModule['moveParityForMove']>;
 type AbilityParitySummary = ReturnType<AbilityParityRuntimeModule['buildAbilityParitySummary']>;
 type PokemonInputValidation = ReturnType<AiRuntimeModule['validateLockedPokemonInput']>;
 
+const MATCH_TIMER_SECONDS = 10 * 60;
+const MATCH_TIMER_MS = MATCH_TIMER_SECONDS * 1000;
+
 type BattleCoreRuntime = {
   damage: DamageRuntimeModule;
   moveParity: MoveParityRuntimeModule;
@@ -2339,6 +2342,15 @@ function clampBattleHp(unit: SimUnit, nextHp: number) {
   unit.fainted = unit.currentHp <= 0;
 }
 
+function removePresentationUnitFromField(displayBattle: SimulatorBattleState, sideId: SimSideId, unitIndex: number) {
+  const side = battleSideForId(displayBattle, sideId);
+  side.active = side.active.map((entry) => (entry === unitIndex ? -1 : entry));
+}
+
+function canPresentationUnitRecover(unit: SimUnit | null | undefined) {
+  return Boolean(unit && !unit.fainted && unit.currentHp > 0);
+}
+
 function statusFromPlaybackToken(token: string): PokemonBuild['status'] | null {
   const normalized = token.trim().toLowerCase();
   switch (normalized) {
@@ -2491,7 +2503,7 @@ function applyPresentationBattleEntry(
   const healMatch = entry.match(/^(.+?) (?:restored|recovered|received) (\d+) HP (?:with|from) (.+?)\.$/);
   if (healMatch) {
     const actorRef = findBattleUnitReference(displayBattle, healMatch[1]);
-    if (actorRef) {
+    if (actorRef && canPresentationUnitRecover(actorRef.unit)) {
       clampBattleHp(actorRef.unit, actorRef.unit.currentHp + Number(healMatch[2]));
     }
     return displayBattle;
@@ -2500,7 +2512,7 @@ function applyPresentationBattleEntry(
   const healPulseMatch = entry.match(/^(.+?) restored (.+?) with Heal Pulse for (\d+) HP\.$/);
   if (healPulseMatch) {
     const targetRef = findBattleUnitReference(displayBattle, healPulseMatch[2]);
-    if (targetRef) {
+    if (targetRef && canPresentationUnitRecover(targetRef.unit)) {
       clampBattleHp(targetRef.unit, targetRef.unit.currentHp + Number(healPulseMatch[3]));
     }
     return displayBattle;
@@ -2509,7 +2521,7 @@ function applyPresentationBattleEntry(
   const healingWishEntryMatch = entry.match(/^(.+?) was restored by Healing Wish on entry for (\d+) HP\.$/);
   if (healingWishEntryMatch) {
     const targetRef = findBattleUnitReference(displayBattle, healingWishEntryMatch[1]);
-    if (targetRef) {
+    if (targetRef && canPresentationUnitRecover(targetRef.unit)) {
       clampBattleHp(targetRef.unit, targetRef.unit.currentHp + Number(healingWishEntryMatch[2]));
       targetRef.unit.build.status = 'healthy';
     }
@@ -2519,7 +2531,7 @@ function applyPresentationBattleEntry(
   const drainMatch = entry.match(/^(.+?) drained (\d+) HP back with (.+?)\.$/);
   if (drainMatch) {
     const actorRef = findBattleUnitReference(displayBattle, drainMatch[1]);
-    if (actorRef) {
+    if (actorRef && canPresentationUnitRecover(actorRef.unit)) {
       clampBattleHp(actorRef.unit, actorRef.unit.currentHp + Number(drainMatch[2]));
     }
     return displayBattle;
@@ -2558,6 +2570,7 @@ function applyPresentationBattleEntry(
     if (targetRef) {
       clampBattleHp(targetRef.unit, 0);
       targetRef.unit.fainted = true;
+      removePresentationUnitFromField(displayBattle, targetRef.sideId, targetRef.unitIndex);
     }
     return displayBattle;
   }
@@ -2568,6 +2581,7 @@ function applyPresentationBattleEntry(
     if (targetRef) {
       clampBattleHp(targetRef.unit, 0);
       targetRef.unit.fainted = true;
+      removePresentationUnitFromField(displayBattle, targetRef.sideId, targetRef.unitIndex);
     }
     return displayBattle;
   }
@@ -3734,7 +3748,7 @@ function App() {
   const [simTurnTimerEnabled, setSimTurnTimerEnabled] = useState(false);
   const [simTurnClock, setSimTurnClock] = useState(30);
   const [simMatchDeadlineAt, setSimMatchDeadlineAt] = useState<string | null>(null);
-  const [simMatchClock, setSimMatchClock] = useState(8 * 60);
+  const [simMatchClock, setSimMatchClock] = useState(MATCH_TIMER_SECONDS);
   const [simTurnNotice, setSimTurnNotice] = useState<string | null>(null);
   const [simChoicesLocked, setSimChoicesLocked] = useState(false);
   const [simAnnouncerEnabled, setSimAnnouncerEnabled] = useState(false);
@@ -3763,7 +3777,7 @@ function App() {
   const [pvpBringOrder, setPvpBringOrder] = useState<number[]>([]);
   const [pvpChoiceDrafts, setPvpChoiceDrafts] = useState<Record<number, ChoiceDraft>>({});
   const [pvpCountdown, setPvpCountdown] = useState(0);
-  const [pvpMatchCountdown, setPvpMatchCountdown] = useState(8 * 60);
+  const [pvpMatchCountdown, setPvpMatchCountdown] = useState(MATCH_TIMER_SECONDS);
   const [pvpMessage, setPvpMessage] = useState<string | null>(null);
   const [pvpAnnouncerFeed, setPvpAnnouncerFeed] = useState<string[]>([]);
   const [pvpBattlefieldEvent, setPvpBattlefieldEvent] = useState<BattlefieldPlaybackEvent | null>(null);
@@ -5047,7 +5061,7 @@ function App() {
 
   useEffect(() => {
     if (!pvpRoom?.matchDeadlineAt) {
-      setPvpMatchCountdown(8 * 60);
+      setPvpMatchCountdown(MATCH_TIMER_SECONDS);
       return;
     }
 
@@ -5099,7 +5113,7 @@ function App() {
 
   useEffect(() => {
     if (!simMatchDeadlineAt || !simBattle || simBattle.stage !== 'battle') {
-      setSimMatchClock(8 * 60);
+      setSimMatchClock(MATCH_TIMER_SECONDS);
       return;
     }
 
@@ -5786,7 +5800,7 @@ function App() {
     battle.player.name = state.profile.trainerName.trim() || 'Player';
     battle.opponent.name = 'Lysander';
     setSimBattle(battle);
-    setSimMatchDeadlineAt(new Date(Date.now() + 8 * 60_000).toISOString());
+    setSimMatchDeadlineAt(new Date(Date.now() + MATCH_TIMER_MS).toISOString());
     setSimPreview(null);
     setSimPreviewMessage(null);
     setSimChoiceDrafts({});
@@ -7128,7 +7142,7 @@ function App() {
                     event={simBattlefieldEvent}
                     conditionSections={simFieldSections}
                     controlDock={<div className="battlefield-control-panel">{simCommandDeck}</div>}
-                    backgroundCharacterSrc="/lysander/lysander-win.png"
+                    backgroundCharacterSrc="/lysander/lysander-battlefield.png"
                     backgroundCharacterAlt="Lysander"
                     expansive
                   />

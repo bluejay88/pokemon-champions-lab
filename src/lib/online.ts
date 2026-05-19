@@ -116,7 +116,7 @@ const LOCAL_STORAGE_KEY = 'pokemon-champions-lab-online-v1';
 const SESSION_STORAGE_KEY = 'pokemon-champions-lab-online-session';
 const ACTIVE_WINDOW_MS = 90_000;
 const NETLIFY_FUNCTION_ENDPOINT = '/.netlify/functions/arena';
-const MATCH_TIMER_SECONDS = 8 * 60;
+const MATCH_TIMER_SECONDS = 10 * 60;
 
 const hiddenPokemon: PokemonEntry = {
   id: 'hidden-slot',

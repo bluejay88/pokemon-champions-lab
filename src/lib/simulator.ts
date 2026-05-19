@@ -940,6 +940,11 @@ function healUnit(unit: SimUnit, amount: number) {
 }
 
 function tryHealUnit(state: SimulatorBattleState, unit: SimUnit, amount: number, source: string) {
+  if (unit.fainted || unit.currentHp <= 0) {
+    state.log.unshift(`${unit.pokemon.displayName} could not recover HP from ${source} because it has already fainted.`);
+    return 0;
+  }
+
   if (unit.healingPreventedTurns > 0) {
     state.log.unshift(`${unit.pokemon.displayName} could not recover HP from ${source} because healing is blocked by Psychic Noise.`);
     return 0;

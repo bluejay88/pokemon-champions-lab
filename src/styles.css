@@ -2064,8 +2064,8 @@ button {
   right: clamp(18px, 4vw, 44px);
   z-index: 0;
   pointer-events: none;
-  opacity: 0.22;
-  filter: drop-shadow(0 18px 28px rgba(3, 11, 24, 0.38));
+  opacity: 0.34;
+  filter: saturate(0.92) brightness(0.82) drop-shadow(0 18px 28px rgba(3, 11, 24, 0.42));
 }
 
 .battlefield-background-character-image {
@@ -2073,6 +2073,7 @@ button {
   width: min(26vw, 320px);
   max-width: 100%;
   height: auto;
+  mix-blend-mode: multiply;
 }
 
 .battlefield-backdrop-meta,
@@ -3739,7 +3740,7 @@ button {
   .battlefield-background-character {
     top: 112px;
     right: 12px;
-    opacity: 0.18;
+    opacity: 0.28;
   }
 
   .battlefield-background-character-image {

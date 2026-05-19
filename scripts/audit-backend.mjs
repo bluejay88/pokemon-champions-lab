@@ -480,6 +480,7 @@ const tormentUser = findPokemonWithMoves(['Torment', 'Protect'], ['Infernape', '
 const auroraVeilUser = findPokemonWithMoves(['Aurora Veil'], ['Froslass', 'Abomasnow', 'Ninetales']);
 const coachingUser = findPokemonWithMoves(['Coaching'], ['Chesnaught']);
 const healPulseUser = findPokemonWithMoves(['Heal Pulse'], ['Audino', 'Gardevoir', 'Chimecho']);
+const lifeDewUser = findPokemonWithMoves(['Life Dew'], ['Primarina', 'Sinistcha', 'Milotic']);
 const stickyWebUser = findPokemonWithMoves(['Sticky Web'], ['Ariados', 'Araquanid']);
 const toxicSpikesUser = findPokemonWithMoves(['Toxic Spikes'], ['Ariados', 'Arbok', 'Beedrill']);
 const hyperBeamUser = findPokemonWithMoves(['Hyper Beam'], ['Meganium', 'Charizard', 'Sableye']);
@@ -544,6 +545,7 @@ assert(
     auroraVeilUser &&
     coachingUser &&
     healPulseUser &&
+    lifeDewUser &&
     stickyWebUser &&
     toxicSpikesUser &&
     hyperBeamUser &&
@@ -612,6 +614,7 @@ const tormentChoiceId = moveIdFor(tormentUser, 'Torment');
 const auroraVeilChoiceId = moveIdFor(auroraVeilUser, 'Aurora Veil');
 const coachingChoiceId = moveIdFor(coachingUser, 'Coaching');
 const healPulseChoiceId = moveIdFor(healPulseUser, 'Heal Pulse');
+const lifeDewChoiceId = moveIdFor(lifeDewUser, 'Life Dew');
 const stickyWebChoiceId = moveIdFor(stickyWebUser, 'Sticky Web');
 const toxicSpikesChoiceId = moveIdFor(toxicSpikesUser, 'Toxic Spikes');
 const hyperBeamChoiceId = moveIdFor(hyperBeamUser, 'Hyper Beam');
@@ -1077,6 +1080,25 @@ healPulseBattle = withMockRandom([0.1, 0.1, 0.1], () => resolveTurn(healPulseBat
   { type: 'move', actor: 1, moveId: protectChoiceId, target: 0 },
 ]));
 assert.ok(healPulseBattle.player.units[1].currentHp > preHealPulseHp, 'Heal Pulse should restore HP to an ally instead of the user.');
+
+let faintedLifeDewBattle = buildBattle(
+  'Doubles',
+  [
+    buildSlot('life-dew-user', lifeDewUser, ['Life Dew'], { evs: { ...blankStats(), hp: 26, specialDefense: 22, defense: 18 } }),
+    buildSlot('life-dew-fainted-ally', protectUser, ['Protect'], { evs: { ...blankStats(), hp: 32, defense: 20, specialDefense: 14 } }),
+  ],
+  [
+    buildSlot('life-dew-foe-a', shadowBallUser, ['Shadow Ball'], { evs: { ...blankStats(), specialAttack: 32, speed: 20, hp: 14 } }),
+    buildSlot('life-dew-foe-b', specialTargetB, [specialTargetB.movePool[0].name], { evs: { ...blankStats(), hp: 20, specialDefense: 24, defense: 22 } }),
+  ],
+);
+faintedLifeDewBattle.player.units[1].currentHp = 0;
+faintedLifeDewBattle.player.units[1].fainted = true;
+faintedLifeDewBattle = withMockRandom([0.1, 0.1, 0.1], () => resolveTurn(faintedLifeDewBattle, [
+  { type: 'move', actor: 0, moveId: lifeDewChoiceId, target: 0 },
+]));
+assert.equal(faintedLifeDewBattle.player.units[1].currentHp, 0, 'Life Dew should never restore HP to a fainted ally.');
+assert.equal(faintedLifeDewBattle.player.units[1].fainted, true, 'Life Dew should leave a fainted ally fainted.');
 
 let earthquakeBattle = buildBattle(
   'Doubles',
@@ -2504,7 +2526,7 @@ const summary = [
   `Verified item clause sanitization for manual teams and AI-generated teams.`,
   `Verified move-parity registry coverage at ${paritySummary.coveredPercent}% across ${paritySummary.total} Champions moves, with ${paritySummary.explicit} explicit hooks tagged in the report.`,
   `Verified damage engine produces live damage output under the Champions EV model, including Doubles spread reduction, Aurora Veil, Helping Hand, Magic Room, and Wonder Room checks.`,
-  `Verified simulator rules for chained Protect odds, burn end-turn chip, burn physical damage cuts, paralysis fail-rate and speed penalty, Hydration / Shed Skin / Healer / Natural Cure cures, Limber / Insomnia / Sweet Veil / Water Bubble status immunities, same-turn Soak into later status application, Leftovers healing, Sitrus auto-consumption, confusion/trap timers, Trick and Recycle item flow, Baton Pass receiver targeting and passable-state transfer, Substitute and Healing Wish handling, Lock-On accuracy, ally-target support hooks, rain-locked Thunder accuracy, Snarl spread debuffs, Earthquake spread parity across ally collateral, Flying immunity, Levitate immunity, Protect, Wide Guard, and Grassy Terrain, Reflect / Light Screen / Aurora Veil damage reduction, Charge Beam self boosts, Psychic and Crush Claw stat drops, Tri Attack status rolls, Helping Hand AI discipline, AI Mega reservation discipline, Parabolic Charge spread healing, Draining Kiss and Bitter Blade drain ratios, Matcha Gotcha spread recovery, Pain Split averaging, Sparkling Aria burn cures, Sticky Web and Toxic Spikes switch-in hooks, forced-thaw freeze timing, Rest sleep timing, Disable and Torment move locks, weather field timers, opponent reveal state, Calm Mind and Nasty Plot boosts, Trick Room toggling, recharge turns, charge-turn attacks, mid-turn doubles retargeting, Struggle locks, Dark-type immunity to opposing Prankster status moves, and Mega weather ordering.`,
+  `Verified simulator rules for chained Protect odds, burn end-turn chip, burn physical damage cuts, paralysis fail-rate and speed penalty, Hydration / Shed Skin / Healer / Natural Cure cures, Limber / Insomnia / Sweet Veil / Water Bubble status immunities, same-turn Soak into later status application, Leftovers healing, Sitrus auto-consumption, confusion/trap timers, Trick and Recycle item flow, Baton Pass receiver targeting and passable-state transfer, Substitute and Healing Wish handling, Lock-On accuracy, ally-target support hooks, rain-locked Thunder accuracy, Snarl spread debuffs, Earthquake spread parity across ally collateral, Flying immunity, Levitate immunity, Protect, Wide Guard, and Grassy Terrain, Reflect / Light Screen / Aurora Veil damage reduction, Charge Beam self boosts, Psychic and Crush Claw stat drops, Tri Attack status rolls, Helping Hand AI discipline, AI Mega reservation discipline, Parabolic Charge spread healing, Draining Kiss and Bitter Blade drain ratios, Matcha Gotcha spread recovery, Pain Split averaging, Sparkling Aria burn cures, Sticky Web and Toxic Spikes switch-in hooks, forced-thaw freeze timing, Rest sleep timing, Disable and Torment move locks, weather field timers, opponent reveal state, Calm Mind and Nasty Plot boosts, Trick Room toggling, recharge turns, charge-turn attacks, mid-turn doubles retargeting, Struggle locks, Dark-type immunity to opposing Prankster status moves, fainted-target heal prevention, and Mega weather ordering.`,
   `Verified 50 fully automated simulator battle sweeps across Singles and Doubles (${simulatorBattlePlayerWins} player-side wins / ${simulatorBattleOpponentWins} opponent-side wins).`,
   `Verified shared PvP room logic, including bring-four lock-in, full roster integrity, immediate dual-lock resolution, deadline-based turn resolution, overall match-timer draws, forfeit handling, and 50 automated room-code battle simulations (${onlineBattleHostWins} host wins / ${onlineBattleGuestWins} guest wins / ${onlineBattleDraws} draws).`,
   warnings.length ? `Source-data warnings: ${warnings.length} HP floor rows on the scraped form pages disagree with fixed 31 IV policy, so the app keeps the fixed-IV result intentionally.` : 'Source-data warnings: none.',
