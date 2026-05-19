@@ -6,6 +6,9 @@ Original prompt: Update the battle timer to 10 minutes and then also make sure t
 - Added engine-level fainted-target heal prevention in simulator healing flow.
 - Added specific audit coverage for Life Dew failing to restore a fainted ally.
 - Added dedicated Lysander battlefield asset and switched simulator battlefield background character to use it.
+- Reworked simulator intro flow so the preview stage can show Lysander with a dialogue bubble before the battlefield opens.
+- Filtered duplicate send-out log playback and delayed automatic AI replacements until playback finishes so turn-end animations do not get cut off.
+- Added runtime white-background cleanup for Lysander battlefield / result art so the stage uses a cleaner transparent-looking silhouette.
 
 TODO / follow-up notes:
 - Re-run TypeScript, backend audit, build, and browser smoke after the current patch set.

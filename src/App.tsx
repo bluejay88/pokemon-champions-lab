@@ -1021,6 +1021,7 @@ function pickLine(lines: string[]) {
 }
 
 const lysanderIntroLines = [
+  "Let's see if you can pierce the veil.",
   'The veil is up. Show me whether your reads can survive the cold light of a real battle.',
   'Every shield breaks somewhere. Let me see if you know where to strike.',
   'You made it this far. Now prove your team can breathe inside my weather.',
@@ -3165,22 +3166,22 @@ function introBattleSendOutPlaybackSteps(current: SimulatorBattleState, style: A
 function playbackStepsFromBattleUpdate(previous: SimulatorBattleState | null, current: SimulatorBattleState, style: AnnouncerStyle) {
   const previousLength = previous?.log.length ?? 0;
   const transitioningIntoBattle = current.stage === 'battle' && (!previous || previous.stage !== 'battle');
-  const introSummaryEntries = transitioningIntoBattle
+  const introSendOutEntries = transitioningIntoBattle
     ? new Set([
-        `${current.player.name} sent out ${current.player.active
+        ...current.player.active
           .map((unitIndex) => current.player.units[unitIndex]?.pokemon.displayName)
           .filter((name): name is string => Boolean(name))
-          .join(current.player.active.length > 1 ? ' and ' : '')}.`,
-        `${current.opponent.name} sent out ${current.opponent.active
+          .map((name) => `${current.player.name} sent out ${name}.`),
+        ...current.opponent.active
           .map((unitIndex) => current.opponent.units[unitIndex]?.pokemon.displayName)
           .filter((name): name is string => Boolean(name))
-          .join(current.opponent.active.length > 1 ? ' and ' : '')}.`,
+          .map((name) => `${current.opponent.name} sent out ${name}.`),
       ])
     : new Set<string>();
   const newEntries = current.log
     .slice(0, Math.max(0, current.log.length - previousLength))
     .reverse()
-    .filter((entry) => !introSummaryEntries.has(entry));
+    .filter((entry) => !introSendOutEntries.has(entry));
   const steps = [
     ...(transitioningIntoBattle ? introBattleSendOutPlaybackSteps(current, style) : []),
     ...newEntries.map((entry) => ({
@@ -3761,6 +3762,7 @@ function App() {
   const [simQueuedTurn, setSimQueuedTurn] = useState<QueuedTurnSubmission | null>(null);
   const [simTurnReviews, setSimTurnReviews] = useState<SimulatorTurnReview[]>([]);
   const [simLysanderScene, setSimLysanderScene] = useState<LysanderCutsceneState | null>(null);
+  const [simPreviewLysanderLine, setSimPreviewLysanderLine] = useState<string | null>(null);
   const [simCountdown, setSimCountdown] = useState(0);
   const [simPreviewMessage, setSimPreviewMessage] = useState<string | null>(null);
   const [presenceStats, setPresenceStats] = useState<OnlinePresenceStats>({ activeUsers: 0, totalVisits: 0, activeBattles: 0 });
@@ -4802,10 +4804,6 @@ function App() {
       setSimDisplayedBattle(cloneBattleState(simBattle));
     }
 
-    if (simBattle.stage === 'battle' && (!previousBattle || previousBattle.stage !== 'battle') && state.profile.lysanderCutscenesEnabled) {
-      setSimLysanderScene(buildLysanderScene('intro'));
-    }
-
     if (simBattle.stage === 'finished') {
       const battleKey = `${simBattle.winner ?? 'draw'}-${simBattle.turn}-${simBattle.player.units.map((unit) => unit.pokemon.id).join('|')}-${simBattle.opponent.units.map((unit) => unit.pokemon.id).join('|')}`;
       if (recordedBattleKeyRef.current !== battleKey) {
@@ -4844,7 +4842,7 @@ function App() {
   }, [simBattle, simAnnouncerEnabled, simAnnouncerRate, simAnnouncerStyle, simTurnTimerEnabled, state.profile.lysanderCutscenesEnabled, team.name]);
 
   useEffect(() => {
-    if (!simBattle || simBattle.stage !== 'battle' || simBattle.winner) {
+    if (!simBattle || simBattle.stage !== 'battle' || simBattle.winner || simPlaybackLocked) {
       return;
     }
 
@@ -4857,7 +4855,7 @@ function App() {
     const nextBattle = applyReplacementChoices(simBattle, [], buildAutoReplacementChoices(simBattle, 'opponent'));
     setSimBattle(nextBattle);
     setSimTurnNotice('Lysander sent out a replacement at the top of the turn. Pick your next action when ready.');
-  }, [simBattle]);
+  }, [simBattle, simPlaybackLocked]);
 
   useEffect(() => {
     if (simPlaybackLocked || !simQueuedTurn) {
@@ -5697,6 +5695,7 @@ function App() {
     setSimTurnReviews([]);
     setSimAnnouncerFeed([]);
     setSimTurnNotice(null);
+    setSimPreviewLysanderLine(null);
     setSelectedReplayId(null);
     setSelectedSlotIndex(0);
   }
@@ -5743,6 +5742,7 @@ function App() {
     setSimAnnouncerFeed([]);
     setSimTurnNotice(null);
     setSimAnnouncerEnabled(state.profile.announcerDefaultEnabled);
+    setSimPreviewLysanderLine(pickLine(lysanderIntroLines));
     if (state.profile.announcerDefaultEnabled) {
       const spotlight = filledSlotIndices(opponentTeam)
         .slice(0, 2)
@@ -5809,6 +5809,7 @@ function App() {
     setSimTurnClock(30);
     setSimTurnNotice(null);
     setSimLysanderScene(null);
+    setSimPreviewLysanderLine(null);
   }
 
   function updateChoiceDraft(actor: number, partial: Partial<ChoiceDraft>) {
@@ -7018,7 +7019,7 @@ function App() {
 
                   <div className="team-actions">
                     <button className="action-button primary" onClick={beginSimBattle} disabled={!battleCoreReady}>Start Battle</button>
-                    <button className="action-button" onClick={() => setSimPreview(null)}>Cancel Preview</button>
+                    <button className="action-button" onClick={() => { setSimPreview(null); setSimPreviewLysanderLine(null); }}>Cancel Preview</button>
                   </div>
 
                 </>
@@ -7103,19 +7104,27 @@ function App() {
           {simPreview ? (
             <section className="battle-stage-full-width">
               <div className="battlefield-showcase-row">
-                <BattlefieldArena
-                  title="Preview Battle Camera"
-                  subtitle="Preview lanes stay species-hidden on the battlefield now, so the stage only shows sealed Pokeballs until the live send-out reveal sequence begins."
-                  backdrop={simBackdrop}
-                  topLabel="Opponent Preview"
-                  bottomLabel="Your Locked Order"
-                  topSlots={previewBattlefieldSlots(simPreview.opponentTeam, simPreview.format, simPreviewOpponentOrder, 'Hidden until the live reveal starts.')}
-                  bottomSlots={previewBattlefieldSlots(team, simPreview.format, simPreviewPlayerOrder, 'Hidden until the live reveal starts.')}
-                  topBench={previewBattlefieldBench(simPreview.opponentTeam, simPreview.format, simPreviewOpponentOrder, 'Reserved backline hidden during preview.')}
-                  bottomBench={previewBattlefieldBench(team, simPreview.format, simPreviewPlayerOrder, 'Reserved backline hidden during preview.')}
-                  conditionSections={simPreviewFieldSections}
-                  expansive
-                />
+                {state.profile.lysanderCutscenesEnabled ? (
+                  <LysanderPreviewStage
+                    line={simPreviewLysanderLine ?? lysanderIntroLines[0] ?? "Let's see if you can pierce the veil."}
+                    countdown={simCountdown}
+                    format={simPreview.format}
+                  />
+                ) : (
+                  <BattlefieldArena
+                    title="Preview Battle Camera"
+                    subtitle="Preview lanes stay species-hidden on the battlefield now, so the stage only shows sealed Pokeballs until the live send-out reveal sequence begins."
+                    backdrop={simBackdrop}
+                    topLabel="Opponent Preview"
+                    bottomLabel="Your Locked Order"
+                    topSlots={previewBattlefieldSlots(simPreview.opponentTeam, simPreview.format, simPreviewOpponentOrder, 'Hidden until the live reveal starts.')}
+                    bottomSlots={previewBattlefieldSlots(team, simPreview.format, simPreviewPlayerOrder, 'Hidden until the live reveal starts.')}
+                    topBench={previewBattlefieldBench(simPreview.opponentTeam, simPreview.format, simPreviewOpponentOrder, 'Reserved backline hidden during preview.')}
+                    bottomBench={previewBattlefieldBench(team, simPreview.format, simPreviewPlayerOrder, 'Reserved backline hidden during preview.')}
+                    conditionSections={simPreviewFieldSections}
+                    expansive
+                  />
+                )}
               </div>
             </section>
           ) : null}
@@ -8156,10 +8165,95 @@ function LysanderSceneOverlay({ scene }: { scene: LysanderCutsceneState }) {
   return (
     <div className={`lysander-scene-overlay lysander-scene-overlay-${scene.variant}`}>
       <div className="lysander-scene-card">
-        <img src={scene.image} alt={scene.title} className="lysander-scene-image" />
+        {scene.variant === 'intro'
+          ? <img src={scene.image} alt={scene.title} className="lysander-scene-image" />
+          : <TransparentBackdropImage src={scene.image} alt={scene.title} className="lysander-scene-image" />}
         <div className="lysander-scene-bubble">
           <strong>{scene.title}</strong>
           <span>{scene.line}</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function TransparentBackdropImage({ src, alt, className }: { src: string; alt: string; className: string }) {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) {
+      return;
+    }
+
+    let cancelled = false;
+    const image = new Image();
+    image.decoding = 'async';
+    image.onload = () => {
+      if (cancelled || !canvasRef.current) {
+        return;
+      }
+
+      const nextCanvas = canvasRef.current;
+      nextCanvas.width = image.naturalWidth;
+      nextCanvas.height = image.naturalHeight;
+      const context = nextCanvas.getContext('2d', { willReadFrequently: true });
+      if (!context) {
+        return;
+      }
+
+      context.clearRect(0, 0, nextCanvas.width, nextCanvas.height);
+      context.drawImage(image, 0, 0);
+      const imageData = context.getImageData(0, 0, nextCanvas.width, nextCanvas.height);
+      const { data } = imageData;
+      for (let index = 0; index < data.length; index += 4) {
+        const red = data[index] ?? 0;
+        const green = data[index + 1] ?? 0;
+        const blue = data[index + 2] ?? 0;
+        const alpha = data[index + 3] ?? 0;
+        const brightness = (red + green + blue) / 3;
+        const spread = Math.max(red, green, blue) - Math.min(red, green, blue);
+        if (brightness > 226 && spread < 32) {
+          const fade = brightness >= 250 ? 0 : Math.max(0, 1 - ((brightness - 226) / 24));
+          data[index + 3] = Math.max(0, Math.min(255, Math.round(alpha * fade)));
+        }
+      }
+      context.putImageData(imageData, 0, 0);
+    };
+    image.src = src;
+
+    return () => {
+      cancelled = true;
+    };
+  }, [src]);
+
+  return <canvas ref={canvasRef} role="img" aria-label={alt} className={className} />;
+}
+
+function LysanderPreviewStage({
+  line,
+  countdown,
+  format,
+}: {
+  line: string;
+  countdown: number;
+  format: BattleFormat;
+}) {
+  return (
+    <div className="lysander-preview-stage">
+      <div className="lysander-preview-card">
+        <div className="lysander-preview-meta">
+          <strong>Lysander Awaits</strong>
+          <span>{format} preview live. Lock your four before the arena opens.</span>
+          <div className="lysander-preview-pills">
+            <span className="battlefield-atmosphere-pill">Preview Clock {countdown}s</span>
+            <span className="battlefield-atmosphere-pill battlefield-atmosphere-pill-terrain">Cutscene Intro Active</span>
+          </div>
+        </div>
+        <img src={LYSANDER_ART.intro} alt="Lysander pre-battle scene" className="lysander-preview-image" />
+        <div className="lysander-preview-bubble">
+          <strong>Lysander</strong>
+          <span>{line}</span>
         </div>
       </div>
     </div>
@@ -8517,7 +8611,7 @@ function BattlefieldArena({
                 ) : null}
                 {backgroundCharacterSrc ? (
                   <div className="battlefield-background-character" aria-hidden="true">
-                    <img src={backgroundCharacterSrc} alt={backgroundCharacterAlt} className="battlefield-background-character-image" />
+                    <TransparentBackdropImage src={backgroundCharacterSrc} alt={backgroundCharacterAlt} className="battlefield-background-character-image" />
                   </div>
                 ) : null}
                 {event ? (
